@@ -419,7 +419,7 @@ async def get_status(job_id: str):
 from editor import VideoEditor
 from subtitles import generate_srt, burn_subtitles, generate_srt_from_video
 from hooks import add_hook_to_video
-from translate import translate_video, get_supported_languages
+#from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
 
 class EditRequest(BaseModel):
@@ -945,6 +945,8 @@ async def add_hook(req: HookRequest):
         "new_video_url": f"/videos/{req.job_id}/{output_filename}"
     }
 
+# --- Translation (subtitles-only, keep original voice) ---
+
 class TranslateRequest(BaseModel):
     job_id: str
     clip_index: int
@@ -952,9 +954,329 @@ class TranslateRequest(BaseModel):
     source_language: Optional[str] = None
     input_filename: Optional[str] = None
 
+    # Subtitle style options (same spirit as SubtitleRequest)
+    position: str = "bottom"  # top, middle, bottom
+    font_size: int = 16
+    font_name: str = "Verdana"
+    font_color: str = "#FFFFFF"
+    border_color: str = "#000000"
+    border_width: int = 2
+    bg_color: str = "#000000"
+    bg_opacity: float = 0.0
+
+
+def _srt_timestamp(seconds: float) -> str:
+    ms = int(round(seconds * 1000))
+    h = ms // 3600000
+    ms %= 3600000
+    m = ms // 60000
+    ms %= 60000
+    s = ms // 1000
+    ms %= 1000
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _normalize_lang(lang: Optional[str]) -> str:
+    if not lang:
+        return ""
+    l = lang.strip().lower()
+    mapping = {
+        "en-us": "en",
+        "en-gb": "en",
+        "fr-fr": "fr",
+        "es-es": "es",
+        "pt-br": "pt",
+    }
+    return mapping.get(l, l)
+
+
+def _segment_to_text(segment: Dict) -> str:
+    words = segment.get("words") or []
+    if words:
+        parts = []
+        for w in words:
+            t = (w.get("word") or "").strip()
+            if t:
+                parts.append(t)
+        txt = " ".join(parts).strip()
+        if txt:
+            return txt
+    return (segment.get("text") or "").strip()
+
+
+def _load_clip_segments_from_metadata(data: Dict, clip_index: int) -> List[Dict]:
+    transcript = data.get("transcript") or {}
+    all_segments = transcript.get("segments") or []
+    shorts = data.get("shorts") or []
+    if clip_index >= len(shorts):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip = shorts[clip_index]
+    clip_start = float(clip.get("start", 0))
+    clip_end = float(clip.get("end", 0))
+
+    selected = []
+    for seg in all_segments:
+        s = float(seg.get("start", 0))
+        e = float(seg.get("end", 0))
+        if e > clip_start and s < clip_end:
+            # clip-relative timing
+            rel_start = max(0.0, s - clip_start)
+            rel_end = max(rel_start, e - clip_start)
+            text = _segment_to_text(seg)
+            if text:
+                selected.append({
+                    "start": rel_start,
+                    "end": rel_end,
+                    "text": text
+                })
+    return selected
+
+
+def _translate_text_openai(text: str, source_lang: str, target_lang: str) -> str:
+    from openai import OpenAI
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    model = os.environ.get("OPENAI_TRANSLATE_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+    if not api_key or api_key == "your_openai_key":
+        raise RuntimeError("OPENAI_API_KEY missing or placeholder")
+
+    client = OpenAI(api_key=api_key)
+    system = (
+        "You are a professional subtitle translator. "
+        "Translate naturally, keep meaning, keep short subtitle style, "
+        "do not add commentary, return only translated text."
+    )
+    user = (
+        f"Source language: {source_lang or 'auto'}\n"
+        f"Target language: {target_lang}\n"
+        f"Text:\n{text}"
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.2,
+        max_tokens=600
+    )
+    out = (resp.choices[0].message.content or "").strip()
+    if not out:
+        raise RuntimeError("OpenAI returned empty translation")
+    return out
+
+
+def _translate_text_gemini(text: str, source_lang: str, target_lang: str) -> str:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    model = os.environ.get("GEMINI_TRANSLATE_MODEL", os.environ.get("GEMINI_MODEL"))
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    from google import genai
+    client = genai.Client(api_key=api_key)
+
+    prompt = (
+        "You are a professional subtitle translator.\n"
+        "Translate naturally, keep meaning, keep short subtitle style,\n"
+        "do not add commentary, return only translated text.\n\n"
+        f"Source language: {source_lang or 'auto'}\n"
+        f"Target language: {target_lang}\n"
+        "Text:\n"
+        f"{text}"
+    )
+
+    resp = client.models.generate_content(
+        model=model,
+        contents=prompt
+    )
+    out = (resp.text or "").strip()
+    if not out:
+        raise RuntimeError("Gemini returned empty translation")
+    return out
+
+
+def _translate_segments_with_fallback(segments: List[Dict], source_lang: str, target_lang: str) -> List[Dict]:
+    translated = []
+    for seg in segments:
+        src_text = seg["text"]
+        try:
+            # Primary: OpenAI
+            dst = _translate_text_openai(src_text, source_lang, target_lang)
+            provider = "openai"
+        except Exception as e_openai:
+            print(f"⚠️ OpenAI translation failed, fallback Gemini. Reason: {e_openai}")
+            # Fallback: Gemini
+            dst = _translate_text_gemini(src_text, source_lang, target_lang)
+            provider = "gemini"
+
+        translated.append({
+            "start": seg["start"],
+            "end": seg["end"],
+            "text": dst,
+            "provider": provider,
+        })
+    return translated
+
+
+def _write_translated_srt(segments: List[Dict], srt_path: str) -> bool:
+    if not segments:
+        return False
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for i, seg in enumerate(segments, start=1):
+            f.write(f"{i}\n")
+            f.write(f"{_srt_timestamp(seg['start'])} --> {_srt_timestamp(seg['end'])}\n")
+            f.write(f"{seg['text'].strip()}\n\n")
+    return True
+
+
 @app.get("/api/translate/languages")
 async def get_languages():
-    """Return supported languages for translation."""
+    """
+    Return supported languages.
+    Kept for frontend compatibility.
+    """
+    # You can expand this list if needed.
+    return {
+        "languages": [
+            {"code": "en", "name": "English"},
+            {"code": "fr", "name": "French"},
+            {"code": "es", "name": "Spanish"},
+            {"code": "de", "name": "German"},
+            {"code": "it", "name": "Italian"},
+            {"code": "pt", "name": "Portuguese"},
+            {"code": "nl", "name": "Dutch"},
+            {"code": "ar", "name": "Arabic"},
+            {"code": "hi", "name": "Hindi"},
+            {"code": "ja", "name": "Japanese"},
+            {"code": "ko", "name": "Korean"},
+            {"code": "zh", "name": "Chinese"},
+            {"code": "ru", "name": "Russian"},
+            {"code": "tr", "name": "Turkish"},
+            {"code": "id", "name": "Indonesian"},
+        ]
+    }
+
+
+@app.post("/api/translate")
+async def translate_clip(req: TranslateRequest):
+    """
+    Translate subtitles only (OpenAI first, Gemini fallback),
+    keep original voice/audio track unchanged.
+    """
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = jobs[req.job_id]
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    with open(json_files[0], "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    clips = data.get("shorts", [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_data = clips[req.clip_index]
+
+    # Resolve input video path
+    if req.input_filename:
+        filename = os.path.basename(req.input_filename)
+    else:
+        filename = clip_data.get("video_url", "").split("/")[-1]
+        if not filename:
+            base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
+            filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
+
+    input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+    # Load clip transcript segments from existing metadata transcript (no re-transcription)
+    source_lang = _normalize_lang(req.source_language) or _normalize_lang((data.get("transcript") or {}).get("language"))
+    target_lang = _normalize_lang(req.target_language)
+    if not target_lang:
+        raise HTTPException(status_code=400, detail="target_language is required")
+
+    source_segments = _load_clip_segments_from_metadata(data, req.clip_index)
+    if not source_segments:
+        raise HTTPException(status_code=400, detail="No transcript segments found for this clip range")
+
+    try:
+        # 1) Translate text segments (OpenAI primary, Gemini fallback)
+        def run_translate_segments():
+            return _translate_segments_with_fallback(source_segments, source_lang, target_lang)
+
+        loop = asyncio.get_event_loop()
+        translated_segments = await loop.run_in_executor(None, run_translate_segments)
+
+        # 2) Write translated SRT
+        base, ext = os.path.splitext(filename)
+        srt_filename = f"translated_subs_{target_lang}_{req.clip_index}_{int(time.time())}.srt"
+        srt_path = os.path.join(output_dir, srt_filename)
+
+        if not _write_translated_srt(translated_segments, srt_path):
+            raise HTTPException(status_code=500, detail="Failed to write translated SRT")
+
+        # 3) Burn subtitles on original video (audio unchanged)
+        output_filename = f"translated_{target_lang}_{base}{ext}"
+        output_path = os.path.join(output_dir, output_filename)
+
+        def run_burn():
+            burn_subtitles(
+                input_path,
+                srt_path,
+                output_path,
+                alignment=req.position,
+                fontsize=req.font_size,
+                font_name=req.font_name,
+                font_color=req.font_color,
+                border_color=req.border_color,
+                border_width=req.border_width,
+                bg_color=req.bg_color,
+                bg_opacity=req.bg_opacity
+            )
+
+        await loop.run_in_executor(None, run_burn)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Translation(subtitles-only) Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Update in-memory job result
+    if req.clip_index < len(job.get("result", {}).get("clips", [])):
+        job["result"]["clips"][req.clip_index]["video_url"] = f"/videos/{req.job_id}/{output_filename}"
+
+    # Persist metadata
+    try:
+        if req.clip_index < len(clips):
+            clips[req.clip_index]["video_url"] = f"/videos/{req.job_id}/{output_filename}"
+            clips[req.clip_index]["translated_subtitles_language"] = target_lang
+            data["shorts"] = clips
+            with open(json_files[0], "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+                print(f"✅ Metadata updated with translated-subtitle video for clip {req.clip_index}")
+    except Exception as e:
+        print(f"⚠️ Failed to update metadata.json: {e}")
+
+    return {
+        "success": True,
+        "mode": "subtitles_only",
+        "new_video_url": f"/videos/{req.job_id}/{output_filename}",
+        "srt_url": f"/videos/{req.job_id}/{srt_filename}",
+        "source_language": source_lang or "auto",
+        "target_language": target_lang,
+    }
+
+""" @app.get("/api/translate/languages")
+async def get_languages():
+     """"""Return supported languages for translation. """"""
     return {"languages": get_supported_languages()}
 
 @app.post("/api/translate")
@@ -962,7 +1284,7 @@ async def translate_clip(
     req: TranslateRequest,
     x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key")
 ):
-    """Translate a video clip to a different language using ElevenLabs dubbing."""
+     """"""Translate a video clip to a different language using ElevenLabs dubbing. """"""
     if not x_elevenlabs_key:
         raise HTTPException(status_code=400, detail="Missing X-ElevenLabs-Key header")
 
@@ -1039,7 +1361,7 @@ async def translate_clip(
     return {
         "success": True,
         "new_video_url": f"/videos/{req.job_id}/{output_filename}"
-    }
+    } """
 
 class SocialPostRequest(BaseModel):
     job_id: str

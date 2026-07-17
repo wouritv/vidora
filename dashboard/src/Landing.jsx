@@ -76,7 +76,7 @@ export default function Landing({ onLaunchApp }) {
     },
     {
       icon: Languages,
-      title: "AI Voice Dubbing in 30+ Languages",
+      title: "AI Translate in 30+ Languages",
       description: "ElevenLabs AI integration translates and dubs your video audio while preserving the original speaker's voice characteristics. According to CSA Research, 76% of consumers prefer content in their native language — dubbing unlocks global audiences."
     },
     {

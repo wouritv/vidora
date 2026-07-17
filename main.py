@@ -446,6 +446,76 @@ def sanitize_filename(filename):
     return filename[:100]
 
 
+def _looks_like_netscape_cookies(content):
+    """Best-effort validation for yt-dlp cookiefile format."""
+    if not content:
+        return False
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    if lines[0].lower().startswith('# netscape http cookie file'):
+        return True
+
+    for line in lines:
+        if line.startswith('#'):
+            continue
+        # Netscape cookie rows are tab-separated with at least 7 fields.
+        if len(line.split('\t')) >= 7:
+            return True
+
+    return False
+
+
+def _resolve_cookiefile_from_env():
+    """Resolve YOUTUBE_COOKIES as either an existing file path or inline cookie content."""
+    cookies_env = os.environ.get("YOUTUBE_COOKIES")
+    if not cookies_env:
+        print("⚠️ YOUTUBE_COOKIES env var not found.")
+        return None
+
+    cookies_env = cookies_env.strip()
+    if not cookies_env or cookies_env == '...':
+        print("⚠️ YOUTUBE_COOKIES is empty/placeholder. Continuing without cookies.")
+        return None
+
+    # Support path mode to avoid multiline .env parsing issues.
+    if os.path.isfile(cookies_env):
+        try:
+            with open(cookies_env, 'r', encoding='utf-8', errors='ignore') as f:
+                file_content = f.read()
+            if not _looks_like_netscape_cookies(file_content):
+                print(f"⚠️ YOUTUBE_COOKIES path exists but is not Netscape format: {cookies_env}")
+                return None
+            print(f"🍪 Using YouTube cookies file from path: {cookies_env}")
+            return cookies_env
+        except Exception as e:
+            print(f"⚠️ Failed to read YOUTUBE_COOKIES file '{cookies_env}': {e}")
+            return None
+
+    # Inline mode: decode escaped newlines/tabs from .env style strings.
+    normalized = cookies_env.replace('\\n', '\n').replace('\\t', '\t').strip()
+
+    # Add header when user pasted only cookie rows.
+    if 'Netscape HTTP Cookie File' not in normalized and '\t' in normalized:
+        normalized = "# Netscape HTTP Cookie File\n" + normalized
+
+    if not _looks_like_netscape_cookies(normalized):
+        print("⚠️ YOUTUBE_COOKIES is not valid Netscape cookie content. Continuing without cookies.")
+        return None
+
+    cookies_path = '/app/cookies.txt'
+    try:
+        with open(cookies_path, 'w', encoding='utf-8') as f:
+            f.write(normalized)
+        print(f"🍪 Wrote cookies file for yt-dlp: {cookies_path} ({os.path.getsize(cookies_path)} bytes)")
+        return cookies_path
+    except Exception as e:
+        print(f"⚠️ Failed to write cookies file: {e}")
+        return None
+
+
 def download_youtube_video(url, output_dir="."):
     """
     Downloads a YouTube video using yt-dlp.
@@ -455,25 +525,8 @@ def download_youtube_video(url, output_dir="."):
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
 
-    cookies_path = '/app/cookies.txt'
-    cookies_env = os.environ.get("YOUTUBE_COOKIES")
-    if cookies_env:
-        print("🍪 Found YOUTUBE_COOKIES env var, creating cookies file inside container...")
-        try:
-            with open(cookies_path, 'w') as f:
-                f.write(cookies_env)
-            if os.path.exists(cookies_path):
-                 print(f"   Debug: Cookies file created. Size: {os.path.getsize(cookies_path)} bytes")
-                 with open(cookies_path, 'r') as f:
-                     content = f.read(100)
-                     print(f"   Debug: First 100 chars of cookie file: {content}")
-        except Exception as e:
-            print(f"⚠️ Failed to write cookies file: {e}")
-            cookies_path = None
-    else:
-        cookies_path = None
-        print("⚠️ YOUTUBE_COOKIES env var not found.")
-    
+    cookies_path = _resolve_cookiefile_from_env()
+
     # Common yt-dlp options to work around YouTube bot detection.
     # extractor_args tries multiple player clients in order; tv_embed / android
     # avoid the OAuth/PO-token checks that block server IPs.
@@ -553,7 +606,14 @@ Technical Details: {str(e)}
     
     ydl_opts = {
         **_COMMON_YDL_OPTS,
-        'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[ext=mp4]/best',
+        'format': (
+            'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
+            'bestvideo[vcodec^=avc1]+bestaudio/'
+            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
+            'bestvideo+bestaudio/'
+            'best[ext=mp4]/'
+            'best'
+        ),
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
         'overwrites': True,
@@ -747,7 +807,7 @@ def process_video_to_vertical(input_video, final_output_video):
     
     return True
 
-def transcribe_video(video_path):
+""" def transcribe_video(video_path):
     print("🎙️  Transcribing video with Faster-Whisper (CPU Optimized)...")
     from faster_whisper import WhisperModel
     
@@ -789,121 +849,483 @@ def transcribe_video(video_path):
         'text': full_text.strip(),
         'segments': transcript_segments,
         'language': info.language
+    } """
+
+def _build_segments_from_word_list(words, language="unknown"):
+    """
+    Convert a flat list of word dicts into whisper-like segments.
+    Expected word item shape: {'word': str, 'start': float, 'end': float, 'probability': float}
+    """
+    transcript_segments = []
+    full_text_parts = []
+
+    current_words = []
+    seg_start = None
+    seg_end = None
+
+    for w in words:
+        w_text = (w.get("word") or "").strip()
+        w_start = float(w.get("start", 0.0))
+        w_end = float(w.get("end", w_start))
+
+        if not w_text:
+            continue
+
+        if seg_start is None:
+            seg_start = w_start
+        seg_end = w_end
+
+        current_words.append({
+            "word": w_text,
+            "start": w_start,
+            "end": w_end,
+            "probability": float(w.get("probability", 1.0))
+        })
+
+        full_text_parts.append(w_text)
+
+        # Sentence-ish split for compatibility
+        if w_text.endswith((".", "!", "?")):
+            seg_text = " ".join(item["word"] for item in current_words).strip()
+            transcript_segments.append({
+                "text": seg_text,
+                "start": seg_start,
+                "end": seg_end,
+                "words": current_words
+            })
+            print(f"   [{seg_start:.2f}s -> {seg_end:.2f}s] {seg_text}")
+            current_words = []
+            seg_start = None
+            seg_end = None
+
+    if current_words:
+        seg_text = " ".join(item["word"] for item in current_words).strip()
+        s = seg_start if seg_start is not None else 0.0
+        e = seg_end if seg_end is not None else s
+        transcript_segments.append({
+            "text": seg_text,
+            "start": s,
+            "end": e,
+            "words": current_words
+        })
+        print(f"   [{s:.2f}s -> {e:.2f}s] {seg_text}")
+
+    full_text = " ".join(full_text_parts).strip()
+    return {
+        "text": full_text,
+        "segments": transcript_segments,
+        "language": language or "unknown"
     }
 
-def get_viral_clips(transcript_result, video_duration):
-    print("🤖  Analyzing with Gemini...")
-    
-    api_key = os.getenv("GEMINI_API_KEY")
+
+def _transcribe_with_assemblyai(video_path):
+    print("🛰️  Transcribing with AssemblyAI (remote API)...")
+
+    api_key = os.getenv("ASSEMBLYAI_API_KEY")
     if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
-        return None
+        raise RuntimeError("ASSEMBLYAI_API_KEY is missing.")
 
+    import assemblyai as aai
 
-    client = genai.Client(api_key=api_key)
-    
-    # We use gemini-2.5-flash as requested.
-    model_name = 'gemini-2.5-flash' 
-    
-    print(f"🤖  Initializing Gemini with model: {model_name}")
+    aai.settings.api_key = api_key
 
-    # Extract words
-    words = []
-    for segment in transcript_result['segments']:
-        for word in segment.get('words', []):
-            words.append({
-                'w': word['word'],
-                's': word['start'],
-                'e': word['end']
-            })
+    timeout_seconds = int(os.getenv("ASSEMBLYAI_TIMEOUT_SECONDS", "600"))
 
-    prompt = GEMINI_PROMPT_TEMPLATE.format(
-        video_duration=video_duration,
-        transcript_text=json.dumps(transcript_result['text']),
-        words_json=json.dumps(words)
+    # Use new speech_models parameter (list-based)
+    config = aai.TranscriptionConfig(
+        punctuate=True,
+        format_text=True,
+        speech_models=["universal-3-5-pro", "universal-2"]
     )
 
+    transcriber = aai.Transcriber(config=config)
+
+    start_time = time.time()
+    transcript = transcriber.transcribe(video_path)
+    elapsed = time.time() - start_time
+
+    if transcript.status == aai.TranscriptStatus.error:
+        raise RuntimeError(f"AssemblyAI transcription failed: {transcript.error}")
+
+    print(f"✅ AssemblyAI done in {elapsed:.2f}s")
+    if elapsed > timeout_seconds:
+        print(f"⚠️ Processing time exceeded hint ({timeout_seconds}s), but completed successfully.")
+
+    lang = transcript.language_code or os.getenv("ASSEMBLYAI_DEFAULT_LANGUAGE", "unknown")
+    print(f"   Detected language: {lang}")
+
+    words = []
+    for w in (transcript.words or []):
+        words.append({
+            "word": (w.text or "").strip(),
+            "start": float(w.start or 0) / 1000.0,  # ms -> s
+            "end": float(w.end or 0) / 1000.0,      # ms -> s
+            "probability": 1.0
+        })
+
+    result = _build_segments_from_word_list(words, language=lang)
+    result["meta"] = {
+        "provider": "assemblyai",
+        "audio_seconds": result["segments"][-1]["end"] if result["segments"] else 0.0,
+    }
+    return result
+
+
+def _transcribe_with_faster_whisper(video_path):
+    print("🎙️  Transcribing with Faster-Whisper (local fallback)...")
+
+    from faster_whisper import WhisperModel
+
+    model_size = os.getenv("WHISPER_MODEL_SIZE", "base")
+    device = os.getenv("WHISPER_DEVICE", "cpu")
+    compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+    segments, info = model.transcribe(
+        video_path,
+        word_timestamps=True,
+        beam_size=1
+    )
+
+    print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
+
+    transcript_segments = []
+    full_text = ""
+
+    for segment in segments:
+        print(f"   [{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}")
+
+        seg_dict = {
+            "text": segment.text,
+            "start": segment.start,
+            "end": segment.end,
+            "words": []
+        }
+
+        if segment.words:
+            for word in segment.words:
+                seg_dict["words"].append({
+                    "word": word.word,
+                    "start": word.start,
+                    "end": word.end,
+                    "probability": word.probability
+                })
+
+        transcript_segments.append(seg_dict)
+        full_text += segment.text + " "
+
+    return {
+        "text": full_text.strip(),
+        "segments": transcript_segments,
+        "language": info.language,
+        "meta": {
+            "provider": "faster_whisper",
+            "audio_seconds": transcript_segments[-1]["end"] if transcript_segments else 0.0,
+        },
+    }
+
+
+def transcribe_video(video_path):
+    """
+    Hybrid transcription entrypoint.
+    TRANSCRIBER_PROVIDER: assemblyai | faster_whisper | hybrid
+    TRANSCRIBER_FALLBACK: faster_whisper | none
+    """
+    provider = os.getenv("TRANSCRIBER_PROVIDER", "hybrid").strip().lower()
+    fallback = os.getenv("TRANSCRIBER_FALLBACK", "faster_whisper").strip().lower()
+
+    print(f"🎛️  Transcriber provider: {provider}")
+
+    if provider == "assemblyai":
+        return _transcribe_with_assemblyai(video_path)
+
+    if provider == "faster_whisper":
+        return _transcribe_with_faster_whisper(video_path)
+
+    # Hybrid: try AssemblyAI, fallback local if enabled
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt
-        )
-        
-        # --- Cost Calculation ---
-        try:
-            usage = response.usage_metadata
-            if usage:
-                # Gemini 2.5 Flash Pricing (Dec 2025)
-                # Input: $0.10 per 1M tokens
-                # Output: $0.40 per 1M tokens
-                
-                input_price_per_million = 0.10
-                output_price_per_million = 0.40
-                
-                prompt_tokens = usage.prompt_token_count
-                output_tokens = usage.candidates_token_count
-                
-                input_cost = (prompt_tokens / 1_000_000) * input_price_per_million
-                output_cost = (output_tokens / 1_000_000) * output_price_per_million
-                total_cost = input_cost + output_cost
-                
-                cost_analysis = {
-                    "input_tokens": prompt_tokens,
-                    "output_tokens": output_tokens,
-                    "input_cost": input_cost,
-                    "output_cost": output_cost,
-                    "total_cost": total_cost,
-                    "model": model_name
-                }
-
-                print(f"💰 Token Usage ({model_name}):")
-                print(f"   - Input Tokens: {prompt_tokens} (${input_cost:.6f})")
-                print(f"   - Output Tokens: {output_tokens} (${output_cost:.6f})")
-                print(f"   - Total Estimated Cost: ${total_cost:.6f}")
-                
-        except Exception as e:
-            print(f"⚠️ Could not calculate cost: {e}")
-            cost_analysis = None
-        # ------------------------
-
-        # Clean response if it contains markdown code blocks
-        text = response.text
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-        
-        result_json = json.loads(text)
-        if cost_analysis:
-            result_json['cost_analysis'] = cost_analysis
-            
-        return result_json
+        return _transcribe_with_assemblyai(video_path)
     except Exception as e:
-        print(f"❌ Gemini Error: {e}")
-        return None
+        print(f"⚠️ AssemblyAI failed: {e}")
+
+        if fallback == "faster_whisper":
+            print("↩️ Falling back to Faster-Whisper...")
+            return _transcribe_with_faster_whisper(video_path)
+
+        raise RuntimeError(f"Transcription failed and fallback disabled. Root cause: {e}")
+
+def _extract_error_message(exc):
+    """Return a lowercase best-effort error string for provider routing."""
+    try:
+        return str(exc).lower()
+    except Exception:
+        return ""
+
+
+def _is_quota_or_rate_limit_error(exc):
+    msg = _extract_error_message(exc)
+    return (
+        "resource_exhausted" in msg
+        or "quota exceeded" in msg
+        or "rate limit" in msg
+        or "429" in msg
+        or "limit: 0" in msg
+        or "too many requests" in msg
+    )
+
+
+def _strip_json_markdown(text):
+    if not text:
+        return text
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    return text.strip()
+
+
+def _build_words_payload(transcript_result):
+    words = []
+    for segment in transcript_result.get("segments", []):
+        for word in segment.get("words", []):
+            words.append({
+                "w": word.get("word", ""),
+                "s": word.get("start", 0.0),
+                "e": word.get("end", 0.0),
+            })
+    return words
+
+
+def _build_analysis_prompt(transcript_result, video_duration):
+    words = _build_words_payload(transcript_result)
+    return GEMINI_PROMPT_TEMPLATE.format(
+        video_duration=video_duration,
+        transcript_text=json.dumps(transcript_result.get("text", "")),
+        words_json=json.dumps(words),
+    )
+
+
+def _get_viral_clips_with_gemini(transcript_result, video_duration):
+    """Analyze with Google Gemini."""
+    print("🤖 Gemini Analysis...")
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    model_name = os.getenv("GEMINI_MODEL")
+
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not found.")
+
+    from google import genai
+    client = genai.Client(api_key=api_key)
+
+    print(f"   Model: {model_name}")
+
+    prompt = _build_analysis_prompt(transcript_result, video_duration)
+
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt
+    )
+
+    cost_analysis = None
+    try:
+        usage = response.usage_metadata
+        if usage:
+            # Keep prices configurable via env to avoid stale hardcoded values.
+            input_price_per_million = float(os.getenv("GEMINI_INPUT_PRICE_PER_MILLION", "0.075"))
+            output_price_per_million = float(os.getenv("GEMINI_OUTPUT_PRICE_PER_MILLION", "0.30"))
+
+            prompt_tokens = usage.prompt_token_count or 0
+            output_tokens = usage.candidates_token_count or 0
+
+            input_cost = (prompt_tokens / 1_000_000) * input_price_per_million
+            output_cost = (output_tokens / 1_000_000) * output_price_per_million
+            total_cost = input_cost + output_cost
+
+            cost_analysis = {
+                "input_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "input_cost": input_cost,
+                "output_cost": output_cost,
+                "total_cost": total_cost,
+                "model": model_name,
+                "provider": "gemini",
+            }
+
+            print(f"💰 Token Usage ({model_name}):")
+            print(f"   - Input: {prompt_tokens} (${input_cost:.6f})")
+            print(f"   - Output: {output_tokens} (${output_cost:.6f})")
+            print(f"   - Total: ${total_cost:.6f}")
+    except Exception as e:
+        print(f"⚠️ Could not calculate Gemini cost: {e}")
+
+    text = _strip_json_markdown(response.text)
+    result_json = json.loads(text)
+
+    if cost_analysis:
+        result_json["cost_analysis"] = cost_analysis
+
+    return result_json
+
+
+def _get_viral_clips_with_openai(transcript_result, video_duration):
+    """Analyze with OpenAI."""
+    print("🤖 OpenAI Analysis...")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    if not api_key or api_key == "your_openai_key":
+        raise RuntimeError("OPENAI_API_KEY not found or still placeholder.")
+
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+
+    print(f"   Model: {model_name}")
+
+    prompt = _build_analysis_prompt(transcript_result, video_duration)
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": "You are a short-form video editing expert."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.7,
+        max_tokens=4000,
+    )
+
+    text = _strip_json_markdown(response.choices[0].message.content)
+    result_json = json.loads(text)
+
+    try:
+        usage = response.usage
+        # Keep prices configurable via env.
+        input_price_per_1k = float(os.getenv("OPENAI_INPUT_PRICE_PER_1K", "0.01"))
+        output_price_per_1k = float(os.getenv("OPENAI_OUTPUT_PRICE_PER_1K", "0.03"))
+
+        prompt_tokens = usage.prompt_tokens if usage else 0
+        completion_tokens = usage.completion_tokens if usage else 0
+
+        input_cost = prompt_tokens * input_price_per_1k / 1000.0
+        output_cost = completion_tokens * output_price_per_1k / 1000.0
+        total_cost = input_cost + output_cost
+
+        result_json["cost_analysis"] = {
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "input_cost": input_cost,
+            "output_cost": output_cost,
+            "total_cost": total_cost,
+            "model": model_name,
+            "provider": "openai",
+        }
+
+        print(f"💰 Token Usage ({model_name}):")
+        print(f"   - Input: {prompt_tokens} (${input_cost:.6f})")
+        print(f"   - Output: {completion_tokens} (${output_cost:.6f})")
+        print(f"   - Total: ${total_cost:.6f}")
+    except Exception as e:
+        print(f"⚠️ Could not calculate OpenAI cost: {e}")
+
+    return result_json
+
+
+def get_viral_clips(transcript_result, video_duration):
+    """
+    AI_PROVIDER:
+      - gemini
+      - openai
+      - hybrid
+    HYBRID behavior:
+      - OpenIA first
+      - fallback to Gemini when OpenIA fails (especially quota/rate-limit)
+    """
+    provider = os.getenv("AI_PROVIDER", "hybrid").strip().lower()
+    print(f"🎛️  AI Provider: {provider}")
+
+    if provider == "gemini":
+        return _get_viral_clips_with_gemini(transcript_result, video_duration)
+
+    if provider == "openai":
+        return _get_viral_clips_with_openai(transcript_result, video_duration)
+
+    # Hybrid mode
+    print("🔄 Hybrid mode: trying OpenIA first...")
+    try:
+        return _get_viral_clips_with_openai(transcript_result, video_duration)
+    except Exception as e:
+        print(f"⚠️ OpenIA failed: {e}")
+        if _is_quota_or_rate_limit_error(e):
+            print("↩️ OpenIA quota/rate-limit hit, falling back to OpenAI...")
+        else:
+            print("↩️ OpenIA failed, falling back to OpenAI...")
+
+        try:
+            return _get_viral_clips_with_gemini(transcript_result, video_duration)
+        except Exception as e2:
+            raise RuntimeError(f"Both AI providers failed. OpenIA: {e}; Gemini: {e2}")
+
+def _safe_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _build_external_costs(transcript, clips_data):
+    """Aggregate all external API costs for this job."""
+    meta = transcript.get("meta", {})
+    provider = meta.get("provider", "unknown")
+    audio_seconds = _safe_float(meta.get("audio_seconds", 0.0))
+
+    assembly_used = provider == "assemblyai"
+    price_per_hour = _safe_float(os.getenv("ASSEMBLYAI_PRICE_PER_HOUR_USD", "0"))
+    assembly_cost = (audio_seconds / 3600.0) * price_per_hour if assembly_used and price_per_hour > 0 else 0.0
+
+    ca = (clips_data or {}).get("cost_analysis") or {}
+    llm_cost_usd = _safe_float(ca.get("total_cost", 0.0))
+
+    return {
+        "assemblyai": {
+            "used": assembly_used,
+            "cost_usd": assembly_cost,
+            "meta": {"audio_seconds": audio_seconds, "price_per_hour_usd": price_per_hour},
+        },
+        "llm": {
+            "provider": ca.get("provider", "unknown"),
+            "model": ca.get("model", "unknown"),
+            "cost_usd": llm_cost_usd,
+            "meta": ca,
+        },
+        "total_usd": assembly_cost + llm_cost_usd,
+    }
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="AutoCrop-Vertical with Viral Clip Detection.")
-    
+
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument('-i', '--input', type=str, help="Path to the input video file.")
     input_group.add_argument('-u', '--url', type=str, help="YouTube URL to download and process.")
-    
+
     parser.add_argument('-o', '--output', type=str, help="Output directory or file (if processing whole video).")
     parser.add_argument('--keep-original', action='store_true', help="Keep the downloaded YouTube video.")
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
-    
+
     args = parser.parse_args()
 
     script_start_time = time.time()
-    
+
     def _ensure_dir(path: str) -> str:
         """Create directory if missing and return the same path."""
         if path:
             os.makedirs(path, exist_ok=True)
         return path
-    
+
     # 1. Get Input Video
     if args.url:
         # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
@@ -918,12 +1340,12 @@ if __name__ == '__main__':
                 output_dir = os.path.dirname(args.output) or "."
             else:
                 output_dir = "."
-        
+
         input_video, video_title = download_youtube_video(args.url, output_dir)
     else:
         input_video = args.input
         video_title = os.path.splitext(os.path.basename(input_video))[0]
-        
+
         if args.output and not args.skip_analysis:
             # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
             output_dir = _ensure_dir(args.output)
@@ -948,7 +1370,7 @@ if __name__ == '__main__':
     else:
         # 3. Transcribe
         transcript = transcribe_video(input_video)
-        
+
         # Get duration
         cap = cv2.VideoCapture(input_video)
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -958,14 +1380,21 @@ if __name__ == '__main__':
 
         # 4. Gemini Analysis
         clips_data = get_viral_clips(transcript, duration)
-        
+
         if not clips_data or 'shorts' not in clips_data:
             print("❌ Failed to identify clips. Converting whole video as fallback.")
             output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
             process_video_to_vertical(input_video, output_file)
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
-            
+            # Aggregate external costs
+            clips_data["external_costs"] = _build_external_costs(transcript, clips_data)
+            ec = clips_data["external_costs"]
+            print("💸 External Costs Summary:")
+            print(f"   - AssemblyAI : ${ec['assemblyai']['cost_usd']:.6f}")
+            print(f"   - LLM ({ec['llm']['provider']}/{ec['llm']['model']}): ${ec['llm']['cost_usd']:.6f}")
+            print(f"   - TOTAL      : ${ec['total_usd']:.6f}")
+
             # Save metadata
             clips_data['transcript'] = transcript # Save full transcript for subtitles
             metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
@@ -979,31 +1408,31 @@ if __name__ == '__main__':
                 end = clip['end']
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
                 print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
-                
+
                 # Cut clip
                 clip_filename = f"{video_title}_clip_{i+1}.mp4"
                 clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")
                 clip_final_path = os.path.join(output_dir, clip_filename)
-                
+
                 # ffmpeg cut
                 # Using re-encoding for precision as requested by strict seconds
                 cut_command = [
-                    'ffmpeg', '-y', 
-                    '-ss', str(start), 
-                    '-to', str(end), 
+                    'ffmpeg', '-y',
+                    '-ss', str(start),
+                    '-to', str(end),
                     '-i', input_video,
                     '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
                     '-c:a', 'aac',
                     clip_temp_path
                 ]
                 subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                
+
                 # Process vertical
                 success = process_video_to_vertical(clip_temp_path, clip_final_path)
-                
+
                 if success:
                     print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
-                
+
                 # Clean up temp cut
                 if os.path.exists(clip_temp_path):
                     os.remove(clip_temp_path)

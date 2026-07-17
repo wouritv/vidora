@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2 } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, ChevronDown, Check, Activity, PlusCircle, X, Terminal, Shield, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Users, Smartphone, ExternalLink, Copy, CheckCircle2 } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -10,6 +11,7 @@ import SaaShortsTab from './components/SaaShortsTab';
 import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import { getApiUrl } from './config';
+import { DASHBOARD_SIDEBAR_ITEMS, getWorkspacePath, isDashboardTab } from './lib/dashboard-nav';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -134,6 +136,7 @@ const pollJob = async (jobId) => {
 };
 
 function App() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
@@ -164,7 +167,10 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
+  const [activeTab, setActiveTab] = useState(() => {
+    const requestedTab = searchParams.get('tab');
+    return isDashboardTab(requestedTab) ? requestedTab : 'dashboard';
+  });
 
   const [sessionRecovered, setSessionRecovered] = useState(false);
   const [showScheduleWeek, setShowScheduleWeek] = useState(false);
@@ -183,6 +189,34 @@ function App() {
   const handleClipPause = () => {
     setIsSyncedPlaying(false);
   };
+
+  const handleTabChange = (nextTab) => {
+    setActiveTab(nextTab);
+  };
+
+  useEffect(() => {
+    const requestedTab = searchParams.get('tab');
+
+    if (!requestedTab && activeTab !== 'dashboard') {
+      return;
+    }
+
+    if (isDashboardTab(requestedTab) && requestedTab !== activeTab) {
+      setActiveTab(requestedTab);
+    }
+  }, [activeTab, searchParams]);
+
+  useEffect(() => {
+    const nextPath = getWorkspacePath(activeTab);
+    const nextUrl = new URL(nextPath, globalThis.location.origin);
+    const currentUrl = new URL(globalThis.location.href);
+
+    if (currentUrl.pathname === nextUrl.pathname && currentUrl.search === nextUrl.search) {
+      return;
+    }
+
+    setSearchParams(nextUrl.searchParams, { replace: true });
+  }, [activeTab, setSearchParams]);
 
   // Session Recovery: Restore on mount
   useEffect(() => {
@@ -381,61 +415,20 @@ function App() {
       </div>
 
       <nav className="flex-1 px-4 py-4 space-y-2">
-        <button
-          onClick={() => setActiveTab('dashboard')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'dashboard' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <LayoutDashboard size={20} />
-          <span className="font-medium hidden lg:block">Clip Generator</span>
-        </button>
+        {DASHBOARD_SIDEBAR_ITEMS.map((item) => {
+          const ItemIcon = item.icon;
 
-        <button
-          onClick={() => setActiveTab('saasshorts')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'saasshorts' ? 'bg-violet-500/10 text-violet-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <Sparkles size={20} />
-          <span className="font-medium hidden lg:block">AI Shorts</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('ai-agent')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'ai-agent' ? 'bg-emerald-500/10 text-emerald-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <Bot size={20} />
-          <span className="font-medium hidden lg:block">AI Agent</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('ugc-gallery')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'ugc-gallery' ? 'bg-violet-500/10 text-violet-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <LayoutGrid size={20} />
-          <span className="font-medium hidden lg:block">UGC Gallery</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('thumbnails')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'thumbnails' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <Image size={20} />
-          <span className="font-medium hidden lg:block">YouTube Studio</span>
-        </button>
-
-        {/* <button
-          onClick={() => setActiveTab('gallery')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'gallery' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <LayoutGrid size={20} />
-          <span className="font-medium hidden lg:block">Gallery</span>
-        </button> */}
-
-        <button
-          onClick={() => setActiveTab('settings')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'settings' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <Settings size={20} />
-          <span className="font-medium hidden lg:block">Settings</span>
-        </button>
+          return (
+            <button
+              key={item.key}
+              onClick={() => handleTabChange(item.key)}
+              className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === item.key ? item.activeClassName : item.inactiveClassName}`}
+            >
+              <ItemIcon size={20} />
+              <span className="font-medium hidden lg:block">{item.sidebarLabel}</span>
+            </button>
+          );
+        })}
       </nav>
 
       <div className="p-4 border-t border-white/5 space-y-2">

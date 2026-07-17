@@ -14,9 +14,11 @@
     "@remotion/media-utils": "^4.0.447",
     "@remotion/player": "^4.0.447",
     "@remotion/web-renderer": "^4.0.447",
+    "@supabase/supabase-js": "^2.110.7",
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-router-dom": "^7.18.1",
     "remotion": "^4.0.447",
     "zod": "^4.3.6"
   },

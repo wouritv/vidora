@@ -62,8 +62,9 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                         <Languages size={20} className="text-white" />
                     </div>
                     <div>
-                        <h3 className="text-lg font-bold text-white">Dub Voice</h3>
-                        <p className="text-xs text-zinc-500">AI voice translation by ElevenLabs</p>
+                        <h3 className="text-lg font-bold text-white">Translate</h3>
+                        <p className="text-xs text-zinc-500">Video translation by
+                        AI</p>
                     </div>
                 </div>
 

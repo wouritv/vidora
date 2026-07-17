@@ -1,39 +1,97 @@
-import { StrictMode, useState, useEffect } from 'react'
-import { createRoot } from 'react-dom/client'
-import './index.css'
-import App from './App.jsx'
-import Landing from './Landing.jsx'
-import Legal from './Legal.jsx'
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import "./index.css";
 
-function Root() {
-  const resolveView = () => {
-    const hash = window.location.hash;
-    if (hash === '#legal') return 'legal';
-    if (hash === '#app' || localStorage.getItem('openshorts_skip_landing') === '1') return 'app';
-    return 'landing';
-  };
+import { AuthProvider, useAuth } from "./state/AuthContext";
+import ProtectedRoute from "./components/ProtectedRoute";
+import Login from "./pages/Login";
+import Dashboard from "./pages/Dashboard";
+import DashboardTabPage from "./pages/DashboardTabPage";
+import ResetPassword from "./pages/ResetPassword";
+import UpdatePassword from "./pages/UpdatePassword";
 
-  const [view, setView] = useState(resolveView);
+function RootRedirect() {
+    const { isAuthenticated, loading } = useAuth();
 
-  useEffect(() => {
-    const handleHashChange = () => setView(resolveView());
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
-  }, []);
+    if (loading) {
+        return (
+            <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center">
+                Chargement...
+            </div>
+        );
+    }
 
-  const handleLaunchApp = () => {
-    localStorage.setItem('openshorts_skip_landing', '1');
-    window.location.hash = '#app';
-    setView('app');
-  };
-
-  if (view === 'legal') return <Legal />;
-  if (view === 'app') return <App />;
-  return <Landing onLaunchApp={handleLaunchApp} />;
+    return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
 }
 
-createRoot(document.getElementById('root')).render(
-  <StrictMode>
-    <Root />
-  </StrictMode>,
-)
+ReactDOM.createRoot(document.getElementById("root")).render(
+    <React.StrictMode>
+        <AuthProvider>
+            <BrowserRouter>
+                <Routes>
+                    <Route path="/" element={<RootRedirect />} />
+                    <Route path="/login" element={<Login />} />
+                    <Route path="/reset-password" element={<ResetPassword />} />
+                    <Route path="/update-password" element={<UpdatePassword />} />
+
+                    <Route
+                        path="/dashboard"
+                        element={
+                            <ProtectedRoute>
+                                <Dashboard />
+                            </ProtectedRoute>
+                        }
+                    />
+
+                    <Route
+                        path="/dashboard/ai-shorts"
+                        element={
+                            <ProtectedRoute>
+                                <DashboardTabPage tabKey="ai-shorts" />
+                            </ProtectedRoute>
+                        }
+                    />
+
+                    <Route
+                        path="/dashboard/ai-agent"
+                        element={
+                            <ProtectedRoute>
+                                <DashboardTabPage tabKey="ai-agent" />
+                            </ProtectedRoute>
+                        }
+                    />
+
+                    <Route
+                        path="/dashboard/ugc-gallery"
+                        element={
+                            <ProtectedRoute>
+                                <DashboardTabPage tabKey="ugc-gallery" />
+                            </ProtectedRoute>
+                        }
+                    />
+
+                    <Route
+                        path="/dashboard/youtube-studio"
+                        element={
+                            <ProtectedRoute>
+                                <DashboardTabPage tabKey="youtube-studio" />
+                            </ProtectedRoute>
+                        }
+                    />
+
+                    <Route
+                        path="/dashboard/settings"
+                        element={
+                            <ProtectedRoute>
+                                <DashboardTabPage tabKey="settings" />
+                            </ProtectedRoute>
+                        }
+                    />
+
+                    <Route path="*" element={<RootRedirect />} />
+                </Routes>
+            </BrowserRouter>
+        </AuthProvider>
+    </React.StrictMode>
+);

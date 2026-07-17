@@ -502,7 +502,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         className="col-span-1 py-2 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-green-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
-                        {isTranslating ? 'Translating...' : 'Dub Voice'}
+                        {isTranslating ? 'Translating...' : 'Translate'}
                     </button>
 
                     <button

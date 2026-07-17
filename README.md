@@ -184,7 +184,7 @@ cd OpenShorts
 
 ### 2. Configure (optional)
 ```bash
-cp .env.example .env
+cp .env .env
 # Edit .env with your AWS keys for S3 backup
 ```
 
