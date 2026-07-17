@@ -5,6 +5,7 @@ import "./index.css";
 
 import { AuthProvider, useAuth } from "./state/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
+import DashboardLayout from "./layouts/DashboardLayout";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import DashboardTabPage from "./pages/DashboardTabPage";
@@ -39,55 +40,18 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                         path="/dashboard"
                         element={
                             <ProtectedRoute>
-                                <Dashboard />
+                                <DashboardLayout />
                             </ProtectedRoute>
                         }
-                    />
-
-                    <Route
-                        path="/dashboard/ai-shorts"
-                        element={
-                            <ProtectedRoute>
-                                <DashboardTabPage tabKey="ai-shorts" />
-                            </ProtectedRoute>
-                        }
-                    />
-
-                    <Route
-                        path="/dashboard/ai-agent"
-                        element={
-                            <ProtectedRoute>
-                                <DashboardTabPage tabKey="ai-agent" />
-                            </ProtectedRoute>
-                        }
-                    />
-
-                    <Route
-                        path="/dashboard/ugc-gallery"
-                        element={
-                            <ProtectedRoute>
-                                <DashboardTabPage tabKey="ugc-gallery" />
-                            </ProtectedRoute>
-                        }
-                    />
-
-                    <Route
-                        path="/dashboard/youtube-studio"
-                        element={
-                            <ProtectedRoute>
-                                <DashboardTabPage tabKey="youtube-studio" />
-                            </ProtectedRoute>
-                        }
-                    />
-
-                    <Route
-                        path="/dashboard/settings"
-                        element={
-                            <ProtectedRoute>
-                                <DashboardTabPage tabKey="settings" />
-                            </ProtectedRoute>
-                        }
-                    />
+                    >
+                        <Route index element={<Dashboard />} />
+                        <Route path="clip-generator" element={<DashboardTabPage tabKey="clip-generator" />} />
+                        <Route path="ai-shorts" element={<DashboardTabPage tabKey="ai-shorts" />} />
+                        <Route path="ai-agent" element={<DashboardTabPage tabKey="ai-agent" />} />
+                        <Route path="ugc-gallery" element={<DashboardTabPage tabKey="ugc-gallery" />} />
+                        <Route path="youtube-studio" element={<DashboardTabPage tabKey="youtube-studio" />} />
+                        <Route path="settings" element={<DashboardTabPage tabKey="settings" />} />
+                    </Route>
 
                     <Route path="*" element={<RootRedirect />} />
                 </Routes>

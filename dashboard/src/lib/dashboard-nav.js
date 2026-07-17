@@ -13,10 +13,10 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         key: "dashboard",
         title: "Dashboard",
         sidebarLabel: "Dashboard",
-        description: "Hub principal pour acceder a tous les outils OpenShorts et a ton espace de production.",
         icon: Home,
         activeClassName: "bg-primary/10 text-primary",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Hub principal pour acceder a tous les outils OpenShorts et a ton espace de production.",
         badge: "Hub",
         category: "hub",
         path: "/dashboard",
@@ -25,10 +25,10 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         key: "clip-generator",
         title: "Clip Generator",
         sidebarLabel: "Clip Generator",
-        description: "Genere des shorts viraux a partir de videos longues avec l'analyse IA et le split view de production.",
         icon: Film,
         activeClassName: "bg-primary/10 text-primary",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Genere des shorts viraux a partir de videos longues avec l'analyse IA et le split view de production.",
         badge: "Core",
         category: "service",
         path: "/dashboard/clip-generator",
@@ -37,10 +37,10 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         key: "ai-shorts",
         title: "AI Shorts",
         sidebarLabel: "AI Shorts",
-        description: "Cree des videos courtes pour produits SaaS avec hooks, scripts et rendus automatises.",
         icon: Sparkles,
         activeClassName: "bg-violet-500/10 text-violet-400",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Cree des videos courtes pour produits SaaS avec hooks, scripts et rendus automatises.",
         badge: "New",
         category: "service",
         path: "/dashboard/ai-shorts",
@@ -49,10 +49,10 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         key: "ai-agent",
         title: "AI Agent",
         sidebarLabel: "AI Agent",
-        description: "Pilote le workflow autonome de clipping pour traiter un lot de videos verticales.",
         icon: Bot,
         activeClassName: "bg-emerald-500/10 text-emerald-400",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Pilote le workflow autonome de clipping pour traiter un lot de videos verticales.",
         badge: "Auto",
         category: "service",
         path: "/dashboard/ai-agent",
@@ -61,10 +61,10 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         key: "ugc-gallery",
         title: "UGC Gallery",
         sidebarLabel: "UGC Gallery",
-        description: "Parcours la galerie UGC et les variations creatives generees pour tes campagnes.",
         icon: LayoutGrid,
         activeClassName: "bg-violet-500/10 text-violet-400",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Parcours la galerie UGC et les variations creatives generees pour tes campagnes.",
         badge: "Gallery",
         category: "service",
         path: "/dashboard/ugc-gallery",
@@ -73,10 +73,10 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         key: "youtube-studio",
         title: "YouTube Studio",
         sidebarLabel: "YouTube Studio",
-        description: "Genere des thumbnails et assets YouTube adaptes a tes clips et contenus longs.",
         icon: Image,
         activeClassName: "bg-primary/10 text-primary",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Genere des thumbnails et assets YouTube adaptes a tes clips et contenus longs.",
         badge: "Studio",
         category: "service",
         path: "/dashboard/youtube-studio",
@@ -85,41 +85,12 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         key: "settings",
         title: "Settings",
         sidebarLabel: "Settings",
-        description: "Configure les cles Gemini, Upload-Post, ElevenLabs et fal.ai pour activer chaque service.",
         icon: Settings,
         activeClassName: "bg-primary/10 text-primary",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Configure les cles Gemini, Upload-Post, ElevenLabs et fal.ai pour activer chaque service.",
         badge: "Config",
         category: "utility",
         path: "/dashboard/settings",
     },
 ];
-
-const DASHBOARD_KEY_ALIASES = {
-    dashboard: "clip-generator",
-    saasshorts: "ai-shorts",
-    thumbnails: "youtube-studio",
-};
-
-export function normalizeDashboardKey(value) {
-    if (!value) {
-        return "dashboard";
-    }
-    return DASHBOARD_KEY_ALIASES[value] ?? value;
-}
-
-export function isDashboardTab(value) {
-    const normalizedValue = normalizeDashboardKey(value);
-    return DASHBOARD_SIDEBAR_ITEMS.some((item) => item.key === normalizedValue);
-}
-
-export function getWorkspacePath(tabKey = "dashboard") {
-    const normalizedValue = normalizeDashboardKey(tabKey);
-    const match = DASHBOARD_SIDEBAR_ITEMS.find((item) => item.key === normalizedValue);
-    return match?.path ?? "/dashboard";
-}
-
-export function getDashboardItem(tabKey = "dashboard") {
-    const normalizedValue = normalizeDashboardKey(tabKey);
-    return DASHBOARD_SIDEBAR_ITEMS.find((item) => item.key === normalizedValue) ?? DASHBOARD_SIDEBAR_ITEMS[0];
-}
