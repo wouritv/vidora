@@ -1,10 +1,12 @@
 import { ArrowRight, Sparkles } from "lucide-react";
 import { useAuth } from "../state/AuthContext";
 import { DASHBOARD_SIDEBAR_ITEMS } from "../lib/dashboard-nav";
+import { useNavigate } from "react-router-dom";
 
 export default function Dashboard() {
 
     const { user} = useAuth();
+    const navigate = useNavigate();
 
     const displayName =
         user?.user_metadata?.full_name ||
