@@ -9,8 +9,10 @@ import DashboardLayout from "./layouts/DashboardLayout";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import DashboardTabPage from "./pages/DashboardTabPage";
+import ReelsPage from "./pages/ReelsPage";
 import ResetPassword from "./pages/ResetPassword";
 import UpdatePassword from "./pages/UpdatePassword";
+import YouTubeResumePage from "./pages/YouTubeResumePage";
 
 function RootRedirect() {
     const { isAuthenticated, loading } = useAuth();
@@ -46,9 +48,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                     >
                         <Route index element={<Dashboard />} />
                         <Route path="clip-generator" element={<DashboardTabPage tabKey="clip-generator" />} />
-                        <Route path="ai-shorts" element={<DashboardTabPage tabKey="ai-shorts" />} />
-                        <Route path="ai-agent" element={<DashboardTabPage tabKey="ai-agent" />} />
-                        <Route path="ugc-gallery" element={<DashboardTabPage tabKey="ugc-gallery" />} />
+                        <Route path="reels" element={<ReelsPage />} />
+                        <Route path="youtube-resumes" element={<YouTubeResumePage />} />
                         <Route path="youtube-studio" element={<DashboardTabPage tabKey="youtube-studio" />} />
                         <Route path="settings" element={<DashboardTabPage tabKey="settings" />} />
                     </Route>

@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Upload, Sparkles, ChevronDown, Check, Activity, PlusCircle, X,
-  Terminal, Shield, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound,
-  Users, Smartphone, ExternalLink, Copy, CheckCircle2, Bot, Instagram, Youtube
+  Upload, Sparkles, ChevronDown, Check, Activity,
+  Terminal, Shield, Globe, Calendar, AlertTriangle,
+  Users, Smartphone, ExternalLink, Copy, CheckCircle2, Bot, Instagram, Youtube, ArrowLeft
 } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
@@ -15,6 +15,7 @@ import ScheduleWeekModal from './components/ScheduleWeekModal';
 import { getApiUrl } from './config';
 import { useNavigate } from "react-router-dom";
 import { DASHBOARD_SIDEBAR_ITEMS } from "./lib/dashboard-nav";
+import { useAuth } from "./state/AuthContext";
 
 const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
 const ENCRYPTION_PREFIX = "ENC:";
@@ -60,18 +61,6 @@ const getStatusBadgeClass = (status) => {
   return 'bg-red-500/10 border-red-500/20 text-red-400';
 };
 
-const getMissingKeyLabel = (apiKey, uploadPostKey) => {
-  if (!apiKey && !uploadPostKey) return 'Gemini & Upload-Post keys missing';
-  if (!apiKey) return 'Gemini API Key Missing';
-  return 'Upload-Post API Key Missing';
-};
-
-const getMissingKeyDescription = (apiKey, uploadPostKey) => {
-  if (!apiKey && !uploadPostKey) return 'Set your Gemini and Upload-Post API keys to use OpenShorts.';
-  if (!apiKey) return 'Set your Gemini API key to use OpenShorts.';
-  return 'Set your Upload-Post API key to use OpenShorts.';
-};
-
 const getModalTitle = (apiKey, uploadPostKey) => {
   if (!apiKey && !uploadPostKey) return 'Required API Keys Missing';
   if (!apiKey) return 'Gemini API Key Required';
@@ -95,68 +84,6 @@ const EmptyResultsState = ({ status }) => {
     );
   }
   return null;
-};
-
-const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
-  const [isOpen, setIsOpen] = useState(false);
-
-  if (!profiles || profiles.length === 0) return null;
-
-  const selectedProfile = profiles.find(p => p.username === selectedUserId) || profiles[0];
-
-  return (
-      <div className="relative z-50">
-        <button
-            onClick={() => setIsOpen(!isOpen)}
-            className="flex items-center justify-between bg-surface border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-300 hover:bg-white/5 transition-colors min-w-[180px]"
-        >
-        <span className="flex items-center gap-2">
-          <div className="w-5 h-5 rounded-full bg-gradient-to-br from-primary to-purple-600 flex items-center justify-center text-[10px] font-bold text-white">
-            {selectedProfile?.username?.substring(0, 1).toUpperCase() || "U"}
-          </div>
-          <span className="font-medium text-white truncate max-w-[100px]">{selectedProfile?.username || "Select User"}</span>
-        </span>
-          <ChevronDown size={14} className={`text-zinc-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-        </button>
-
-        {isOpen && (
-            <div className="absolute top-full mt-2 right-0 w-64 bg-[#1a1a1a] border border-white/10 rounded-xl shadow-2xl overflow-hidden">
-              <div className="max-h-60 overflow-y-auto custom-scrollbar">
-                {profiles.map((profile) => (
-                    <button
-                        key={profile.username}
-                        onClick={() => { onSelect(profile.username); setIsOpen(false); }}
-                        className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/5 transition-colors text-left group border-b border-white/5 last:border-0"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-purple-500/20 flex items-center justify-center text-xs font-bold text-white border border-white/10 shrink-0">
-                          {profile.username.substring(0, 2).toUpperCase()}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium text-zinc-200 group-hover:text-white transition-colors truncate">
-                            {profile.username}
-                          </div>
-                          <div className="flex gap-2 mt-0.5">
-                            <div className={`flex items-center gap-1 text-[10px] ${profile.connected.includes('tiktok') ? 'text-zinc-300' : 'text-zinc-600'}`}>
-                              <TikTokIcon size={10} />
-                            </div>
-                            <div className={`flex items-center gap-1 text-[10px] ${profile.connected.includes('instagram') ? 'text-pink-400' : 'text-zinc-600'}`}>
-                              <Instagram size={10} />
-                            </div>
-                            <div className={`flex items-center gap-1 text-[10px] ${profile.connected.includes('youtube') ? 'text-red-400' : 'text-zinc-600'}`}>
-                              <Youtube size={10} />
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      {selectedUserId === profile.username && <Check size={14} className="text-primary shrink-0" />}
-                    </button>
-                ))}
-              </div>
-            </div>
-        )}
-      </div>
-  );
 };
 
 const Sidebar = ({ currentTab, onNavigate }) => (
@@ -233,6 +160,8 @@ const pollJob = async (jobId) => {
 
 function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
+  const { user } = useAuth();
+
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -256,12 +185,12 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [sessionRecovered, setSessionRecovered] = useState(false);
   const [showScheduleWeek, setShowScheduleWeek] = useState(false);
 
   const [syncedTime, setSyncedTime] = useState(0);
   const [isSyncedPlaying, setIsSyncedPlaying] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
+  const [hasNotifiedCompletion, setHasNotifiedCompletion] = useState(false);
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -365,6 +294,38 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
     return () => clearInterval(interval);
   }, [status, jobId]);
 
+  useEffect(() => {
+    if (status !== 'complete' || hasNotifiedCompletion) return;
+    if (!results?.clips?.length) return;
+
+    const notify = () => {
+      new Notification('Reels generated', {
+        body: `${results.clips.length} reel(s) are ready in your gallery.`,
+      });
+      setHasNotifiedCompletion(true);
+    };
+
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setHasNotifiedCompletion(true);
+      return;
+    }
+
+    if (Notification.permission === 'granted') {
+      notify();
+      return;
+    }
+
+    if (Notification.permission === 'default') {
+      Notification.requestPermission().then((permission) => {
+        if (permission === 'granted') notify();
+        else setHasNotifiedCompletion(true);
+      });
+      return;
+    }
+
+    setHasNotifiedCompletion(true);
+  }, [status, results, hasNotifiedCompletion]);
+
   const fetchUserProfiles = async () => {
     if (!uploadPostKey) return;
     try {
@@ -393,6 +354,13 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
       setShowKeyModal(true);
       return;
     }
+    if (!user?.id) {
+      setStatus('error');
+      setLogs(["Authentication required. Please reconnect your session."]);
+      return;
+    }
+
+    setHasNotifiedCompletion(false);
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
@@ -400,7 +368,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
     try {
       let body;
-      const headers = { 'X-Gemini-Key': apiKey };
+      const headers = { 'X-Gemini-Key': apiKey, 'X-User-Id': user.id };
       if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({ url: data.payload, acknowledged: !!data.acknowledged });
@@ -412,7 +380,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
       }
       const res = await fetch(getApiUrl('/api/process'), {
         method: 'POST',
-        headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey },
+        headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey, 'X-User-Id': user.id },
         body
       });
       if (!res.ok) {
@@ -546,72 +514,86 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
         </div>
 
         {/* Top Header */}
-        <header className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
-          <div className="flex items-center gap-4">
-            {status !== 'idle' && (
-                <button
-                    onClick={handleReset}
-                    className="flex items-center gap-2 text-sm text-zinc-400 hover:text-white transition-colors"
-                >
-                  <PlusCircle size={16} />
-                  <span className="hidden sm:inline">New Project</span>
-                </button>
-            )}
-          </div>
+        <header>
 
-          <div className="flex items-center gap-4">
-            {userProfiles.length > 0 && (
-                <UserProfileSelector
-                    profiles={userProfiles}
-                    selectedUserId={uploadUserId}
-                    onSelect={setUploadUserId}
-                />
-            )}
-            {(!apiKey || !uploadPostKey) && (
-                <button
-                    onClick={() => navigate("/dashboard/settings")}
-                    className="text-xs text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 px-3 py-1 rounded-full border border-amber-500/30 transition-colors flex items-center gap-1.5"
-                    title="Click to configure your API keys"
-                >
-                  <AlertTriangle size={12} />
-                  {getMissingKeyLabel(apiKey, uploadPostKey)}
-                </button>
-            )}
-          </div>
-        </header>
-
-        {/* Persistent Missing Keys Banner */}
-        {(!apiKey || !uploadPostKey) && activeTab !== 'settings' && (
-            <div className="mx-6 mt-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl flex items-center justify-between gap-4 shrink-0 animate-[fadeIn_0.3s_ease-out]">
-              <div className="flex items-center gap-3 text-sm text-amber-200">
-                <KeyRound size={16} className="shrink-0 text-amber-400" />
+          {currentTab === 'clip-generator' && (
+             <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
+              <div className="flex items-center gap-4">
                 <div>
-                  <span className="font-semibold">Required API keys missing.</span>{' '}
-                  <span className="text-amber-200/80">{getMissingKeyDescription(apiKey, uploadPostKey)}</span>
+                  <h1 className="text-3xl font-black tracking-tight">Génération de réels</h1>
                 </div>
               </div>
-              <button
-                  onClick={() => navigate("/dashboard/settings")}
-                  className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black transition-colors"
-              >
-                Go to Settings
-              </button>
-            </div>
-        )}
 
-        {/* Session Recovery Banner */}
-        {sessionRecovered && (
-            <div className="mx-6 mt-2 p-3 bg-primary/10 border border-primary/20 rounded-xl flex items-center justify-between animate-[fadeIn_0.3s_ease-out] shrink-0">
-              <div className="flex items-center gap-2 text-sm text-primary">
-                <RotateCcw size={16} />
-                <span className="font-medium">Session recovered</span>
-                <span className="text-zinc-400 text-xs">Your previous work has been restored.</span>
+               <button
+                   type="button"
+                   onClick={() => {
+                     navigate("/dashboard/reels");
+                   }}
+                   className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
+               >
+                 <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
+                   <ArrowLeft size={16} />
+                 </div>
+                 <div className="hidden lg:block overflow-hidden">
+                   <p className="text-sm font-bold text-white leading-none mb-0.5">Retour à la liste</p>
+                 </div>
+               </button>
+
+             </div>
+          )}
+          {currentTab === 'ai-shorts' && (
+              <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
+                <div className="flex items-center gap-4">
+                  <div>
+                    <h1 className="text-3xl font-black tracking-tight">AI Shorts</h1>
+                  </div>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={() => {
+                      navigate("/dashboard/ia-shorts");
+                    }}
+                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
+                >
+                  <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
+                    <ArrowLeft size={16} />
+                  </div>
+                  <div className="hidden lg:block overflow-hidden">
+                    <p className="text-sm font-bold text-white leading-none mb-0.5">Retour à la liste</p>
+                  </div>
+                </button>
+
               </div>
-              <button onClick={() => setSessionRecovered(false)} className="text-zinc-500 hover:text-white transition-colors">
-                <X size={14} />
-              </button>
-            </div>
-        )}
+          )}
+          {currentTab === 'youtube-studio' && (
+              <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
+                <div className="flex items-center gap-4">
+                  <div>
+                    <h1 className="text-3xl font-black tracking-tight">IA Captions</h1>
+                  </div>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={() => {
+                      navigate("/dashboard/youtube-resumes");
+                    }}
+                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
+                >
+                  <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
+                    <ArrowLeft size={16} />
+                  </div>
+                  <div className="hidden lg:block overflow-hidden">
+                    <p className="text-sm font-bold text-white leading-none mb-0.5">Retour à la liste</p>
+                  </div>
+                </button>
+
+              </div>
+          )}
+
+
+        </header>
 
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
@@ -771,7 +753,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
           {/* View: SaaS Shorts */}
           {currentTab === 'ai-shorts' && (
-              <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
+              <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} appUserId={user?.id} />
           )}
 
           {/* View: AI Agent */}
@@ -857,7 +839,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
           {/* View: Thumbnails */}
           {currentTab === 'youtube-studio' && (
-              <ThumbnailStudio geminiApiKey={apiKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
+              <ThumbnailStudio geminiApiKey={apiKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} appUserId={user?.id} />
           )}
 
           {/* View: Dashboard (Idle) */}

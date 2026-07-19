@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+from ia_captions import router as ia_captions_router
 
 load_dotenv()
 
@@ -168,6 +169,7 @@ async def lifespan(app: FastAPI):
     # Cleanup (optional: cancel worker)
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(ia_captions_router)
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -2576,3 +2578,159 @@ async def saasshorts_voices(
         ],
         "source": "defaults",
     }
+
+# --- Reels listing API ---
+
+from pathlib import Path
+from math import ceil
+
+
+def _build_reel_item_from_metadata(job_id: str, metadata_path: str) -> Optional[Dict]:
+    """Build a normalized reel item from one *_metadata.json file."""
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    shorts = data.get("shorts", []) or []
+    created_at = None
+    try:
+        created_at = os.path.getmtime(metadata_path)
+    except Exception:
+        created_at = time.time()
+
+    # Normalize clips with video URLs
+    clips = []
+    base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+    for i, clip in enumerate(shorts, start=1):
+        c = dict(clip)
+        if not c.get("video_url"):
+            clip_filename = f"{base_name}_clip_{i}.mp4"
+            c["video_url"] = f"/videos/{job_id}/{clip_filename}"
+        clips.append(c)
+
+    title = data.get("title") or data.get("source_title") or job_id
+
+    return {
+        "job_id": job_id,
+        "title": title,
+        "created_at": created_at,
+        "clip_count": len(clips),
+        "clips": clips,
+        "cost_analysis": data.get("cost_analysis"),
+        "transcript_language": (data.get("transcript") or {}).get("language"),
+    }
+
+
+def _scan_reels_from_output() -> List[Dict]:
+    """Scan output/<job_id>/*_metadata.json and return reels sorted by newest first."""
+    reels: List[Dict] = []
+    output_root = Path(OUTPUT_DIR)
+
+    if not output_root.exists():
+        return reels
+
+    for job_dir in output_root.iterdir():
+        if not job_dir.is_dir():
+            continue
+
+        metadata_files = sorted(job_dir.glob("*_metadata.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not metadata_files:
+            continue
+
+        # Keep only latest metadata for each job folder
+        item = _build_reel_item_from_metadata(job_dir.name, str(metadata_files[0]))
+        if item:
+            reels.append(item)
+
+    reels.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+    return reels
+
+
+@app.get("/api/reels")
+async def list_reels(page: int = Query(1, ge=1),page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None):
+    """
+    DB-first reels listing (Supabase), fallback to local output scan.
+    Returns both `items` and `reels` for frontend compatibility.
+    """
+    # 1) Try Supabase first
+    if supabase_list_reels is not None:
+        try:
+            # adapte selon ta signature réelle dans supabase_reels.py
+            # souvent: list_reels(page=..., page_size=..., query=...)
+            db_resp = supabase_list_reels(page=page, page_size=page_size, query=q)
+
+            # Normalisation robuste
+            items = (
+                db_resp.get("items")
+                or db_resp.get("reels")
+                or db_resp.get("data")
+                or []
+            )
+            total = int(db_resp.get("total", len(items)))
+            total_pages = int(db_resp.get("total_pages", max(1, (total + page_size - 1) // page_size)))
+            has_more = bool(db_resp.get("has_more", page * page_size < total))
+
+            return {
+                "items": items,
+                "reels": items,  # compat
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+                "has_more": has_more,
+                "source": "supabase",
+            }
+        except Exception as e:
+            print(f"⚠️ /api/reels supabase failed, fallback local scan: {e}")
+
+    # 2) Fallback local filesystem (si DB down ou non configurée)
+    reels = _scan_reels_from_output()
+    if q:
+        q_lower = q.strip().lower()
+        if q_lower:
+            reels = [
+                r for r in reels
+                if q_lower in (r.get("title", "").lower())
+                or q_lower in (r.get("job_id", "").lower())
+            ]
+
+    total = len(reels)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = reels[start:end]
+
+    return {
+        "items": items,
+        "reels": items,  # compat
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_more": end < total,
+        "source": "local",
+    }
+
+
+@app.get("/api/reels/{job_id}")
+async def get_reel(job_id: str):
+    """Get one reel/job by job_id."""
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.isdir(job_dir):
+        raise HTTPException(status_code=404, detail="Reel not found")
+
+    metadata_files = sorted(
+        glob.glob(os.path.join(job_dir, "*_metadata.json")),
+        key=lambda p: os.path.getmtime(p),
+        reverse=True,
+    )
+    if not metadata_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    item = _build_reel_item_from_metadata(job_id, metadata_files[0])
+    if not item:
+        raise HTTPException(status_code=500, detail="Failed to parse metadata")
+
+    return item

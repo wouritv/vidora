@@ -34,7 +34,7 @@ function saveCache(url, analysis, webResearch, scripts) {
   } catch { /* localStorage full */ }
 }
 
-export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uploadPostKey, uploadUserId }) {
+export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uploadPostKey, uploadUserId, appUserId }) {
   // Wizard state
   const [step, setStep] = useState(() => {
     const cache = loadCache();
@@ -90,6 +90,41 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
   // UI
   const [copied, setCopied] = useState('');
   const [logsExpanded, setLogsExpanded] = useState(true);
+  const [targetLanguage, setTargetLanguage] = useState('fr');
+
+  const LANGUAGES = {
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "pl": "Polish",
+    "hi": "Hindi",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "ar": "Arabic",
+    "ru": "Russian",
+    "tr": "Turkish",
+    "nl": "Dutch",
+    "sv": "Swedish",
+    "id": "Indonesian",
+    "fil": "Filipino",
+    "ms": "Malay",
+    "vi": "Vietnamese",
+    "th": "Thai",
+    "uk": "Ukrainian",
+    "el": "Greek",
+    "cs": "Czech",
+    "fi": "Finnish",
+    "ro": "Romanian",
+    "da": "Danish",
+    "bg": "Bulgarian",
+    "hr": "Croatian",
+    "sk": "Slovak",
+    "ta": "Tamil",
+    "en": "English",
+  };
 
   // Pre-fill from cache on mount
   useEffect(() => {
@@ -280,6 +315,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
           'Content-Type': 'application/json',
           'X-Fal-Key': falKey,
           'X-ElevenLabs-Key': elevenLabsKey,
+          'X-User-Id': appUserId || uploadUserId || '',
         },
         body: JSON.stringify({
           script: scriptToSend,
@@ -326,6 +362,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
           'Content-Type': 'application/json',
           'X-Fal-Key': falKey,
           'X-ElevenLabs-Key': elevenLabsKey,
+          'X-User-Id': appUserId || uploadUserId || '',
         },
         body: JSON.stringify({
           script: scriptToSend,
@@ -428,58 +465,6 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
         {step === 0 && (
           <div className="animate-[fadeIn_0.3s_ease-out] space-y-6">
             <div className="glass-panel p-8 space-y-6">
-              {/* Video Mode Selector */}
-              <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-3">Video Mode</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    onClick={() => setVideoMode('lowcost')}
-                    className={`p-4 rounded-xl border text-left transition-all ${
-                      videoMode === 'lowcost'
-                        ? 'border-green-500/50 bg-green-500/10 ring-1 ring-green-500/30'
-                        : 'border-white/10 bg-white/5 hover:bg-white/10'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className={`text-sm font-semibold ${videoMode === 'lowcost' ? 'text-green-300' : 'text-zinc-300'}`}>Low Cost</span>
-                      <span className="text-xs font-mono text-green-400 bg-green-500/10 px-2 py-0.5 rounded-full">~$0.80</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 leading-relaxed">Hailuo 2.3 img2video + VEED Lipsync. Good movement + lip-sync. Recommended.</p>
-                  </button>
-                  <button
-                    onClick={() => setVideoMode('premium')}
-                    className={`p-4 rounded-xl border text-left transition-all ${
-                      videoMode === 'premium'
-                        ? 'border-violet-500/50 bg-violet-500/10 ring-1 ring-violet-500/30'
-                        : 'border-white/10 bg-white/5 hover:bg-white/10'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className={`text-sm font-semibold ${videoMode === 'premium' ? 'text-violet-300' : 'text-zinc-300'}`}>Premium</span>
-                      <span className="text-xs font-mono text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full">~$2.00</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 leading-relaxed">Kling Avatar v2 Standard. Full integrated movement. Best quality.</p>
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">Website URL <span className="text-zinc-600">(optional)</span></label>
-                <div className="flex gap-3">
-                  <div className="relative flex-1">
-                    <Globe size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
-                    <input
-                      type="url"
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                      placeholder="https://your-website.com"
-                      className="input-field pl-10"
-                      onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()}
-                    />
-                  </div>
-                </div>
-                <p className="text-[10px] text-zinc-600 mt-1">If provided, we'll scrape and research your site automatically</p>
-              </div>
 
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-2">
@@ -497,23 +482,17 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-3">Language</label>
                 <div className="flex gap-2 mb-6">
-                  {[
-                    { id: 'en', label: 'English', flag: '🇺🇸' },
-                    { id: 'es', label: 'Español', flag: '🇪🇸' },
-                  ].map((l) => (
-                    <button
-                      key={l.id}
-                      onClick={() => setLanguage(l.id)}
-                      className={`flex-1 p-3 rounded-xl border text-center transition-all ${
-                        language === l.id
-                          ? 'border-violet-500/50 bg-violet-500/10 text-violet-300'
-                          : 'border-white/10 bg-white/5 text-zinc-400 hover:bg-white/10'
-                      }`}
-                    >
-                      <span className="text-lg">{l.flag}</span>
-                      <div className="text-xs font-medium mt-1">{l.label}</div>
-                    </button>
-                  ))}
+                  <select
+                      value={targetLanguage}
+                      onChange={(e) => setTargetLanguage(e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-green-500/50 appearance-none cursor-pointer"
+                  >
+                    {Object.entries(LANGUAGES).sort((a, b) => a[1].localeCompare(b[1])).map(([code, name]) => (
+                        <option key={code} value={code}>
+                          {name}
+                        </option>
+                    ))}
+                  </select>
                 </div>
 
                 <label className="block text-sm font-medium text-zinc-300 mb-3">Actor</label>
@@ -551,25 +530,6 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                     >
                       <div className="text-xs font-medium">{s.label}</div>
                       <div className="text-[10px] text-zinc-500 mt-0.5">{s.desc}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">Number of Scripts</label>
-                <div className="flex gap-2">
-                  {[1, 2, 3, 5].map((n) => (
-                    <button
-                      key={n}
-                      onClick={() => setNumScripts(n)}
-                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                        numScripts === n
-                          ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
-                          : 'bg-white/5 text-zinc-400 border border-white/10 hover:bg-white/10'
-                      }`}
-                    >
-                      {n}
                     </button>
                   ))}
                 </div>
