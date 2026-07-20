@@ -1,21 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Upload, Sparkles, ChevronDown, Check, Activity,
-  Terminal, Shield, Globe, Calendar, AlertTriangle,
-  Users, Smartphone, ExternalLink, Copy, CheckCircle2, Bot, Instagram, Youtube, ArrowLeft
+  Sparkles, ChevronDown, Check, Activity,
+  Terminal, Globe, Calendar, AlertTriangle, Instagram, Youtube, ArrowLeft
 } from 'lucide-react';
-import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import ThumbnailStudio from './components/ThumbnailStudio';
-import SaaShortsTab from './components/SaaShortsTab';
-import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import { getApiUrl } from './config';
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { DASHBOARD_SIDEBAR_ITEMS } from "./lib/dashboard-nav";
 import { useAuth } from "./state/AuthContext";
+import SettingsPage from "./pages/Settings.jsx";
 
 const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
 const ENCRYPTION_PREFIX = "ENC:";
@@ -199,12 +196,25 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
   };
 
   const navigate = useNavigate();
+  const location = useLocation();
   const currentTab = activeTab;
+  const forceNewOperation = new URLSearchParams(location.search).get('new') === '1';
 
   const handleClipPause = () => setIsSyncedPlaying(false);
 
-  // Session Recovery: Restore on mount
+  // Session Recovery: Restore on mount unless user explicitly requests a fresh start.
   useEffect(() => {
+    if (currentTab !== 'clip-generator') return;
+    if (forceNewOperation) {
+      localStorage.removeItem(SESSION_KEY);
+      setStatus('idle');
+      setJobId(null);
+      setResults(null);
+      setLogs([]);
+      setProcessingMedia(null);
+      return;
+    }
+
     const saved = localStorage.getItem(SESSION_KEY);
     if (!saved) return;
     try {
@@ -224,7 +234,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
     } catch {
       localStorage.removeItem(SESSION_KEY);
     }
-  }, []);
+  }, [currentTab, forceNewOperation]);
 
   // Session Recovery: Save state changes
   useEffect(() => {
@@ -541,31 +551,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
              </div>
           )}
-          {currentTab === 'ai-shorts' && (
-              <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
-                <div className="flex items-center gap-4">
-                  <div>
-                    <h1 className="text-3xl font-black tracking-tight">AI Shorts</h1>
-                  </div>
-                </div>
 
-                <button
-                    type="button"
-                    onClick={() => {
-                      navigate("/dashboard/ia-shorts");
-                    }}
-                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
-                >
-                  <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
-                    <ArrowLeft size={16} />
-                  </div>
-                  <div className="hidden lg:block overflow-hidden">
-                    <p className="text-sm font-bold text-white leading-none mb-0.5">Retour à la liste</p>
-                  </div>
-                </button>
-
-              </div>
-          )}
           {currentTab === 'youtube-studio' && (
               <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
                 <div className="flex items-center gap-4">
@@ -600,242 +586,9 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
           {/* View: Settings */}
           {currentTab === 'settings' && (
-              <div className="h-full overflow-y-auto p-8 max-w-2xl mx-auto animate-[fadeIn_0.3s_ease-out]">
-                <div className="flex items-center justify-between mb-8">
-                  <h1 className="text-2xl font-bold">Settings</h1>
-                  <div className="px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full text-[10px] text-green-400 font-medium flex items-center gap-2">
-                    <Shield size={12} /> Privacy: keys only live in your browser (sent to backend just to process)
-                  </div>
-                </div>
-                <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
-
-                <div className={`glass-panel p-6 mt-8 ${uploadPostKey ? '' : 'border-amber-500/30 ring-1 ring-amber-500/20'}`}>
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-lg font-semibold">Social Integration</h2>
-                    <span className="text-[10px] bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded text-amber-400 uppercase tracking-wider">Required</span>
-                  </div>
-                  <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                    Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts via <strong>Upload-Post</strong>.
-                    Includes a <strong>free tier</strong> (no credit card required).
-                  </p>
-                  <div className="space-y-4">
-                    <label htmlFor="upload-post-key" className="block text-sm text-zinc-400">Upload-Post API Key</label>
-                    <div className="flex gap-2">
-                      <input
-                          id="upload-post-key"
-                          type="password"
-                          value={uploadPostKey}
-                          onChange={(e) => setUploadPostKey(e.target.value)}
-                          className="input-field"
-                          placeholder="ey..."
-                      />
-                      <button onClick={fetchUserProfiles} className="btn-primary py-2 px-4 text-sm">Connect</button>
-                    </div>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
-                      Connect your Upload-Post account to enable one-click publishing.
-                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                        <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                          <span className="text-zinc-400 font-medium">1. Login</span>
-                          <span className="text-[10px] text-zinc-600">Register account</span>
-                        </a>
-                        <a href="https://app.upload-post.com/manage-users" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                          <span className="text-zinc-400 font-medium">2. Profiles</span>
-                          <span className="text-[10px] text-zinc-600">Create & Connect</span>
-                        </a>
-                        <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                          <span className="text-zinc-400 font-medium">3. API Key</span>
-                          <span className="text-[10px] text-zinc-600">Generate key</span>
-                        </a>
-                      </div>
-                      <br />
-                      <span className="text-zinc-600 italic">
-                    Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
-                  </span>
-                    </p>
-                  </div>
-                </div>
-
-                <div className="glass-panel p-6 mt-8">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-lg font-semibold">Video Translation</h2>
-                    <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Optional</span>
-                  </div>
-                  <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                    Translate your clips to different languages using <strong>ElevenLabs</strong> AI dubbing.
-                    Automatically translates speech while preserving the original voice characteristics.
-                  </p>
-                  <div className="space-y-4">
-                    <label htmlFor="elevenlabs-key" className="block text-sm text-zinc-400">ElevenLabs API Key</label>
-                    <div className="flex gap-2">
-                      <input
-                          id="elevenlabs-key"
-                          type="password"
-                          value={elevenLabsKey}
-                          onChange={(e) => setElevenLabsKey(e.target.value)}
-                          className="input-field"
-                          placeholder="sk_..."
-                      />
-                      <button
-                          onClick={() => { if (elevenLabsKey) { localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey)); alert('ElevenLabs API Key saved!'); } }}
-                          className="btn-primary py-2 px-4 text-sm"
-                      >
-                        Save
-                      </button>
-                    </div>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
-                      Get your API key from ElevenLabs to enable video translation.
-                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <a href="https://elevenlabs.io/sign-up" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                          <span className="text-zinc-400 font-medium">1. Sign Up</span>
-                          <span className="text-[10px] text-zinc-600">Create account</span>
-                        </a>
-                        <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                          <span className="text-zinc-400 font-medium">2. API Key</span>
-                          <span className="text-[10px] text-zinc-600">Generate key</span>
-                        </a>
-                      </div>
-                      <br />
-                      <span className="text-zinc-600 italic">
-                    Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
-                  </span>
-                    </p>
-                  </div>
-                </div>
-
-                <div className="glass-panel p-6 mt-8">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-lg font-semibold">AI Shorts (UGC Videos)</h2>
-                    <span className="text-[10px] bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded text-violet-400 uppercase tracking-wider">New</span>
-                  </div>
-                  <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                    Generate UGC-style videos with AI actors for any product or business using <strong>fal.ai</strong>.
-                    Just describe your product or paste a URL. Requires fal.ai + ElevenLabs API keys.
-                  </p>
-                  <div className="space-y-4">
-                    <label htmlFor="fal-key" className="block text-sm text-zinc-400">fal.ai API Key</label>
-                    <div className="flex gap-2">
-                      <input
-                          id="fal-key"
-                          type="password"
-                          value={falKey}
-                          onChange={(e) => setFalKey(e.target.value)}
-                          className="input-field"
-                          placeholder="fal_..."
-                      />
-                      <button
-                          onClick={() => { if (falKey) { localStorage.setItem('falKey_v1', encrypt(falKey)); alert('fal.ai API Key saved!'); } }}
-                          className="btn-primary py-2 px-4 text-sm"
-                      >
-                        Save
-                      </button>
-                    </div>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
-                      Get your API key from fal.ai to enable AI actor video generation.
-                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                          <span className="text-zinc-400 font-medium">1. Sign Up</span>
-                          <span className="text-[10px] text-zinc-600">Create fal.ai account</span>
-                        </a>
-                        <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                          <span className="text-zinc-400 font-medium">2. API Key</span>
-                          <span className="text-[10px] text-zinc-600">Generate key</span>
-                        </a>
-                      </div>
-                      <br />
-                      <span className="text-zinc-600 italic">
-                    Keys are only stored in your browser. Sent to backend only to process requests.
-                  </span>
-                    </p>
-                  </div>
-                </div>
-              </div>
+              <SettingsPage />
           )}
 
-          {/* View: SaaS Shorts */}
-          {currentTab === 'ai-shorts' && (
-              <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} appUserId={user?.id} />
-          )}
-
-          {/* View: AI Agent */}
-          {currentTab === 'ai-agent' && (
-              <div className="h-full overflow-y-auto custom-scrollbar p-6 md:p-10 animate-[fadeIn_0.3s_ease-out]">
-                <div className="max-w-4xl mx-auto space-y-8">
-                  <div className="space-y-3">
-                    <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[11px] uppercase tracking-wider text-emerald-400 font-semibold">
-                      <Bot size={12} /> Autonomous Skill
-                    </div>
-                    <h1 className="text-3xl md:text-4xl font-black bg-gradient-to-b from-white to-white/60 bg-clip-text text-transparent">
-                      Your Personal Clipping Team
-                    </h1>
-                    <p className="text-zinc-400 text-base md:text-lg leading-relaxed max-w-2xl">
-                      Drop your videos in a folder and a team of AI clippers picks the viral moments, edits them, and queues them for your approval — like having a 24/7 short-form editing crew on autopilot.
-                    </p>
-                  </div>
-
-                  <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 flex items-start gap-3">
-                    <Smartphone size={20} className="text-amber-400 shrink-0 mt-0.5" />
-                    <div className="text-sm text-amber-100">
-                      <p className="font-semibold text-amber-300 mb-1">Upload videos already in vertical (9:16) mobile format.</p>
-                      <p className="text-amber-100/80 leading-relaxed">
-                        The agent does not reframe horizontal footage. Make sure every source video is shot or pre-cropped to mobile/portrait format before dropping it into the input folder.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="grid md:grid-cols-3 gap-4">
-                    <div className="glass-panel p-5 space-y-2">
-                      <div className="w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center"><Upload size={18} /></div>
-                      <h3 className="font-semibold text-white">1. Drop your videos</h3>
-                      <p className="text-xs text-zinc-400 leading-relaxed">Put your long-form vertical footage in the watched folder. The skill picks one video per run.</p>
-                    </div>
-                    <div className="glass-panel p-5 space-y-2">
-                      <div className="w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center"><Users size={18} /></div>
-                      <h3 className="font-semibold text-white">2. AI clippers work</h3>
-                      <p className="text-xs text-zinc-400 leading-relaxed">Whisper transcribes, Gemini 3 Flash spots viral beats, FFmpeg cuts each clip and adds a hook overlay.</p>
-                    </div>
-                    <div className="glass-panel p-5 space-y-2">
-                      <div className="w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center"><CheckCircle2 size={18} /></div>
-                      <h3 className="font-semibold text-white">3. You validate, it ships</h3>
-                      <p className="text-xs text-zinc-400 leading-relaxed">Approve the candidates you like and the skill auto-publishes them to TikTok, Reels and YouTube Shorts via Upload-Post.</p>
-                    </div>
-                  </div>
-
-                  <div className="glass-panel p-6 md:p-8 space-y-5">
-                    <div className="flex items-start justify-between gap-4 flex-wrap">
-                      <div>
-                        <h2 className="text-xl font-bold text-white mb-1">skill-autoshorts</h2>
-                        <p className="text-sm text-zinc-400">The Claude Code skill that powers this workflow. Install it once and trigger it whenever you want a fresh batch of clips.</p>
-                      </div>
-                      <a href="https://github.com/mutonby/skill-autoshorts" target="_blank" rel="noopener noreferrer" className="btn-primary py-2 px-4 text-sm flex items-center gap-2 shrink-0">
-                        View on GitHub <ExternalLink size={14} />
-                      </a>
-                    </div>
-                    <div className="bg-[#0c0c0e] border border-white/10 rounded-lg p-4 font-mono text-xs text-zinc-300 flex items-center justify-between gap-3">
-                      <span className="truncate">git clone https://github.com/mutonby/skill-autoshorts</span>
-                      <button onClick={() => navigator.clipboard.writeText('git clone https://github.com/mutonby/skill-autoshorts')} className="text-zinc-500 hover:text-white transition-colors shrink-0" title="Copy">
-                        <Copy size={14} />
-                      </button>
-                    </div>
-                    <div className="grid sm:grid-cols-2 gap-3 text-sm">
-                      {[
-                        'Daily batch — picks one long video per run',
-                        'Whisper transcription with word-level timing',
-                        'Gemini 3 Flash multimodal moment detection',
-                        'Auto-publish to TikTok, Reels & YouTube Shorts',
-                      ].map((feat) => (
-                          <div key={feat} className="flex items-start gap-2 text-zinc-300">
-                            <Check size={16} className="text-emerald-400 shrink-0 mt-0.5" />
-                            <span>{feat}</span>
-                          </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-          )}
-
-          {/* View: UGC Gallery */}
-          {currentTab === 'ugc-gallery' && <UGCGallery />}
 
           {/* View: Thumbnails */}
           {currentTab === 'youtube-studio' && (

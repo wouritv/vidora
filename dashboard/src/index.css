@@ -3,22 +3,56 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Theme Variables */
+:root {
+  --color-background: 9 9 11;
+  --color-surface: 24 24 27;
+}
+
+:root.dark {
+  --color-background: 9 9 11;
+  --color-surface: 24 24 27;
+}
+
+:root.light {
+  --color-background: 245 245 245;
+  --color-surface: 255 255 255;
+}
+
 @layer base {
   body {
-    @apply bg-background text-white antialiased;
+    @apply bg-background text-white antialiased transition-colors duration-300;
+  }
+
+  body.light {
+    @apply text-slate-900;
   }
 }
 
-.glass-panel {
-  @apply bg-surface/50 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl;
-}
+@layer components {
+  .glass-panel {
+    @apply bg-surface/50 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl;
+  }
 
-.input-field {
-  @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-zinc-500;
-}
+  :root.light .glass-panel {
+    @apply border-slate-200 bg-white/80;
+  }
 
-.btn-primary {
-  @apply bg-primary hover:bg-blue-600 text-white px-6 py-3 rounded-xl font-medium transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20;
+  .input-field {
+    @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-zinc-500;
+  }
+
+  :root.light .input-field {
+    @apply bg-slate-100 text-slate-900 border-slate-300 placeholder:text-slate-400;
+  }
+
+  :root.light .input-field:focus {
+    @apply border-primary/80 bg-slate-50;
+  }
+
+  .btn-primary {
+    @apply bg-primary hover:bg-blue-600 text-white px-6 py-3 rounded-xl font-medium transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20;
+  }
 }
 
 /* Custom Scrollbar */

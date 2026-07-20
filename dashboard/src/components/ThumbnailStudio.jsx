@@ -3,7 +3,6 @@ import {
   Check,
   Film,
   Loader2,
-  Plus,
   Sparkles,
   Upload,
   Wand2,
@@ -183,11 +182,6 @@ export default function ThumbnailStudio({ geminiApiKey, appUserId }) {
             </span>
             IA Captions
           </h1>
-          {step > 0 && (
-            <button onClick={resetAll} className="text-xs text-zinc-400 hover:text-white transition-colors inline-flex items-center gap-1">
-              <Plus size={12} /> Nouveau projet
-            </button>
-          )}
         </div>
         <p className="text-sm text-zinc-500 mb-6">
           Upload video → choose social platform → generate AI captions → customize style and text → render final video.
@@ -204,13 +198,17 @@ export default function ThumbnailStudio({ geminiApiKey, appUserId }) {
         {step === 0 && (
           <section className="glass-panel p-6 space-y-5">
             <div className="rounded-xl border border-white/10 bg-white/5 p-5">
-              <label className="text-sm text-zinc-300 block mb-2">Video source</label>
-              <input
-                type="file"
-                accept="video/*"
-                onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
-                className="block w-full text-sm text-zinc-300"
-              />
+              <label className="cursor-pointer block">
+                <input
+                    type="file"
+                    accept="video/*"
+                    onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
+                    className="hidden"
+                />
+                <Upload className="mx-auto mb-3 text-zinc-500" size={24} />
+                <p className="text-zinc-400">Click to upload or drag and drop</p>
+                <p className="text-xs text-zinc-600 mt-1">MP4, MOV up to 500MB</p>
+              </label>
               {videoFile && (
                 <p className="mt-2 text-xs text-zinc-500 inline-flex items-center gap-2">
                   <Film size={12} /> {videoFile.name}

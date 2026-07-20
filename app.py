@@ -8,15 +8,30 @@ import glob
 import time
 import asyncio
 from dotenv import load_dotenv
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+from s3_uploader import (
+    list_all_clips,
+    upload_actor_to_s3,
+    list_actor_gallery,
+    upload_video_to_gallery,
+    list_video_gallery,
+    upload_file_to_s3,
+    generate_presigned_url,
+)
 from ia_captions import router as ia_captions_router
+from supabase_reels import (
+    insert_reels as supabase_insert_reels,
+    list_reels as supabase_list_reels,
+    get_reel as supabase_get_reel,
+    soft_delete_reel as supabase_soft_delete_reel,
+    is_supabase_reels_configured,
+)
 
 load_dotenv()
 
@@ -81,6 +96,98 @@ def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _cleanup_directory(path: str) -> None:
+    """Best-effort recursive cleanup for ephemeral processing artifacts."""
+    try:
+        if path and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _reel_media_url_from_s3_key(s3_key: str) -> str:
+    if not s3_key:
+        return ""
+    bucket = os.environ.get("AWS_S3_BUCKET", "")
+    if not bucket:
+        return ""
+    return generate_presigned_url(bucket, s3_key, expiration=7200) or ""
+
+
+def _normalize_reel_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    media_url = _reel_media_url_from_s3_key(row.get("reel_s3_key") or "") or row.get("reel_url") or ""
+    return {
+        **row,
+        "reel_url": media_url or row.get("reel_url") or "",
+        "reel_playback_url": media_url,
+        "reel_download_url": media_url,
+        "media_url": media_url,
+    }
+
+
+async def _persist_reels_for_job(
+    job_id: str,
+    user_id: str,
+    output_dir: str,
+    metadata_path: str,
+    clips: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not user_id:
+        raise RuntimeError("Missing app user id for reel persistence")
+    if not is_supabase_reels_configured():
+        raise RuntimeError("Supabase reels is not configured")
+
+    bucket = os.environ.get("AWS_S3_BUCKET", "")
+    if not bucket:
+        raise RuntimeError("AWS_S3_BUCKET is required for reel persistence")
+
+    base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    rows: List[Dict[str, Any]] = []
+
+    for i, clip in enumerate(clips, start=1):
+        clip_filename = f"{base_name}_clip_{i}.mp4"
+        clip_path = os.path.join(output_dir, clip_filename)
+        if not os.path.exists(clip_path):
+            continue
+
+        s3_key = f"reels/{user_id}/{job_id}/{clip_filename}"
+        uploaded = upload_file_to_s3(clip_path, bucket, s3_key)
+        if not uploaded:
+            raise RuntimeError(f"Failed to upload clip to S3: {clip_filename}")
+
+        media_url = _reel_media_url_from_s3_key(s3_key)
+        duration = clip.get("duration")
+        if duration is None:
+            try:
+                start = float(clip.get("start", 0) or 0)
+                end = float(clip.get("end", 0) or 0)
+                duration = max(0, int(round(end - start)))
+            except Exception:
+                duration = 0
+
+        rows.append(
+            {
+                "reel_url": media_url,
+                "reel_thumbnail_url": clip.get("thumbnail_url") or "",
+                "reel_title": clip.get("title") or clip.get("video_title_for_youtube_short") or f"Clip {i}",
+                "reel_description": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or "",
+                "reel_duration": max(5, int(duration or 0)),
+                "reel_created_at": now_iso,
+                "reel_updated_at": now_iso,
+                "reel_user_id": user_id,
+                "reel_status": "termine",
+                "reel_s3_key": s3_key,
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("No generated clips were available for Supabase persistence")
+
+    saved_rows = await supabase_insert_reels(rows)
+    return [_normalize_reel_row(row) for row in saved_rows]
 
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
@@ -211,7 +318,9 @@ async def run_job(job_id, job_data):
     cmd = job_data['cmd']
     env = job_data['env']
     output_dir = job_data['output_dir']
-    
+    user_id = job_data.get("user_id")
+    input_path = job_data.get("input_path")
+
     jobs[job_id]['status'] = 'processing'
     jobs[job_id]['logs'].append("Job started by worker.")
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
@@ -274,11 +383,7 @@ async def run_job(job_id, job_data):
         if returncode == 0:
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['logs'].append("Process finished successfully.")
-            
-            # Start S3 upload in background (silent, non-blocking)
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, upload_job_artifacts, output_dir, job_id)
-            
+
             # Find result JSON
             json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
             if not json_files:
@@ -291,15 +396,36 @@ async def run_job(job_id, job_data):
                     data = json.load(f)
                 
                 # Enhance result with video URLs
-                base_name = os.path.basename(target_json).replace('_metadata.json', '')
                 clips = data.get('shorts', [])
                 cost_analysis = data.get('cost_analysis')
 
+                try:
+                    saved_rows = await _persist_reels_for_job(
+                        job_id=job_id,
+                        user_id=user_id,
+                        output_dir=output_dir,
+                        metadata_path=target_json,
+                        clips=clips,
+                    )
+                except Exception as persist_error:
+                    jobs[job_id]['status'] = 'failed'
+                    jobs[job_id]['logs'].append(f"Supabase persistence failed: {persist_error}")
+                    jobs[job_id]['result'] = None
+                    return
+
+                enriched_clips: List[Dict[str, Any]] = []
                 for i, clip in enumerate(clips):
-                     clip_filename = f"{base_name}_clip_{i+1}.mp4"
-                     clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                
-                jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+                    clip_copy = dict(clip)
+                    if i < len(saved_rows):
+                        clip_copy['video_url'] = saved_rows[i].get('reel_playback_url') or saved_rows[i].get('reel_url')
+                        clip_copy['reel_id'] = saved_rows[i].get('id')
+                    enriched_clips.append(clip_copy)
+
+                jobs[job_id]['result'] = {
+                    'clips': enriched_clips,
+                    'cost_analysis': cost_analysis,
+                    'reels': saved_rows,
+                }
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
@@ -310,10 +436,54 @@ async def run_job(job_id, job_data):
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
+    finally:
+        # Reels are persisted remotely; local processing artifacts are always removed.
+        _cleanup_directory(output_dir)
+        if input_path and os.path.exists(input_path):
+            try:
+                os.remove(input_path)
+            except Exception:
+                pass
 
 @app.get("/api/config")
 async def get_config():
     return {"youtubeUrlEnabled": not DISABLE_YOUTUBE_URL}
+
+@app.get("/api/services/status")
+async def get_services_status():
+    """Check which API services are configured and available."""
+    return {
+        "gemini": {
+            "available": bool(os.getenv("GEMINI_API_KEY")),
+            "name": "Google Gemini",
+            "description": "AI video analysis and clip generation"
+        },
+        "openai": {
+            "available": bool(os.getenv("OPENAI_API_KEY")),
+            "name": "OpenAI",
+            "description": "Fallback AI provider"
+        },
+        "elevenlabs": {
+            "available": bool(os.getenv("ELEVENLABS_API_KEY")),
+            "name": "ElevenLabs",
+            "description": "AI voice dubbing and translation"
+        },
+        "uploadpost": {
+            "available": bool(os.getenv("UPLOAD_POST_API_KEY")),
+            "name": "Upload-Post",
+            "description": "Social media publishing"
+        },
+        "aws_s3": {
+            "available": bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")),
+            "name": "AWS S3",
+            "description": "Video backup and storage"
+        },
+        "supabase": {
+            "available": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
+            "name": "Supabase",
+            "description": "Database and authentication"
+        }
+    }
 
 @app.post("/api/process")
 async def process_endpoint(
@@ -325,6 +495,10 @@ async def process_endpoint(
     api_key = request.headers.get("X-Gemini-Key")
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
 
@@ -361,6 +535,7 @@ async def process_endpoint(
     job_id = str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
+    input_path = None
 
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
@@ -399,7 +574,9 @@ async def process_endpoint(
         'cmd': cmd,
         'env': env,
         'output_dir': job_output_dir,
-        'attestation': attestation
+        'input_path': input_path,
+        'attestation': attestation,
+        'user_id': user_id,
     }
 
     await job_queue.put(job_id)
@@ -1390,16 +1567,24 @@ async def post_to_socials(req: SocialPostRequest):
         
     try:
         clip = job['result']['clips'][req.clip_index]
-        # Video URL is relative /videos/..., we need absolute file path
-        # clip['video_url'] is like "/videos/{job_id}/{filename}"
-        # We constructed it as: f"/videos/{job_id}/{clip_filename}"
-        # And file is at f"{OUTPUT_DIR}/{job_id}/{clip_filename}"
-        
-        filename = clip['video_url'].split('/')[-1]
-        file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-        
-        if not os.path.exists(file_path):
-             raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
+        video_ref = str(clip.get('video_url') or '').strip()
+        if not video_ref:
+             raise HTTPException(status_code=404, detail="Video URL not found for this clip")
+
+        filename = video_ref.split('?')[0].split('/')[-1] or f"{req.job_id}_{req.clip_index + 1}.mp4"
+        file_content: bytes
+
+        if video_ref.startswith('http://') or video_ref.startswith('https://'):
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                media_response = await client.get(video_ref)
+                media_response.raise_for_status()
+                file_content = media_response.content
+        else:
+            file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
+            if not os.path.exists(file_path):
+                 raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
+            with open(file_path, "rb") as f:
+                file_content = f.read()
 
         # Construct parameters for Upload-Post API
         # Fallbacks
@@ -1441,11 +1626,6 @@ async def post_to_socials(req: SocialPostRequest):
              data_payload["privacyStatus"] = "public"
 
         # Send File
-        # httpx AsyncClient requires async file reading or bytes. 
-        # Since we have MAX_FILE_SIZE_MB, reading into memory is safe-ish.
-        with open(file_path, "rb") as f:
-            file_content = f.read()
-            
         files = {
             "video": (filename, file_content, "video/mp4")
         }
@@ -2579,158 +2759,113 @@ async def saasshorts_voices(
         "source": "defaults",
     }
 
-# --- Reels listing API ---
-
-from pathlib import Path
-from math import ceil
+# --- Reels API (Supabase-backed only) ---
 
 
-def _build_reel_item_from_metadata(job_id: str, metadata_path: str) -> Optional[Dict]:
-    """Build a normalized reel item from one *_metadata.json file."""
-    try:
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return None
+class ReelShareRequest(BaseModel):
+    api_key: str
+    user_id: str
+    platforms: List[str]
+    title: Optional[str] = None
+    description: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    timezone: Optional[str] = "UTC"
 
-    shorts = data.get("shorts", []) or []
-    created_at = None
-    try:
-        created_at = os.path.getmtime(metadata_path)
-    except Exception:
-        created_at = time.time()
 
-    # Normalize clips with video URLs
-    clips = []
-    base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
-    for i, clip in enumerate(shorts, start=1):
-        c = dict(clip)
-        if not c.get("video_url"):
-            clip_filename = f"{base_name}_clip_{i}.mp4"
-            c["video_url"] = f"/videos/{job_id}/{clip_filename}"
-        clips.append(c)
-
-    title = data.get("title") or data.get("source_title") or job_id
-
-    return {
-        "job_id": job_id,
-        "title": title,
-        "created_at": created_at,
-        "clip_count": len(clips),
-        "clips": clips,
-        "cost_analysis": data.get("cost_analysis"),
-        "transcript_language": (data.get("transcript") or {}).get("language"),
+def _reel_share_payload(final_title: str, final_description: str, payload: ReelShareRequest) -> Dict[str, Any]:
+    data_payload: Dict[str, Any] = {
+        "user": payload.user_id,
+        "title": final_title,
+        "platform[]": payload.platforms,
+        "async_upload": "true",
     }
+    if payload.scheduled_date:
+        data_payload["scheduled_date"] = payload.scheduled_date
+        if payload.timezone:
+            data_payload["timezone"] = payload.timezone
 
-
-def _scan_reels_from_output() -> List[Dict]:
-    """Scan output/<job_id>/*_metadata.json and return reels sorted by newest first."""
-    reels: List[Dict] = []
-    output_root = Path(OUTPUT_DIR)
-
-    if not output_root.exists():
-        return reels
-
-    for job_dir in output_root.iterdir():
-        if not job_dir.is_dir():
-            continue
-
-        metadata_files = sorted(job_dir.glob("*_metadata.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not metadata_files:
-            continue
-
-        # Keep only latest metadata for each job folder
-        item = _build_reel_item_from_metadata(job_dir.name, str(metadata_files[0]))
-        if item:
-            reels.append(item)
-
-    reels.sort(key=lambda r: r.get("created_at", 0), reverse=True)
-    return reels
+    if "tiktok" in payload.platforms:
+        data_payload["tiktok_title"] = final_description or final_title
+    if "instagram" in payload.platforms:
+        data_payload["instagram_title"] = final_description or final_title
+        data_payload["media_type"] = "REELS"
+    if "youtube" in payload.platforms:
+        data_payload["youtube_title"] = final_title
+        data_payload["youtube_description"] = final_description or final_title
+        data_payload["privacyStatus"] = "public"
+    return data_payload
 
 
 @app.get("/api/reels")
-async def list_reels(page: int = Query(1, ge=1),page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None):
-    """
-    DB-first reels listing (Supabase), fallback to local output scan.
-    Returns both `items` and `reels` for frontend compatibility.
-    """
-    # 1) Try Supabase first
-    if supabase_list_reels is not None:
-        try:
-            # adapte selon ta signature réelle dans supabase_reels.py
-            # souvent: list_reels(page=..., page_size=..., query=...)
-            db_resp = supabase_list_reels(page=page, page_size=page_size, query=q)
+async def list_reels(request: Request, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    if not is_supabase_reels_configured():
+        raise HTTPException(status_code=503, detail="Supabase reels is not configured")
 
-            # Normalisation robuste
-            items = (
-                db_resp.get("items")
-                or db_resp.get("reels")
-                or db_resp.get("data")
-                or []
-            )
-            total = int(db_resp.get("total", len(items)))
-            total_pages = int(db_resp.get("total_pages", max(1, (total + page_size - 1) // page_size)))
-            has_more = bool(db_resp.get("has_more", page * page_size < total))
-
-            return {
-                "items": items,
-                "reels": items,  # compat
-                "page": page,
-                "page_size": page_size,
-                "total": total,
-                "total_pages": total_pages,
-                "has_more": has_more,
-                "source": "supabase",
-            }
-        except Exception as e:
-            print(f"⚠️ /api/reels supabase failed, fallback local scan: {e}")
-
-    # 2) Fallback local filesystem (si DB down ou non configurée)
-    reels = _scan_reels_from_output()
-    if q:
-        q_lower = q.strip().lower()
-        if q_lower:
-            reels = [
-                r for r in reels
-                if q_lower in (r.get("title", "").lower())
-                or q_lower in (r.get("job_id", "").lower())
-            ]
-
-    total = len(reels)
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    start = (page - 1) * page_size
-    end = start + page_size
-    items = reels[start:end]
-
+    rows, total = await supabase_list_reels(user_id=user_id, page=page, page_size=page_size, status=status, query=q)
     return {
-        "items": items,
-        "reels": items,  # compat
-        "page": page,
-        "page_size": page_size,
+        "items": [_normalize_reel_row(row) for row in rows],
         "total": total,
-        "total_pages": total_pages,
-        "has_more": end < total,
-        "source": "local",
+        "page": max(page, 1),
+        "page_size": min(max(page_size, 1), 100),
     }
 
 
-@app.get("/api/reels/{job_id}")
-async def get_reel(job_id: str):
-    """Get one reel/job by job_id."""
-    job_dir = os.path.join(OUTPUT_DIR, job_id)
-    if not os.path.isdir(job_dir):
+@app.get("/api/reels/{reel_id}/media-url")
+async def reel_media_url(request: Request, reel_id: str):
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    row = await supabase_get_reel(reel_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Reel not found")
+    item = _normalize_reel_row(row)
+    return {"media_url": item.get("media_url")}
+
+
+@app.delete("/api/reels/{reel_id}")
+async def delete_reel(request: Request, reel_id: str):
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    deleted = await supabase_soft_delete_reel(reel_id, user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Reel not found")
+    return {"deleted": True}
+
+
+@app.post("/api/reels/{reel_id}/share")
+async def share_reel(request: Request, reel_id: str, payload: ReelShareRequest):
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    row = await supabase_get_reel(reel_id, user_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Reel not found")
 
-    metadata_files = sorted(
-        glob.glob(os.path.join(job_dir, "*_metadata.json")),
-        key=lambda p: os.path.getmtime(p),
-        reverse=True,
-    )
-    if not metadata_files:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+    item = _normalize_reel_row(row)
+    media_url = item.get("media_url")
+    if not media_url:
+        raise HTTPException(status_code=400, detail="No media URL available")
 
-    item = _build_reel_item_from_metadata(job_id, metadata_files[0])
-    if not item:
-        raise HTTPException(status_code=500, detail="Failed to parse metadata")
+    final_title = payload.title or row.get("reel_title") or "OpenShorts"
+    final_description = payload.description or row.get("reel_description") or ""
 
-    return item
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        media_response = await client.get(media_url)
+        media_response.raise_for_status()
+        upload_response = await client.post(
+            "https://api.upload-post.com/api/upload",
+            headers={"Authorization": f"Apikey {payload.api_key}"},
+            data=_reel_share_payload(final_title, final_description, payload),
+            files={"video": (f"{reel_id}.mp4", media_response.content, "video/mp4")},
+        )
+
+    if upload_response.status_code not in (200, 201, 202):
+        raise HTTPException(status_code=upload_response.status_code, detail=f"Upload-Post Error: {upload_response.text}")
+    return upload_response.json()

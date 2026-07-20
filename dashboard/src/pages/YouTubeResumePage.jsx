@@ -5,7 +5,7 @@ export default function YouTubeResumePage() {
         <GeneratedMediaPage
             title="IA Captions générés"
             subtitle="Retrouve tes vidéos avec captions IA, adaptés à la plateforme cible, partageables et téléchargeables."
-            createRoute="/dashboard/youtube-studio"
+            createRoute="/dashboard/youtube-studio?new=1"
             listEndpoint="/api/ia-captions"
             mediaUrlEndpoint="/api/ia-captions"
             deleteEndpoint="/api/ia-captions"

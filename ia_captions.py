@@ -239,9 +239,14 @@ def _media_url_from_s3_key(s3_key: str) -> str:
     return generate_presigned_url(bucket, s3_key, expiration=7200)
 
 
-def _media_fallback_local_url(session_id: str, file_name: str) -> str:
-    relative = os.path.join("caption_sessions", session_id, file_name)
-    return f"/videos/{relative}".replace("\\", "/")
+def _cleanup_caption_session(session_id: str) -> None:
+    session_dir = _session_dir(session_id)
+    try:
+        if os.path.isdir(session_dir):
+            shutil.rmtree(session_dir, ignore_errors=True)
+    except Exception:
+        pass
+    caption_sessions.pop(session_id, None)
 
 
 def _upload_post_payload(final_title: str, final_description: str, platforms: List[str], user_id: str, scheduled_date: Optional[str] = None, timezone_name: Optional[str] = None) -> Dict[str, Any]:
@@ -427,43 +432,51 @@ async def captions_render(request: Request, req: RenderRequest):
         bg_opacity=style.bg_opacity,
     )
 
-    s3_key = _upload_caption_video_to_s3(output_path, req.session_id)
-    media_url = _media_url_from_s3_key(s3_key) or _media_fallback_local_url(req.session_id, output_name)
-
     user_id = request.headers.get("X-User-Id")
-    item = None
-    if user_id and is_supabase_configured():
-        now_iso = datetime.now(timezone.utc).isoformat()
-        title = req.title or (captions[0].text[:80] if captions else "IA Captions")
-        description = req.description or f"Captions adaptes pour {req.platform}."
-        duration = int(session.get("duration") or 0)
-        row = {
-            "caption_url": media_url,
-            "caption_thumbnail_url": "",
-            "caption_title": title,
-            "caption_description": description,
-            "caption_duration": max(5, duration),
-            "caption_created_at": now_iso,
-            "caption_updated_at": now_iso,
-            "caption_user_id": user_id,
-            "caption_status": media_status_value("termine"),
-            "caption_job_id": req.session_id,
-            "caption_clip_index": 0,
-            "caption_s3_key": s3_key,
-            "generation_inputs": {
-                "platform": req.platform,
-                "remove_silences": bool(session.get("remove_silences")),
-                "style": style.model_dump(),
-            },
-            "input_source_type": "upload",
-            "input_source_value": os.path.basename(session.get("input_path") or ""),
-        }
-        saved = await supabase_save_media_rows("ia_caption", [row])
-        if saved:
-            item = await _normalize_media_row(saved[0])
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase media is not configured")
 
-    session["output_path"] = output_path
-    session["captions"] = [c.model_dump() for c in captions]
+    s3_key = _upload_caption_video_to_s3(output_path, req.session_id)
+    if not s3_key:
+        raise HTTPException(status_code=500, detail="S3 upload failed for IA captions output")
+    media_url = _media_url_from_s3_key(s3_key)
+    if not media_url:
+        raise HTTPException(status_code=500, detail="Unable to generate media URL from S3")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    title = req.title or (captions[0].text[:80] if captions else "IA Captions")
+    description = req.description or f"Captions adaptes pour {req.platform}."
+    duration = int(session.get("duration") or 0)
+    row = {
+        "caption_url": media_url,
+        "caption_thumbnail_url": "",
+        "caption_title": title,
+        "caption_description": description,
+        "caption_duration": max(5, duration),
+        "caption_created_at": now_iso,
+        "caption_updated_at": now_iso,
+        "caption_user_id": user_id,
+        "caption_status": media_status_value("termine"),
+        "caption_job_id": req.session_id,
+        "caption_clip_index": 0,
+        "caption_s3_key": s3_key,
+        "generation_inputs": {
+            "platform": req.platform,
+            "remove_silences": bool(session.get("remove_silences")),
+            "style": style.model_dump(),
+        },
+        "input_source_type": "upload",
+        "input_source_value": os.path.basename(session.get("input_path") or ""),
+    }
+    saved = await supabase_save_media_rows("ia_caption", [row])
+    if not saved:
+        raise HTTPException(status_code=500, detail="Failed to persist IA captions row in Supabase")
+    item = await _normalize_media_row(saved[0])
+
+    # Keep output fully remote: drop all local artifacts right after persistence.
+    _cleanup_caption_session(req.session_id)
 
     return {
         "session_id": req.session_id,
