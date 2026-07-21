@@ -6,7 +6,7 @@ import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, onPlay, onPause }) {
+export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = React.useRef(null);
@@ -65,18 +65,14 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         setIsEditing(true);
         setEditError(null);
         try {
-            const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
-
-            if (!apiKey) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
-            }
+            // Gemini API Key is now configured server-side via .env
+            // No need to send header from frontend
 
             // Try Remotion effects endpoint first
             const effectsRes = await fetch(getApiUrl('/api/effects/generate'), {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'X-Gemini-Key': apiKey
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -107,8 +103,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const res = await fetch(getApiUrl('/api/edit'), {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'X-Gemini-Key': apiKey
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     job_id: jobId,

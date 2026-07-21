@@ -492,9 +492,10 @@ async def process_endpoint(
     url: Optional[str] = Form(None),
     acknowledged: Optional[str] = Form(None)
 ):
-    api_key = request.headers.get("X-Gemini-Key")
+    # Determine API Key: Use .env configuration (GEMINI_API_KEY or OPENAI_API_KEY as fallback)
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
 
     user_id = request.headers.get("X-User-Id")
     if not user_id:
@@ -589,11 +590,39 @@ async def get_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     
     job = jobs[job_id]
-    return {
+    response = {
         "status": job['status'],
         "logs": job['logs'],
         "result": job.get('result')
     }
+
+    # If job is processing, scan for partial clips that have been generated
+    if job['status'] in ('queued', 'processing') and job.get('output_dir'):
+        try:
+            output_dir = job['output_dir']
+            if os.path.exists(output_dir):
+                # Find all generated clips (not temp ones)
+                clip_files = sorted([
+                    f for f in os.listdir(output_dir)
+                    if f.endswith('.mp4') and not f.startswith('temp_')
+                ])
+                if clip_files:
+                    # Build partial result from generated clips
+                    partial_clips = []
+                    for i, clip_file in enumerate(clip_files):
+                        clip_path = os.path.join(output_dir, clip_file)
+                        partial_clips.append({
+                            'video_url': f'/videos/{job_id}/{clip_file}',
+                            'file': clip_file,
+                            'index': i,
+                            'status': 'generated'
+                        })
+                    response['partialClips'] = partial_clips
+        except Exception as e:
+            # Silently fail - don't break the status endpoint
+            pass
+
+    return response
 
 from editor import VideoEditor
 from subtitles import generate_srt, burn_subtitles, generate_srt_from_video
@@ -1780,9 +1809,10 @@ async def thumbnail_analyze(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     """Analyze a video and suggest viral YouTube titles."""
-    api_key = x_gemini_key
+    # Use .env configuration (ignore header for security)
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
 
     pre_transcript = None
 
@@ -1864,9 +1894,10 @@ async def thumbnail_titles(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     """Refine title suggestions or accept a manual title."""
-    api_key = x_gemini_key
+    # Use .env configuration (ignore header for security)
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
 
     # Manual title mode - just create a session with the user's title
     if req.title:
@@ -1926,9 +1957,10 @@ async def thumbnail_generate(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
-    api_key = x_gemini_key
+    # Use .env configuration (ignore header for security)
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
 
     # Clamp count
     count = min(max(1, count), 6)
@@ -1992,9 +2024,10 @@ async def thumbnail_describe(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     """Generate a YouTube description with chapters from the transcript."""
-    api_key = x_gemini_key
+    # Use .env configuration (ignore header for security)
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
 
     if req.session_id not in thumbnail_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
