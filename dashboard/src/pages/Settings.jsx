@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import {
-  User, Mail, Copy, Check, Moon, Sun, Monitor, Linkedin, Twitch, Youtube, Facebook, Instagram, AlertCircle
+  User, Mail, Copy, Check, Moon, Sun, Monitor, Linkedin, Twitch, Youtube, Facebook, Instagram,
+  CreditCardIcon
 } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import { useTheme } from '../state/ThemeContext';
-import ServiceStatusWidget from '../components/ServiceStatusWidget';
+import ServiceUsage from "../components/ServiceUsage.jsx";
 
 const SOCIAL_NETWORKS = [
   {
@@ -306,33 +307,21 @@ export default function SettingsPage() {
             );
           })}
         </div>
-
-        <div className="mt-6 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-          <p className="text-xs text-blue-300 leading-relaxed">
-            💡 <strong>Note:</strong> Connected networks are stored locally in your browser. When you share a creation,
-            you'll be able to select which platforms to publish to. Authentication happens securely via each platform.
-          </p>
-        </div>
+        
       </div>
 
-      {/* Service Status */}
-      <div className="mt-6 pb-6 border-b border-white/10">
+      {/* Subscription Status */}
+      <div className="glass-panel p-6 rounded-xl border border-white/10 mt-6">
         <div className="flex items-center gap-3 mb-4">
           <div className="p-2 bg-cyan-500/10 rounded-lg">
-            <AlertCircle size={20} className="text-cyan-400" />
+            <CreditCardIcon size={20} className="text-cyan-400" />
           </div>
-          <h2 className="text-xl font-semibold">Service Status</h2>
+          <h2 className="text-xl font-semibold">Service Usage</h2>
         </div>
-        <ServiceStatusWidget />
+        <ServiceUsage />
       </div>
 
-      {/* API Keys Notice */}
-      <div className="mt-6 p-4 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-        <p className="text-xs text-amber-300 leading-relaxed">
-          ⚙️ <strong>API Keys & Services:</strong> All API keys (Gemini, ElevenLabs, etc.) are configured via environment variables
-          and are never exposed in the UI. Your browser stores no credentials - only feature preferences.
-        </p>
-      </div>
+
     </div>
   );
 }

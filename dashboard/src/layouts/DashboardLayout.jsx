@@ -1,11 +1,12 @@
 import {CreditCard, LogOut } from "lucide-react";
-import { NavLink, Outlet } from "react-router-dom";
+import {NavLink, Outlet, useNavigate} from "react-router-dom";
 import { DASHBOARD_SIDEBAR_ITEMS } from "../lib/dashboard-nav";
 import { useAuth } from "../state/AuthContext";
 
 export default function DashboardLayout() {
     const { user, logout } = useAuth();
 
+    const navigate = useNavigate();
     const displayName =
         user?.user_metadata?.full_name ||
         user?.user_metadata?.name ||
@@ -51,21 +52,6 @@ export default function DashboardLayout() {
                     </nav>
 
                     <div className="p-4 border-t border-white/5 space-y-2">
-                        <button
-                            type="button"
-                            onClick={() => {
-                                window.location.reload();
-                            }}
-                            className="w-full flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
-                        >
-                            <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
-                                <CreditCard size={16} />
-                            </div>
-                            <div className="hidden lg:block overflow-hidden">
-                                <p className="text-sm font-bold text-white leading-none mb-0.5">Abonnements</p>
-                            </div>
-                        </button>
-
                         <button
                             onClick={logout}
                             className="mx-auto mt-2 flex w-[calc(100%-1rem)] items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-300 transition hover:bg-red-500/15"

@@ -14,6 +14,7 @@ import ReelsPage from "./pages/ReelsPage";
 import ResetPassword from "./pages/ResetPassword";
 import UpdatePassword from "./pages/UpdatePassword";
 import YouTubeResumePage from "./pages/YouTubeResumePage";
+import AbonnementPage from "./pages/AbonnementPage";
 
 function RootRedirect() {
     const { isAuthenticated, loading } = useAuth();
@@ -54,6 +55,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                             <Route path="youtube-resumes" element={<YouTubeResumePage />} />
                             <Route path="youtube-studio" element={<DashboardTabPage tabKey="youtube-studio" />} />
                             <Route path="settings" element={<DashboardTabPage tabKey="settings" />} />
+                            <Route path="abonnements" element={<AbonnementPage />} />
                         </Route>
 
                         <Route path="*" element={<RootRedirect />} />

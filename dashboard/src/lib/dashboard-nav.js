@@ -1,4 +1,5 @@
 import {
+    CreditCardIcon,
     Home,
     Image,
     LayoutGrid,
@@ -41,6 +42,18 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         badge: "Gallery",
         category: "service",
         path: "/dashboard/youtube-resumes",
+    },
+    {
+        key: "abonnements",
+        title: "Abonnements",
+        sidebarLabel: "Abonnements",
+        icon: CreditCardIcon,
+        activeClassName: "bg-primary/10 text-primary",
+        inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Configure les cles Gemini, Upload-Post, ElevenLabs et fal.ai pour activer chaque service.",
+        badge: "Config",
+        category: "utility",
+        path: "/dashboard/abonnements",
     },
     {
         key: "settings",
