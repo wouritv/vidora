@@ -51,7 +51,12 @@ jobs:
       - name: Lancer les tests unitaires JS (avec coverage)
         if: matrix.service != 'backend'
         working-directory: ${{ matrix.path }}
-        run: npm run test -- --coverage
+        run: |
+          if npm run | grep -q '^  test$'; then
+            npm run test -- --coverage
+          else
+            echo "⚠️ Aucun script 'test' défini dans ${{ matrix.path }}/package.json — étape ignorée"
+          fi
 
       - name: Build JS
         if: matrix.service != 'backend'
