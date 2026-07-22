@@ -17,6 +17,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - service: frontend
@@ -92,6 +93,9 @@ jobs:
         uses: sonarsource/sonarqube-scan-action@v3
         with:
           projectBaseDir: ${{ matrix.path }}
+          args: >
+            -Dsonar.projectKey=${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+            -Dsonar.projectName=${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
