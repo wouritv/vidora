@@ -132,6 +132,14 @@ jobs:
       - name: Checkout du code
         uses: actions/checkout@v4
 
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          config-inline: |
+            [registry."${{ env.NEXUS_REGISTRY }}"]
+              http = true
+              insecure = true
+
       - name: Autoriser le registry Nexus en HTTP (insecure)
         run: |
           echo '{"insecure-registries":["${{ env.NEXUS_REGISTRY }}"]}' | sudo tee /etc/docker/daemon.json
