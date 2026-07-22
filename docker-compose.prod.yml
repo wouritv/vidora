@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  backend:
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-backend:${IMAGE_TAG:-latest}
+    container_name: vidora-backend
+    ports:
+      - "4000:8000"
+    volumes:
+      - output-data:/app/output
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  frontend:
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-latest}
+    container_name: vidora-frontend
+    ports:
+      - "4001:5173"
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+  renderer:
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-latest}
+    container_name: vidora-renderer
+    ports:
+      - "4002:3100"
+    volumes:
+      - output-data:/output
+    environment:
+      - REMOTION_BUNDLE_PATH=/app/remotion
+      - OUTPUT_DIR=/output
+      - PORT=3100
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+volumes:
+  output-data:
+
+networks:
+  app-network:
+    driver: bridge

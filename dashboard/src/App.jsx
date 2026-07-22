@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Sparkles, ChevronDown, Activity,
-  Terminal, Globe, Calendar, Instagram, Youtube, ArrowLeft
+  Sparkles, Activity, Globe, Calendar, Instagram, Youtube, ArrowLeft,
+  CheckCircle2, Clock3, Download, Film, Loader2, AlertCircle, X
 } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -14,8 +14,6 @@ import { DASHBOARD_SIDEBAR_ITEMS } from "./lib/dashboard-nav";
 import { useAuth } from "./state/AuthContext";
 import SettingsPage from "./pages/Settings.jsx";
 
-
-
 const TikTokIcon = ({ size = 16, className = "" }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className}>
       <path d="M19.589 6.686a4.793 4.793 0 0 1-3.77-4.245V2h-3.445v13.672a2.896 2.896 0 0 1-5.201 1.743l-.002-.001.002.001a2.895 2.895 0 0 1 3.183-4.51v-3.5a6.329 6.329 0 0 0-5.394 10.692 6.33 6.33 0 0 0 10.857-4.424V8.687a8.182 8.182 0 0 0 4.773 1.526V6.79a4.831 4.831 0 0 1-1.003-.104z" />
@@ -23,29 +21,233 @@ const TikTokIcon = ({ size = 16, className = "" }) => (
 );
 
 const getStatusBadgeClass = (status) => {
+  if (status === 'completed') status = 'complete';
+  if (status === 'failed') status = 'error';
   if (status === 'processing') return 'bg-primary/10 border-primary/20 text-primary';
   if (status === 'complete') return 'bg-green-500/10 border-green-500/20 text-green-400';
   return 'bg-red-500/10 border-red-500/20 text-red-400';
 };
 
+const getProcessLabel = (status) => {
+  if (status === 'completed') status = 'complete';
+  if (status === 'failed') status = 'error';
+  if (status === 'processing') return 'En cours';
+  if (status === 'complete') return 'Termine';
+  if (status === 'error') return 'Erreur';
+  return 'En attente';
+};
+
+const normalizeStatus = (status) => {
+  if (status === 'queued') return 'processing';
+  if (status === 'completed') return 'complete';
+  if (status === 'failed') return 'error';
+  return status;
+};
+
+const getVisibleClips = (status, results, partialClips) => {
+  status = normalizeStatus(status);
+  if (status === 'complete') return results?.clips || [];
+  if (results?.clips?.length) return results.clips;
+  return partialClips;
+};
+
+const getHighestClipMention = (logs) => logs.reduce((max, line) => {
+  const matches = [...line.matchAll(/clip\s+(\d+)/ig)];
+  if (!matches.length) return max;
+  return Math.max(max, ...matches.map((match) => Number(match[1]) || 0));
+}, 0);
+
+const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) => {
+  status = normalizeStatus(status);
+  const hasLog = (regex) => logs.some((line) => regex.test(line));
+  const highestClipMention = getHighestClipMention(logs);
+  const generatedCount = visibleClips.length;
+  const detectedCount = Math.max(highestClipMention, generatedCount);
+  const processStarted = status !== 'idle';
+  const sourceReady = processingMedia?.type === 'file'
+    ? processStarted
+    : hasLog(/download/i) || detectedCount > 0 || status === 'complete' || status === 'error';
+  const transcriptReady = hasLog(/transcrib|transcript/i) || detectedCount > 0 || status === 'complete' || status === 'error';
+  const reelsDetected = detectedCount > 0 || status === 'complete' || status === 'error';
+
+  return [
+    {
+      key: 'started',
+      label: 'Processus demarre',
+      description: processStarted ? 'Le workflow a bien ete lance.' : 'En attente de lancement.',
+      state: processStarted ? 'done' : 'pending',
+    },
+    {
+      key: 'source',
+      label: processingMedia?.type === 'file' ? 'Reception de la video' : 'Telechargement de la video',
+      description: sourceReady
+        ? 'La source est prete pour le traitement.'
+        : 'Preparation de la source en cours.',
+      state: sourceReady ? 'done' : processStarted ? 'active' : 'pending',
+    },
+    {
+      key: 'transcript',
+      label: 'Generation de la transcription',
+      description: transcriptReady
+        ? 'La transcription est disponible pour l’analyse.'
+        : 'Transcription audio en cours.',
+      state: transcriptReady ? 'done' : sourceReady && status === 'processing' ? 'active' : 'pending',
+    },
+    {
+      key: 'detect',
+      label: 'Detection du nombre de reels a creer',
+      description: reelsDetected
+        ? `${detectedCount || generatedCount} reel(s) identifies pour la generation.`
+        : 'L’IA determine encore les meilleurs moments.',
+      state: reelsDetected ? 'done' : transcriptReady && status === 'processing' ? 'active' : 'pending',
+    },
+    {
+      key: 'create',
+      label: 'Creation des reels',
+      description: status === 'complete'
+        ? `${generatedCount} reel(s) finalises et prets au telechargement.`
+        : generatedCount > 0
+          ? `${generatedCount} reel(s) deja generes.`
+          : 'Generation des reels en cours.',
+      state: status === 'complete'
+        ? 'done'
+        : status === 'error'
+          ? 'error'
+          : reelsDetected && status === 'processing'
+            ? 'active'
+            : 'pending',
+    },
+  ];
+};
+
+const StepStatusIcon = ({ state }) => {
+  if (state === 'done') return <CheckCircle2 size={16} className="text-green-400" />;
+  if (state === 'active') return <Loader2 size={16} className="text-primary animate-spin" />;
+  if (state === 'error') return <AlertCircle size={16} className="text-red-400" />;
+  return <Clock3 size={16} className="text-zinc-500" />;
+};
+
+const ProcessingChecklist = ({ status, logs, visibleClips, processingMedia }) => {
+  const steps = buildProcessingSteps({ status, logs, visibleClips, processingMedia });
+  const doneCount = steps.filter((step) => step.state === 'done').length;
+  const totalCount = steps.length;
+  const progressPercent = Math.round((doneCount / totalCount) * 100);
+
+  return (
+    <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Suivi du process</p>
+          <h3 className="mt-1 text-lg font-bold text-white">Generation des reels</h3>
+        </div>
+        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-zinc-300">
+          <Activity size={14} className={status === 'processing' ? 'text-primary animate-pulse' : 'text-zinc-400'} />
+          <span>{getProcessLabel(status)}</span>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+        <div className="mb-2 flex items-center justify-between text-xs">
+          <span className="text-zinc-400">Progression</span>
+          <span className="font-medium text-zinc-200">{doneCount}/{totalCount} etapes ({progressPercent}%)</span>
+        </div>
+        <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
+          <div
+            className="h-full rounded-full bg-primary transition-all duration-500"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="mt-5 space-y-3">
+        {steps.map((step) => (
+          <div key={step.key} className="flex items-start gap-3 rounded-xl border border-white/5 bg-black/20 px-4 py-3">
+            <div className="mt-0.5 shrink-0">
+              <StepStatusIcon state={step.state} />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-white">{step.label}</p>
+              <p className="mt-1 text-xs leading-5 text-zinc-400">{step.description}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+    </section>
+  );
+};
+
+const GeneratedClipsList = ({ clips, status }) => {
+  if (!clips.length) {
+    return <EmptyResultsState status={status} />;
+  }
+
+  return (
+    <div className="space-y-3">
+      {clips.map((clip, index) => {
+        const duration = Number.isFinite(clip?.end - clip?.start)
+          ? Math.max(1, Math.round(clip.end - clip.start))
+          : null;
+
+        return (
+          <div key={`${clip?.reel_id || clip?.video_url || 'clip'}-${index}`} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary">
+                    {index + 1}
+                  </span>
+                  <p className="truncate text-sm font-semibold text-white">
+                    {clip?.video_title_for_youtube_short || clip?.title || `Reel ${index + 1}`}
+                  </p>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-zinc-400">
+                  {duration ? `${duration}s • ` : ''}
+                  {status === 'complete' ? 'Pret pour telechargement et edition.' : 'Reel genere pendant le traitement.'}
+                </p>
+              </div>
+
+              {clip?.video_url && (
+                <a
+                  href={getApiUrl(clip.video_url)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-200 transition hover:bg-white/10"
+                >
+                  <Download size={14} />
+                  Telecharger
+                </a>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
 
 const EmptyResultsState = ({ status }) => {
   if (status === 'processing') {
     return (
-        <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4 opacity-50">
+        <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/20 px-6 py-10 text-zinc-500 space-y-4">
           <div className="w-12 h-12 rounded-full border-2 border-zinc-800 border-t-primary animate-spin" />
-          <p className="text-sm">Waiting for clips...</p>
+          <p className="text-sm text-center">Les reels apparaitront ici au fur et a mesure de la generation.</p>
         </div>
     );
   }
   if (status === 'error') {
     return (
-        <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-2">
-          <p>Generation failed.</p>
+        <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-red-500/20 bg-red-500/5 px-6 py-10 text-red-400 space-y-2">
+          <p>La generation a rencontre une erreur.</p>
         </div>
     );
   }
-  return null;
+  return (
+    <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/20 px-6 py-10 text-zinc-500 space-y-2">
+      <Film size={22} className="text-zinc-600" />
+      <p className="text-sm">Aucun reel genere pour le moment.</p>
+    </div>
+  );
 };
 
 const Sidebar = ({ currentTab, onNavigate }) => (
@@ -118,14 +320,10 @@ const pollJob = async (jobId) => {
   try {
     const res = await fetch(getApiUrl(`/api/status/${jobId}`));
     if (!res.ok) {
-      console.error(`Status check failed: ${res.status} ${res.statusText}`);
       throw new Error(`Status check failed: ${res.status} ${res.statusText}`);
     }
-    const data = await res.json();
-    console.debug(`[Poll] Job ${jobId}: status=${data.status}, logsCount=${data.logs?.length || 0}`);
-    return data;
+    return await res.json();
   } catch (e) {
-    console.error('Poll request error:', e.message);
     throw e;
   }
 };
@@ -139,14 +337,18 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
   const [results, setResults] = useState(null);
   const [partialClips, setPartialClips] = useState([]);  // Partial results during processing
   const [logs, setLogs] = useState([]);
-  const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
   const [showScheduleWeek, setShowScheduleWeek] = useState(false);
+  const [showCompletionPanel, setShowCompletionPanel] = useState(false);
 
   const [syncedTime, setSyncedTime] = useState(0);
   const [isSyncedPlaying, setIsSyncedPlaying] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [hasNotifiedCompletion, setHasNotifiedCompletion] = useState(false);
+  const uiStatus = normalizeStatus(status);
+  const visibleClips = getVisibleClips(status, results, partialClips);
+  const actionReadyClips = visibleClips.filter((clip) => typeof clip?.video_url === 'string' && clip.video_url.length > 0);
+  const pendingClips = visibleClips.filter((clip) => !clip?.video_url);
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -172,6 +374,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
       setPartialClips([]);
       setLogs([]);
       setProcessingMedia(null);
+      setShowCompletionPanel(false);
       return;
     }
 
@@ -187,9 +390,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
         setJobId(session.jobId);
         setResults(session.results || null);
         if (session.processingMedia) setProcessingMedia(session.processingMedia);
-        setStatus(session.status === 'processing' ? 'processing' : session.status);
-        setSessionRecovered(true);
-        setTimeout(() => setSessionRecovered(false), 5000);
+        setStatus(normalizeStatus(session.status));
       }
     } catch {
       localStorage.removeItem(SESSION_KEY);
@@ -203,79 +404,57 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
       return;
     }
     try {
+      // Keep session payload small to avoid quota issues and auth side effects.
       localStorage.setItem(SESSION_KEY, JSON.stringify({
         jobId,
-        status,
-        results,
+        status: uiStatus,
+        results: uiStatus === 'complete' ? results : null,
         processingMedia: processingMedia?.type === 'url' ? processingMedia : null,
         activeTab,
         timestamp: Date.now()
       }));
-    } catch (e) {
-      // localStorage full or serialization error
-      // Try to clear space by removing other sessions
-      console.warn("localStorage write failed:", e.message);
-      if (e.name === 'QuotaExceededError') {
-        try {
-          const keys = Object.keys(localStorage);
-          keys.forEach(key => {
-            if (key !== SESSION_KEY && (key.startsWith('openshorts_') || key.startsWith('supabase'))) {
-              localStorage.removeItem(key);
-            }
-          });
-          // Try again after cleanup
-          localStorage.setItem(SESSION_KEY, JSON.stringify({
-            jobId,
-            status,
-            results,
-            processingMedia: processingMedia?.type === 'url' ? processingMedia : null,
-            activeTab,
-            timestamp: Date.now()
-          }));
-        } catch (e2) {
-          console.error("Failed to recover from localStorage quota:", e2);
-        }
-      }
+    } catch {
+      // Ignore storage failures: never remove auth/session provider keys.
     }
-   }, [jobId, status, results, activeTab]);
+   }, [jobId, uiStatus, activeTab, processingMedia, results]);
 
 
   useEffect(() => {
     let interval = null;
     
-    // Only poll if we're actively processing or have just completed
-    if ((status === 'processing' || status === 'complete') && jobId) {
-      console.log(`[Polling] Starting poll for job ${jobId}, status=${status}`);
+    // Poll while processing; transition to complete only when final payload is available.
+    if (uiStatus === 'processing' && jobId) {
       // Create interval immediately
       interval = setInterval(async () => {
         try {
           const data = await pollJob(jobId);
+          const backendStatus = normalizeStatus(data.status);
 
           // Update partial clips during processing
           if (data.partialClips && data.partialClips.length > 0) {
-            console.debug(`[Polling] Got ${data.partialClips.length} partial clips`);
             setPartialClips(data.partialClips);
           }
 
           // Update final results when complete
           if (data.result) {
-            console.debug(`[Polling] Got result with ${data.result.clips?.length || 0} clips`);
             setResults(data.result);
-            setPartialClips([]);  // Clear partial clips once we have final result
+            if (data.status === 'completed') {
+              setPartialClips([]);
+            }
           }
 
-          if (data.status === 'completed') {
-            console.log(`[Polling] Job completed, stopping poll`);
-            setStatus('complete');
-            if (interval) clearInterval(interval);
-          } else if (data.status === 'failed') {
-            console.error(`[Polling] Job failed`);
+          if (backendStatus === 'complete') {
+            // Backend can mark completed slightly before final result is hydrated.
+            if (data.result) {
+              setStatus('complete');
+              if (interval) clearInterval(interval);
+            }
+          } else if (backendStatus === 'error') {
             setStatus('error');
             const errorMsg = data.error || (data.logs?.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
             setLogs(prev => [...prev, "Error: " + errorMsg]);
             if (interval) clearInterval(interval);
           } else if (data.logs) {
-            console.debug(`[Polling] Updating logs, count=${data.logs.length}`);
             setLogs(data.logs);
           }
         } catch (e) {
@@ -288,44 +467,18 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
     // Cleanup function: always clear interval when effect unmounts or deps change
     return () => {
       if (interval !== null) {
-        console.log(`[Polling] Clearing interval`);
         clearInterval(interval);
         interval = null;
       }
     };
-  }, [status, jobId]);
+  }, [uiStatus, jobId]);
 
   useEffect(() => {
-    if (status !== 'complete' || hasNotifiedCompletion) return;
-    if (!results?.clips?.length) return;
-
-    const notify = () => {
-      new Notification('Reels generated', {
-        body: `${results.clips.length} reel(s) are ready in your gallery.`,
-      });
+    if ((uiStatus === 'complete' || uiStatus === 'error') && !hasNotifiedCompletion) {
+      setShowCompletionPanel(true);
       setHasNotifiedCompletion(true);
-    };
-
-    if (typeof window === 'undefined' || !('Notification' in window)) {
-      setHasNotifiedCompletion(true);
-      return;
     }
-
-    if (Notification.permission === 'granted') {
-      notify();
-      return;
-    }
-
-    if (Notification.permission === 'default') {
-      Notification.requestPermission().then((permission) => {
-        if (permission === 'granted') notify();
-        else setHasNotifiedCompletion(true);
-      });
-      return;
-    }
-
-    setHasNotifiedCompletion(true);
-  }, [status, results, hasNotifiedCompletion]);
+  }, [uiStatus, results, hasNotifiedCompletion]);
 
   const handleProcess = async (data) => {
     if (!user?.id) {
@@ -335,6 +488,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
     }
 
     setHasNotifiedCompletion(false);
+    setShowCompletionPanel(false);
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
@@ -371,6 +525,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
   };
 
   // ─── Modals (rendus dans les deux modes) ───────────────────────────────────
+
   const modals = (
     <ScheduleWeekModal
         isOpen={showScheduleWeek}
@@ -461,7 +616,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
            )}
 
           {/* View: Dashboard (Idle) */}
-          {currentTab === 'clip-generator' && status === 'idle' && (
+          {currentTab === 'clip-generator' && uiStatus === 'idle' && (
               <div className="h-full flex flex-col items-center justify-center p-6 animate-[fadeIn_0.3s_ease-out]">
                 <div className="max-w-xl w-full text-center space-y-8">
                   <div className="space-y-4">
@@ -472,7 +627,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
                       Drop your long-form video below to instantly generate viral clips with AI.
                     </p>
                   </div>
-                  <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                  <MediaInput onProcess={handleProcess} isProcessing={uiStatus === 'processing'} />
                   <div className="flex items-center justify-center gap-8 text-zinc-500 text-sm">
                     <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
                     <span className="flex items-center gap-2"><Instagram size={16} /> Instagram</span>
@@ -483,106 +638,155 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {currentTab === 'clip-generator' && (status === 'processing' || status === 'complete' || status === 'error') && (
-              <div className="h-full flex flex-col md:flex-row animate-[fadeIn_0.3s_ease-out]">
+          {currentTab === 'clip-generator' && (
+            uiStatus === 'processing' || uiStatus === 'complete' || uiStatus === 'error'
+          ) && (
+              <div className="h-full flex flex-col animate-[fadeIn_0.3s_ease-out]">
+                <div className="flex-1 flex flex-col md:flex-row min-h-0">
 
-                {/* Left Panel */}
-                <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} h-full flex flex-col border-r border-white/5 bg-black/20 p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
-                  <div className="mb-6 flex items-center justify-between">
-                    <h2 className="text-lg font-semibold flex items-center gap-2">
-                      <Activity className={`text-primary ${status === 'processing' ? 'animate-pulse' : ''}`} size={20} />
-                      Live Analysis
-                    </h2>
-                    <span className={`text-xs px-2 py-1 rounded-full border ${getStatusBadgeClass(status)}`}>
-                  {status.toUpperCase()}
-                </span>
-                  </div>
-
-                  {processingMedia && (
-                      <ProcessingAnimation
-                          media={processingMedia}
-                          isComplete={status === 'complete'}
-                          syncedTime={syncedTime}
-                          isSyncedPlaying={isSyncedPlaying}
-                          syncTrigger={syncTrigger}
-                      />
-                  )}
-
-                  <div className={`bg-[#0c0c0e] rounded-xl border border-white/10 overflow-hidden flex flex-col transition-all duration-500 ${status === 'complete' ? 'h-32 min-h-0 opacity-50 hover:opacity-100' : 'flex-1 min-h-[200px]'}`}>
-                    <div className="px-4 py-2 border-b border-white/5 flex items-center justify-between bg-white/5 shrink-0">
-                  <span className="text-xs font-mono text-zinc-400 flex items-center gap-2">
-                    <Terminal size={12} /> System Logs
-                  </span>
-                      <button onClick={() => setLogsVisible(!logsVisible)} className="text-zinc-500 hover:text-white transition-colors">
-                        <ChevronDown size={14} className={logsVisible ? '' : 'rotate-180'} />
-                      </button>
+                  {/* Left Panel */}
+                  <div className={`${uiStatus === 'complete' ? 'w-full md:w-[32%] lg:w-[28%]' : 'w-full md:w-[48%] lg:w-[44%]'} h-full flex flex-col border-r border-white/5 bg-black/20 p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
+                    <div className="mb-6 flex items-center justify-between">
+                      <h2 className="text-lg font-semibold flex items-center gap-2">
+                        <Activity className={`text-primary ${uiStatus === 'processing' ? 'animate-pulse' : ''}`} size={20} />
+                        Scan de la video
+                      </h2>
+                      <span className={`text-xs px-2 py-1 rounded-full border ${getStatusBadgeClass(uiStatus)}`}>
+                        {uiStatus.toUpperCase()}
+                      </span>
                     </div>
-                    {logsVisible && (
-                        <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar text-zinc-400">
-                          {logs.map((log, i) => (
-                              <div
-                                  // eslint-disable-next-line react/no-array-index-key
-                                  key={i}
-                                  className={`flex gap-2 ${log.toLowerCase().includes('error') ? 'text-red-400' : 'text-zinc-400'}`}
-                              >
-                                <span className="text-zinc-700 shrink-0">{new Date().toLocaleTimeString()}</span>
-                                <span>{log}</span>
-                              </div>
-                          ))}
-                          {status === 'processing' && <div className="animate-pulse text-primary/70">_</div>}
-                        </div>
+
+                    {processingMedia ? (
+                      <ProcessingAnimation
+                        media={processingMedia}
+                        isComplete={uiStatus === 'complete'}
+                        syncedTime={syncedTime}
+                        isSyncedPlaying={isSyncedPlaying}
+                        syncTrigger={syncTrigger}
+                      />
+                    ) : (
+                      <div className="flex-1 flex items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/20 px-6 py-10 text-center text-zinc-400">
+                        {uiStatus === 'processing'
+                          ? 'Generation en cours. La vue source n’est plus disponible, mais le suivi du workflow continue a droite.'
+                          : 'Le rendu est termine. Consulte les reels generes dans le panneau de droite.'}
+                      </div>
                     )}
                   </div>
-                </div>
 
-                {/* Right Panel */}
-                <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} h-full flex flex-col bg-background p-6 transition-all duration-700 ease-in-out`}>
-                   <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
-                     <Sparkles className="text-yellow-400" size={20} />
-                     Generated Shorts
-                     {(results?.clips?.length > 0 || partialClips.length > 0) && (
-                         <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto">
-                     {(results?.clips?.length || partialClips.length)} Clips
-                   </span>
-                     )}
-                    {results?.cost_analysis && (
-                        <span className="text-xs bg-green-500/10 border border-green-500/20 text-green-400 px-2 py-0.5 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                    ${results.cost_analysis.total_cost.toFixed(5)}
-                  </span>
-                    )}
-                    {results?.clips?.length > 1 && status === 'complete' && (
-                        <button
+                  {/* Right Panel */}
+                  <div className={`${uiStatus === 'complete' ? 'w-full md:w-[68%] lg:w-[72%]' : 'w-full md:w-[52%] lg:w-[56%]'} h-full flex flex-col bg-background p-6 transition-all duration-700 ease-in-out overflow-y-auto custom-scrollbar`}>
+                    <ProcessingChecklist
+                      status={uiStatus}
+                      logs={logs}
+                      visibleClips={visibleClips}
+                      processingMedia={processingMedia}
+                    />
+
+                    <div className="mt-6 flex-1 min-h-0">
+                      <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
+                        <Sparkles className="text-yellow-400" size={20} />
+                        Reels generes
+                        {visibleClips.length > 0 && (
+                          <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto">
+                            {visibleClips.length} Clips
+                          </span>
+                        )}
+                        {uiStatus === 'complete' && results?.cost_analysis && (
+                          <span className="text-xs bg-green-500/10 border border-green-500/20 text-green-400 px-2 py-0.5 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
+                            ${results.cost_analysis.total_cost.toFixed(5)}
+                          </span>
+                        )}
+                        {results?.clips?.length > 1 && uiStatus === 'complete' && (
+                          <button
                             onClick={() => setShowScheduleWeek(true)}
                             className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-500/20 to-indigo-500/20 hover:from-purple-500/30 hover:to-indigo-500/30 border border-purple-500/30 text-purple-300 hover:text-purple-200 rounded-full text-xs font-bold transition-all"
-                        >
-                          <Calendar size={14} />
-                          Programar Semana
-                        </button>
-                    )}
-                  </h2>
+                          >
+                            <Calendar size={14} />
+                            Programar Semana
+                          </button>
+                        )}
+                      </h2>
 
-                   <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
-                     {(results?.clips?.length > 0 || partialClips.length > 0) ? (
-                         <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
-                           {(results?.clips || partialClips).map((clip, i) => (
-                                <ResultCard
-                                    // eslint-disable-next-line react/no-array-index-key
-                                    key={i}
-                                    clip={clip}
-                                    index={i}
-                                    jobId={jobId}
-                                    onPlay={(time) => handleClipPlay(time)}
-                                    onPause={handleClipPause}
-                                />
-                           ))}
-                         </div>
-                     ) : (
-                         <EmptyResultsState status={status} />
-                     )}
-                   </div>
+                      <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
+                        {actionReadyClips.length > 0 ? (
+                          <div className="grid gap-4 pb-10 grid-cols-1 xl:grid-cols-2">
+                            {actionReadyClips.map((clip, i) => (
+                              <ResultCard
+                                // eslint-disable-next-line react/no-array-index-key
+                                key={i}
+                                clip={clip}
+                                index={i}
+                                jobId={jobId}
+                                onPlay={(time) => handleClipPlay(time)}
+                                onPause={handleClipPause}
+                              />
+                            ))}
+                          </div>
+                        ) : pendingClips.length > 0 ? (
+                          <GeneratedClipsList clips={pendingClips} status={uiStatus} />
+                        ) : (
+                          <GeneratedClipsList clips={visibleClips} status={uiStatus} />
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
+                {showCompletionPanel && (uiStatus === 'complete' || uiStatus === 'error') && (
+                  <div className="border-t border-white/10 bg-background/95 px-6 py-4 backdrop-blur-md">
+                    <div className="mx-auto flex max-w-6xl flex-col gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4 md:flex-row md:items-center md:justify-between">
+                      <div className="flex items-start gap-3">
+                        <div className={`mt-0.5 inline-flex h-10 w-10 items-center justify-center rounded-xl ${uiStatus === 'complete' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                          {uiStatus === 'complete' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-white">
+                            {uiStatus === 'complete' ? 'Generation terminee' : 'Generation interrompue'}
+                          </p>
+                          <p className="mt-1 text-xs leading-5 text-zinc-400">
+                            {uiStatus === 'complete'
+                              ? `${results?.clips?.length || visibleClips.length} reel(s) sont prets. Tu peux les telecharger, les modifier ou lancer une nouvelle operation.`
+                              : 'Une erreur a ete detectee pendant le workflow. Tu peux fermer ce panneau puis relancer une generation.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowCompletionPanel(false)}
+                          className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-200 transition hover:bg-white/10"
+                        >
+                          <X size={14} />
+                          Fermer
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigate('/dashboard/clip-generator?new=1')}
+                          className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+                        >
+                          Nouvelle operation
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
+          )}
+
+          {currentTab === 'clip-generator' && uiStatus !== 'idle' && uiStatus !== 'processing' && uiStatus !== 'complete' && uiStatus !== 'error' && (
+            <div className="h-full flex items-center justify-center p-6">
+              <div className="max-w-lg w-full rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-center">
+                <p className="text-sm text-zinc-300">Etat de generation non reconnu: <span className="font-mono text-white">{String(status)}</span></p>
+                <button
+                  type="button"
+                  onClick={() => navigate('/dashboard/clip-generator?new=1')}
+                  className="mt-4 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+                >
+                  Reinitialiser la vue
+                </button>
+              </div>
+            </div>
           )}
 
         </div>

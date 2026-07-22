@@ -27,15 +27,16 @@ load_dotenv()
 
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
+MIN_CLIP_DURATION_SECONDS = 30
 
 GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 20 and 60 seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 30 and 60 seconds long.
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
 - Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
 - Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
-- Each clip between 20 and 60 s (inclusive).
+- Each clip between 30 and 60 s (inclusive).
 - Prefer starting 0.2–0.4 s BEFORE the hook and ending 0.2–0.4 s AFTER the payoff.
 - Use silence moments for natural cuts; never cut in the middle of a word or phrase.
 - STRICTLY FORBIDDEN to use time formats other than absolute seconds.
@@ -50,7 +51,7 @@ WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
 
 STRICT EXCLUSIONS:
 - No generic intros/outros or purely sponsorship segments unless they contain the hook.
-- No clips < 20 s or > 60 s.
+- No clips < 30 s or > 60 s.
 
 OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
 {{
@@ -521,7 +522,7 @@ def download_youtube_video(url, output_dir="."):
     Downloads a YouTube video using yt-dlp.
     Returns the path to the downloaded video and the video title.
     """
-    print(f"🔍 Debug: yt-dlp version: {yt_dlp.version.__version__}")
+    print(f"🔍 yt-dlp version: {yt_dlp.version.__version__}")
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
 
@@ -1249,15 +1250,18 @@ def get_viral_clips(transcript_result, video_duration):
     print(f"🎛️  AI Provider: {provider}")
 
     if provider == "gemini":
-        return _get_viral_clips_with_gemini(transcript_result, video_duration)
+        result = _get_viral_clips_with_gemini(transcript_result, video_duration)
+        return _normalize_short_durations(result, video_duration)
 
     if provider == "openai":
-        return _get_viral_clips_with_openai(transcript_result, video_duration)
+        result = _get_viral_clips_with_openai(transcript_result, video_duration)
+        return _normalize_short_durations(result, video_duration)
 
     # Hybrid mode
     print("🔄 Hybrid mode: trying OpenIA first...")
     try:
-        return _get_viral_clips_with_openai(transcript_result, video_duration)
+        result = _get_viral_clips_with_openai(transcript_result, video_duration)
+        return _normalize_short_durations(result, video_duration)
     except Exception as e:
         print(f"⚠️ OpenIA failed: {e}")
         if _is_quota_or_rate_limit_error(e):
@@ -1266,7 +1270,8 @@ def get_viral_clips(transcript_result, video_duration):
             print("↩️ OpenIA failed, falling back to OpenAI...")
 
         try:
-            return _get_viral_clips_with_gemini(transcript_result, video_duration)
+            result = _get_viral_clips_with_gemini(transcript_result, video_duration)
+            return _normalize_short_durations(result, video_duration)
         except Exception as e2:
             raise RuntimeError(f"Both AI providers failed. OpenIA: {e}; Gemini: {e2}")
 
@@ -1304,6 +1309,47 @@ def _build_external_costs(transcript, clips_data):
         },
         "total_usd": assembly_cost + llm_cost_usd,
     }
+
+
+def _normalize_short_durations(clips_data, video_duration):
+    """Ensure generated clips have a minimum duration while staying in bounds."""
+    shorts = clips_data.get("shorts") if isinstance(clips_data, dict) else None
+    if not isinstance(shorts, list):
+        return clips_data
+
+    max_duration = _safe_float(video_duration, 0.0)
+    if max_duration <= 0:
+        return clips_data
+
+    min_duration = min(float(MIN_CLIP_DURATION_SECONDS), max_duration)
+    normalized_shorts = []
+
+    for clip in shorts:
+        if not isinstance(clip, dict):
+            continue
+
+        start = _safe_float(clip.get("start"), 0.0)
+        end = _safe_float(clip.get("end"), 0.0)
+        start = max(0.0, min(start, max_duration))
+        end = max(0.0, min(end, max_duration))
+
+        if end <= start:
+            continue
+
+        if (end - start) < min_duration:
+            end = min(max_duration, start + min_duration)
+            if (end - start) < min_duration:
+                start = max(0.0, end - min_duration)
+
+        if end <= start:
+            continue
+
+        clip["start"] = round(start, 3)
+        clip["end"] = round(end, 3)
+        normalized_shorts.append(clip)
+
+    clips_data["shorts"] = normalized_shorts
+    return clips_data
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="AutoCrop-Vertical with Viral Clip Detection.")

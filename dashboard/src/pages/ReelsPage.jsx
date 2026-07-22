@@ -3,6 +3,7 @@ import { Play, Plus, Download, Loader2, Search, Share2, Trash2, X } from "lucide
 import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
+import ResultCard from "../components/ResultCard";
 
 const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
 const ENCRYPTION_PREFIX = "ENC:";
@@ -35,6 +36,22 @@ function statusClass(status) {
     if (status === "en_cours") return "bg-blue-500/10 border-blue-500/30 text-blue-300";
     if (status === "echec") return "bg-red-500/10 border-red-500/30 text-red-300";
     return "bg-white/5 border-white/10 text-zinc-300";
+}
+
+function toResultCardClip(item, videoUrl) {
+    const start = Number.isFinite(Number(item?.reel_start)) ? Number(item.reel_start) : 0;
+    const fallbackDuration = Number.isFinite(Number(item?.reel_duration)) ? Number(item.reel_duration) : 30;
+    const end = Number.isFinite(Number(item?.reel_end)) ? Number(item.reel_end) : start + fallbackDuration;
+
+    return {
+        start,
+        end,
+        video_url: videoUrl || item?.reel_playback_url || item?.reel_download_url || item?.reel_url || "",
+        video_title_for_youtube_short: item?.reel_title || "Sans titre",
+        video_description_for_tiktok: item?.reel_description || "",
+        video_description_for_instagram: item?.reel_description || "",
+        viral_hook_text: item?.reel_hook_text || "",
+    };
 }
 
 export default function ReelsPage() {
@@ -241,6 +258,12 @@ export default function ReelsPage() {
         if (mediaUrl) setPreviewUrl(mediaUrl);
     };
 
+    const previewClip = previewItem ? toResultCardClip(previewItem, previewUrl) : null;
+    const previewClipIndex = Number.isFinite(Number(previewItem?.reel_clip_index))
+        ? Number(previewItem?.reel_clip_index)
+        : 0;
+    const previewJobId = typeof previewItem?.reel_job_id === "string" ? previewItem.reel_job_id : "";
+
     return (
         <div className="flex-1 overflow-y-auto p-8 space-y-6">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -440,11 +463,11 @@ export default function ReelsPage() {
 
             {previewItem && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">
-                    <div className="flex w-full max-w-[420px] flex-col overflow-hidden rounded-[2rem] border border-white/10 bg-zinc-950 shadow-2xl">
+                    <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-zinc-950 shadow-2xl">
                         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
                             <div>
                                 <p className="text-sm font-semibold text-white">{previewItem.reel_title || "Visualisation du reel"}</p>
-                                <p className="text-xs text-zinc-400">{previewItem.reel_description || "Aucune description"}</p>
+                                <p className="text-xs text-zinc-400">Apercu avec les memes actions que les clips generes.</p>
                             </div>
                             <button
                                 type="button"
@@ -458,30 +481,14 @@ export default function ReelsPage() {
                                 <X size={16} />
                             </button>
                         </div>
-                        <div className="p-3">
-                            <div className="mx-auto aspect-[9/16] w-full max-h-[78vh] overflow-hidden rounded-[1.8rem] border border-white/10 bg-black">
-                                <video
-                                    src={previewUrl || previewItem.reel_url}
-                                    controls
-                                    autoPlay
-                                    playsInline
-                                    className="h-full w-full object-contain"
+                        <div className="max-h-[88vh] overflow-y-auto p-4 custom-scrollbar">
+                            {previewClip && (
+                                <ResultCard
+                                    clip={previewClip}
+                                    index={previewClipIndex}
+                                    jobId={previewJobId}
                                 />
-                            </div>
-                            <div className="space-y-3 px-1 pb-2 pt-4">
-                                {previewItem.reel_thumbnail_url ? (
-                                    <img
-                                        src={previewItem.reel_thumbnail_url}
-                                        alt={previewItem.reel_title || "thumbnail"}
-                                        className="w-full rounded-xl border border-white/10 object-cover"
-                                    />
-                                ) : null}
-                                <div className="space-y-2 text-sm text-zinc-300">
-                                    <p><span className="text-zinc-500">Durée:</span> {previewItem.reel_duration ? `${previewItem.reel_duration}s` : "-"}</p>
-                                    <p><span className="text-zinc-500">Statut:</span> {statusLabel(previewItem.reel_status)}</p>
-                                    <p><span className="text-zinc-500">Créé le:</span> {previewItem.reel_created_at ? new Date(previewItem.reel_created_at).toLocaleString() : "-"}</p>
-                                </div>
-                            </div>
+                            )}
                         </div>
                     </div>
                 </div>

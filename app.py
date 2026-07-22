@@ -174,12 +174,14 @@ async def _persist_reels_for_job(
                 "reel_thumbnail_url": clip.get("thumbnail_url") or "",
                 "reel_title": clip.get("title") or clip.get("video_title_for_youtube_short") or f"Clip {i}",
                 "reel_description": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or "",
-                "reel_duration": max(5, int(duration or 0)),
+                "reel_duration": max(30, int(duration or 0)),
                 "reel_created_at": now_iso,
                 "reel_updated_at": now_iso,
                 "reel_user_id": user_id,
                 "reel_status": "termine",
                 "reel_s3_key": s3_key,
+                "reel_job_id": job_id,
+                "reel_clip_index": i - 1,
             }
         )
 

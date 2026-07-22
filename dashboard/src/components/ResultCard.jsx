@@ -1,16 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock } from 'lucide-react';
 import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
-import TranslateModal from './TranslateModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
 export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
+    const safeClip = clip && typeof clip === 'object' ? clip : {};
+    const clipStart = Number.isFinite(Number(safeClip.start)) ? Number(safeClip.start) : 0;
+    const clipEnd = Number.isFinite(Number(safeClip.end)) ? Number(safeClip.end) : clipStart + 30;
+    const rawVideoUrl = typeof safeClip.video_url === 'string' ? safeClip.video_url : '';
+    const uploadPostKey = globalThis.localStorage.getItem('uploadPostKey_v3') || '';
+    const uploadUserId = globalThis.localStorage.getItem('uploadUserId') || '';
+    const hasClipContext = Boolean(jobId) && Number.isFinite(Number(index));
+
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = React.useRef(null);
-    const originalVideoUrl = getApiUrl(clip.video_url); // Never changes — used for Remotion previews
+    const originalVideoUrl = rawVideoUrl ? getApiUrl(rawVideoUrl) : '';
     const [currentVideoUrl, setCurrentVideoUrl] = useState(originalVideoUrl);
 
     const [platforms, setPlatforms] = useState({
@@ -29,12 +36,10 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
     const [isHooking, setIsHooking] = useState(false);
-    const [isTranslating, setIsTranslating] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
-    const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [editError, setEditError] = useState(null);
 
-    const [clipDuration, setClipDuration] = useState(clip.end && clip.start ? clip.end - clip.start : 30);
+    const [clipDuration, setClipDuration] = useState(Math.max(1, clipEnd - clipStart));
 
     // Accumulate Remotion layers across operations
     const [activeLayers, setActiveLayers] = useState({ subtitles: null, hook: null, effects: null });
@@ -53,8 +58,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
     // Initialize/Reset form when modal opens
     useEffect(() => {
         if (showModal) {
-            setPostTitle(clip.video_title_for_youtube_short || "Viral Short");
-            setPostDescription(clip.video_description_for_instagram || clip.video_description_for_tiktok || "");
+            setPostTitle(safeClip.video_title_for_youtube_short || "Viral Short");
+            setPostDescription(safeClip.video_description_for_instagram || safeClip.video_description_for_tiktok || "");
             setIsScheduling(false);
             setScheduleDate("");
             setPostResult(null);
@@ -62,6 +67,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
     }, [showModal, clip]);
 
     const handleAutoEdit = async () => {
+        if (!hasClipContext) {
+            setEditError('Actions indisponibles: ce reel est detache de son job original.');
+            setTimeout(() => setEditError(null), 5000);
+            return;
+        }
         setIsEditing(true);
         setEditError(null);
         try {
@@ -139,6 +149,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
     };
 
     const handleSubtitle = async (options) => {
+        if (!hasClipContext) {
+            setEditError('Actions indisponibles: ce reel est detache de son job original.');
+            setTimeout(() => setEditError(null), 5000);
+            return;
+        }
         setIsSubtitling(true);
         setEditError(null);
         try {
@@ -194,6 +209,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
     };
 
     const handleHook = async (hookData) => {
+        if (!hasClipContext) {
+            setEditError('Actions indisponibles: ce reel est detache de son job original.');
+            setTimeout(() => setEditError(null), 5000);
+            return;
+        }
         setIsHooking(true);
         setEditError(null);
         try {
@@ -247,70 +267,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
         }
     };
 
-    const handleTranslate = async (options) => {
-        console.log('[Translate] Starting translation with options:', options);
-        setIsTranslating(true);
-        setEditError(null);
-        try {
-            const apiKey = elevenLabsKey;
-            console.log('[Translate] API Key available:', !!apiKey);
-
-            if (!apiKey) {
-                throw new Error("ElevenLabs API Key is missing. Please set it in Settings.");
-            }
-
-            const requestBody = {
-                job_id: jobId,
-                clip_index: index,
-                target_language: options.targetLanguage,
-                input_filename: currentVideoUrl.split('/').pop()
-            };
-            console.log('[Translate] Request body:', requestBody);
-            console.log('[Translate] Sending request to /api/translate');
-
-            const res = await fetch(getApiUrl('/api/translate'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-ElevenLabs-Key': apiKey
-                },
-                body: JSON.stringify(requestBody)
-            });
-
-            console.log('[Translate] Response status:', res.status);
-
-            if (!res.ok) {
-                const errText = await res.text();
-                console.error('[Translate] Error response:', errText);
-                try {
-                    const jsonErr = JSON.parse(errText);
-                    throw new Error(jsonErr.detail || errText);
-                } catch (e) {
-                    if (e.message !== errText) throw e;
-                    throw new Error(errText);
-                }
-            }
-
-            const data = await res.json();
-            console.log('[Translate] Success response:', data);
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) {
-                    videoRef.current.load();
-                }
-                setShowTranslateModal(false);
-            }
-
-        } catch (e) {
-            console.error('[Translate] Exception:', e);
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsTranslating(false);
-        }
-    };
-
     const handlePost = async () => {
+        if (!hasClipContext) {
+            setPostResult({ success: false, msg: 'Publication indisponible: reel detache de son job original.' });
+            return;
+        }
         if (!uploadPostKey || !uploadUserId) {
             setPostResult({ success: false, msg: "Missing API Key or User ID." });
             return;
@@ -389,7 +350,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                     playsInline
                     onPlay={() => {
                         const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
-                        onPlay && onPlay(clip.start + currentTime);
+                        onPlay && onPlay(clipStart + currentTime);
                     }}
                     onPause={() => onPause && onPause()}
                     onEnded={() => {
@@ -418,11 +379,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
             {/* Right: Content & Details */}
             <div className="flex-1 p-4 md:p-5 flex flex-col bg-[#121214] overflow-hidden min-w-0">
                 <div className="mb-4">
-                    <h3 className="text-base font-bold text-white leading-tight line-clamp-2 mb-2 break-words" title={clip.video_title_for_youtube_short}>
-                        {clip.video_title_for_youtube_short || "Viral Clip Generated"}
+                    <h3 className="text-base font-bold text-white leading-tight line-clamp-2 mb-2 break-words" title={safeClip.video_title_for_youtube_short}>
+                        {safeClip.video_title_for_youtube_short || "Viral Clip Generated"}
                     </h3>
                     <div className="flex flex-wrap gap-2 text-[10px] text-zinc-500 font-mono">
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.floor(clip.end - clip.start)}s</span>
+                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.floor(Math.max(1, clipEnd - clipStart))}s</span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#shorts</span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#viral</span>
                     </div>
@@ -436,7 +397,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                             <Youtube size={12} className="shrink-0" /> <span className="truncate">YouTube Title</span>
                         </div>
                         <p className="text-xs text-zinc-300 select-all break-words">
-                            {clip.video_title_for_youtube_short || "Viral Short Video"}
+                            {safeClip.video_title_for_youtube_short || "Viral Short Video"}
                         </p>
                     </div>
 
@@ -449,7 +410,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                             <span className="truncate">Caption</span>
                         </div>
                         <p className="text-xs text-zinc-300 line-clamp-3 hover:line-clamp-none transition-all cursor-pointer select-all break-words">
-                            {clip.video_description_for_tiktok || clip.video_description_for_instagram}
+                            {safeClip.video_description_for_tiktok || safeClip.video_description_for_instagram}
                         </p>
                     </div>
                 </div>
@@ -466,7 +427,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                 <div className="grid grid-cols-2 gap-3 mt-auto pt-4 border-t border-white/5">
                     <button
                         onClick={handleAutoEdit}
-                        disabled={isEditing}
+                        disabled={isEditing || !hasClipContext}
                         className="col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
@@ -475,7 +436,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
 
                     <button
                         onClick={() => setShowSubtitleModal(true)}
-                        disabled={isSubtitling}
+                        disabled={isSubtitling || !hasClipContext}
                         className="col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
@@ -484,7 +445,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
 
                     <button
                         onClick={() => setShowHookModal(true)}
-                        disabled={isHooking}
+                        disabled={isHooking || !hasClipContext}
                         className="col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
@@ -492,44 +453,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                     </button>
 
                     <button
-                        onClick={() => setShowTranslateModal(true)}
-                        disabled={isTranslating}
-                        className="col-span-1 py-2 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-green-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
-                        {isTranslating ? 'Translating...' : 'Translate'}
-                    </button>
-
-                    <button
                         onClick={() => setShowModal(true)}
-                        className="col-span-1 py-2 bg-primary hover:bg-blue-600 text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                        disabled={!hasClipContext}
+                        className="col-span-1 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
                     >
                         <Share2 size={14} className="shrink-0" /> Post
-                    </button>
-                    <button
-                        onClick={async (e) => {
-                            e.preventDefault();
-                            try {
-                                const response = await fetch(currentVideoUrl);
-                                if (!response.ok) throw new Error('Download failed');
-                                const blob = await response.blob();
-                                const url = window.URL.createObjectURL(blob);
-                                const a = document.createElement('a');
-                                a.style.display = 'none';
-                                a.href = url;
-                                a.download = `clip-${index + 1}.mp4`;
-                                document.body.appendChild(a);
-                                a.click();
-                                window.URL.revokeObjectURL(url);
-                                document.body.removeChild(a);
-                            } catch (err) {
-                                console.error('Download error:', err);
-                                window.open(currentVideoUrl, '_blank');
-                            }
-                        }}
-                        className="col-span-1 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
-                    >
-                        <Download size={14} className="shrink-0" /> Download
                     </button>
                 </div>
             </div>
@@ -661,19 +589,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                 onGenerate={handleHook}
                 isProcessing={isHooking}
                 videoUrl={originalVideoUrl}
-                initialText={clip.viral_hook_text}
-                durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
+                initialText={safeClip.viral_hook_text}
+                durationInSeconds={Math.max(1, clipEnd - clipStart)}
                 existingSubtitles={activeLayers.subtitles}
             />
 
-            <TranslateModal
-                isOpen={showTranslateModal}
-                onClose={() => setShowTranslateModal(false)}
-                onTranslate={handleTranslate}
-                isProcessing={isTranslating}
-                videoUrl={currentVideoUrl}
-                hasApiKey={!!elevenLabsKey}
-            />
 
         </div>
     );

@@ -1,7 +1,7 @@
 services:
   backend:
     build: .
-    container_name: saasvideo-backend
+    container_name: vidora-backend
     ports:
       - "4000:8000"
     volumes:
@@ -11,8 +11,15 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./dashboard
-    container_name: saasvideo-frontend
+    build:
+      context: ./dashboard
+      args:
+        VITE_SUPABASE_URL: ${SUPABASE_URL:-http://localhost:54321}
+        VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-placeholder}
+    env_file:
+      - path: ./dashboard/.env
+        required: false
+    container_name: vidora-frontend
     ports:
       - "4001:5173"
     volumes:
@@ -26,7 +33,7 @@ services:
     build:
       context: .
       dockerfile: render-service/Dockerfile
-    container_name: saasvideo-renderer
+    container_name: vidora-renderer
     ports:
       - "4002:3100"
     volumes:
