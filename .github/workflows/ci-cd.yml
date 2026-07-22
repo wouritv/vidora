@@ -24,31 +24,59 @@ jobs:
       - name: Checkout du code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # nécessaire pour l'analyse SonarQube (historique complet)
+          fetch-depth: 0   # nécessaire pour l'analyse SonarQube
 
+      # ---------------------------------------------------
+      # PARTIE NODE.JS (uniquement pour frontend et renderer)
+      # ---------------------------------------------------
       - name: Setup Node.js
+        if: matrix.service != 'backend'
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '22'  # Utilisation de Node 22 (LTS recommandé)
           cache: 'npm'
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
-      - name: Installer les dépendances
+      - name: Installer les dépendances JS
+        if: matrix.service != 'backend'
         working-directory: ${{ matrix.service }}
         run: npm ci
 
-      - name: Lancer les tests unitaires (avec coverage)
+      - name: Lancer les tests unitaires JS (avec coverage)
+        if: matrix.service != 'backend'
         working-directory: ${{ matrix.service }}
         run: npm run test -- --coverage
 
-      - name: Build de l'application
+      - name: Build JS
+        if: matrix.service != 'backend'
         working-directory: ${{ matrix.service }}
         run: npm run build
         env:
-          # Évite les erreurs de build pendant les tests si Vite valide les variables d'environnement
           VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
+      # ---------------------------------------------------
+      # PARTIE PYTHON (uniquement pour le backend)
+      # ---------------------------------------------------
+      - name: Setup Python
+        if: matrix.service == 'backend'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Installer les dépendances Python & lancer les tests
+        if: matrix.service == 'backend'
+        working-directory: ${{ matrix.service }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Ajoutez votre commande de test python si vous en avez (ex: pytest)
+          # pytest --cov=.
+
+      # ---------------------------------------------------
+      # ANALYSE SONARQUBE (pour tous les services)
+      # ---------------------------------------------------
       - name: Analyse SonarQube
         uses: sonarsource/sonarqube-scan-action@v3
         with:
@@ -57,7 +85,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: Quality Gate SonarQube (bloque le pipeline si échec)
+      - name: Quality Gate SonarQube
         uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
         env:
@@ -69,7 +97,7 @@ jobs:
   build-and-push:
     needs: build-and-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'   # seulement sur main, pas sur les PR
+    if: github.ref == 'refs/heads/main'
     strategy:
       matrix:
         service: [frontend, backend, renderer]
@@ -93,7 +121,6 @@ jobs:
           tags: |
             ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
             ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:latest
-          # Injection des ARG pour le build (uniquement transmis lors du build du frontend)
           build-args: |
             VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL }}
             VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
@@ -109,7 +136,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
-      - name: Checkout du code (pour récupérer docker-compose.prod.yml)
+      - name: Checkout du code
         uses: actions/checkout@v4
 
       - name: Copier les fichiers de déploiement sur le VPS
@@ -119,9 +146,9 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "docker-compose.prod.yml"
-          target: "/var/apps/vidora"
+          target: "/opt/myapp" # Harmonisé avec le script SSH ci-dessous
 
-      - name: Déployer via SSH (pull des images + restart)
+      - name: Déployer via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
