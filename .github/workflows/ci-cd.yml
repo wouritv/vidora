@@ -75,8 +75,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: ${{ matrix.path }}/requirements.txt
+
+      - name: Install CPU-only PyTorch
+        if: matrix.service == 'backend'
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies
+        if: matrix.service == 'backend'
+        run: |
+          pip install --no-cache-dir -r ${{ matrix.path }}/requirements.txt
 
       - name: Installer les dépendances Python & lancer les tests
         if: matrix.service == 'backend'
