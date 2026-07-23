@@ -526,7 +526,6 @@ def download_youtube_video(url, output_dir="."):
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
 
-    cookies_path = _resolve_cookiefile_from_env()
 
     # Common yt-dlp options to work around YouTube bot detection.
     # extractor_args tries multiple player clients in order; tv_embed / android
@@ -535,17 +534,18 @@ def download_youtube_video(url, output_dir="."):
         'quiet': False,
         'verbose': True,
         'no_warnings': False,
-        'cookiefile': cookies_path if cookies_path else None,
         'socket_timeout': 30,
         'retries': 10,
         'fragment_retries': 10,
         'nocheckcertificate': True,
         'cachedir': False,
+        'cookiefile': os.getenv('YOUTUBE_COOKIES'),
         'extractor_args': {
             'youtube': {
                 'player_client': ['tv_embed', 'android', 'mweb', 'web'],
                 'player_skip': ['webpage', 'configs'],
-            }
+            },
+            'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
         },
         'http_headers': {
             'User-Agent': (

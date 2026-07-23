@@ -9,6 +9,7 @@ services:
       - "4000:8000"
     volumes:
       - output-data:/app/output
+      - /var/apps/secrets/cookies.txt:/app/cookies.txt:ro
     environment:
       - NODE_ENV=production
     env_file:
@@ -42,6 +43,13 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    networks:
+      - app-network
+
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider
+    container_name: vidora-pot-provider
+    restart: unless-stopped
     networks:
       - app-network
 
