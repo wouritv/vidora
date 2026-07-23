@@ -1,27 +1,35 @@
-# Multi-stage build for smaller final image
+# syntax=docker/dockerfile:1
+
+# ============================================================
+# Stage 1 : builder — installe les dépendances Python
+# ============================================================
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
-# Copy and install Python dependencies
-COPY requirements.txt .
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Final stage
+COPY requirements.txt .
+
+# Cache mount BuildKit : garde le cache pip entre les builds SANS l'inclure dans l'image
+# (nécessite # syntax=docker/dockerfile:1 en haut du fichier, déjà ajouté)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
+    pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu && \
+    pip install -r requirements.txt
+
+# ============================================================
+# Stage 2 : image finale
+# ============================================================
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install FFmpeg, OpenCV dependencies, and Node.js (for yt-dlp JS challenges)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libgl1 \
@@ -32,33 +40,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy virtual env from builder
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 
-# Always upgrade yt-dlp to latest (YouTube bot-detection changes frequently)
-RUN pip install --upgrade --no-cache-dir yt-dlp
+# yt-dlp toujours à jour (bot-detection YouTube évolue souvent) — volontairement
+# séparé du reste pour ne pas invalider tout le cache pip à chaque build
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade --no-cache-dir yt-dlp
 
-# Copy application code
-COPY . .
+# Créer l'utilisateur non-root et les dossiers AVANT de copier le code :
+# ainsi, un changement de code n'invalide pas cette étape ni le téléchargement YOLO ci-dessous
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser && \
+    mkdir -p /app/uploads /app/output /tmp/Ultralytics && \
+    chown -R appuser:appuser /app /tmp/Ultralytics
 
-# Create a non-root user (Moved up)
-RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
-
-# Create directories including Ultralytics cache config
-RUN mkdir -p /app/uploads /app/output /tmp/Ultralytics
-# Fix permissions: /app for code/uploads, /tmp/Ultralytics for AI cache
-RUN chown -R appuser:appuser /app /tmp/Ultralytics
-
-# Switch to non-root user
 USER appuser
 
-# Pre-download YOLO model on build (now running as appuser)
+# Pré-télécharger le modèle YOLO : placé AVANT le COPY du code applicatif
+# pour que ce layer reste en cache tant que le modèle ne change pas
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
-# Expose FastAPI port
+# Copie du code en dernier : c'est le layer qui change le plus souvent,
+# le placer en fin de fichier maximise la réutilisation du cache pour tout le reste
+COPY --chown=appuser:appuser . .
+
 EXPOSE 8000
 
-# Run FastAPI app
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
