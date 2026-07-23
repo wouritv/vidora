@@ -1,6 +1,7 @@
 # Git
 .git
 .gitignore
+.github
 
 # Python
 __pycache__
@@ -47,9 +48,12 @@ docker-compose.yml
 README.md
 *.md
 
-
-
-
+# Environment files
+.env
+.env.*
+mypy_cache
+output/
+uploads/
 
 
 
