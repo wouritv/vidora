@@ -105,9 +105,11 @@ jobs:
           args: >
             -Dsonar.projectKey=${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
             -Dsonar.projectName=${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+            -Dsonar.ws.timeout=60
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
 
       - name: Quality Gate SonarQube
         uses: sonarsource/sonarqube-quality-gate-action@master
