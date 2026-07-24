@@ -557,7 +557,7 @@ def download_youtube_video(url, output_dir="."):
         'cookiefile': job_cookies_path,   # copie isolée, jamais le fichier maître
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embed', 'android', 'ios', 'mweb', 'web', 'web_creator'],
+                'player_client': ['android', 'ios', 'mweb', 'web', 'web_creator'],
                 'player_skip': ['webpage', 'configs'],
             },
             'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
