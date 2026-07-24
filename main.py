@@ -19,6 +19,9 @@ from google import genai
 from dotenv import load_dotenv
 import json
 
+import shutil
+import tempfile
+
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
@@ -526,10 +529,22 @@ def download_youtube_video(url, output_dir="."):
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
 
+    # --- Copie isolée des cookies pour CE job précis ---
+    # Évite que plusieurs téléchargements concurrents écrivent en même temps
+    # dans le même fichier cookies.txt, ce qui corrompt le fichier et fait
+    # invalider la session par YouTube ("cookies no longer valid").
+    master_cookies_path = os.getenv('YOUTUBE_COOKIES')
+    job_cookies_path = None
+    if master_cookies_path and os.path.exists(master_cookies_path):
+        fd, job_cookies_path = tempfile.mkstemp(suffix='.txt', prefix='ytcookies_')
+        os.close(fd)
+        shutil.copy(master_cookies_path, job_cookies_path)
 
     # Common yt-dlp options to work around YouTube bot detection.
-    # extractor_args tries multiple player clients in order; tv_embed / android
-    # avoid the OAuth/PO-token checks that block server IPs.
+    # tv_embed / android ne nécessitent ni cookies ni PO Token dans la
+    # majorité des cas — on les tente en premier. web/web_creator (les plus
+    # susceptibles de nécessiter un PO Token + cookies stables) sont gardés
+    # en tout dernier recours seulement.
     _COMMON_YDL_OPTS = {
         'quiet': False,
         'verbose': True,
@@ -539,12 +554,10 @@ def download_youtube_video(url, output_dir="."):
         'fragment_retries': 10,
         'nocheckcertificate': True,
         'cachedir': False,
-        'cookiefile': os.getenv('YOUTUBE_COOKIES'),
-        "cookiesfrombrowser": None,
-        "no_cookiefile_write": True,
+        'cookiefile': job_cookies_path,   # copie isolée, jamais le fichier maître
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embed', 'android', 'mweb', 'web', 'ios', 'web_creator'],
+                'player_client': ['tv_embed', 'android', 'ios', 'mweb', 'web', 'web_creator'],
                 'player_skip': ['webpage', 'configs'],
             },
             'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
@@ -558,25 +571,23 @@ def download_youtube_video(url, output_dir="."):
         },
     }
 
-    with yt_dlp.YoutubeDL(_COMMON_YDL_OPTS) as ydl:
-        try:
-            info = ydl.extract_info(url, download=False)
-            video_title = info.get('title', 'youtube_video')
-            sanitized_title = sanitize_filename(video_title)
-        except Exception as e:
-            # Force print to stderr/stdout immediately so it's captured before crash
-            import sys
-            import traceback
-            
-            # Print minimal error first to ensure something gets out
-            print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
-            
-            error_msg = f"""
-            
+    try:
+        with yt_dlp.YoutubeDL(_COMMON_YDL_OPTS) as ydl:
+            try:
+                info = ydl.extract_info(url, download=False)
+                video_title = info.get('title', 'youtube_video')
+                sanitized_title = sanitize_filename(video_title)
+            except Exception as e:
+                import sys
+
+                print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
+
+                error_msg = f"""
+
 ❌ ================================================================= ❌
 ❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED
 ❌ ================================================================= ❌
-            
+
 REASON: YouTube has blocked the download request (Error 429/Unavailable).
         This is likely a temporary IP ban on this server.
 
@@ -587,56 +598,55 @@ REASON: YouTube has blocked the download request (Error 429/Unavailable).
 ---------------------------------------------------------------------
 
 Technical Details: {str(e)}
-            """
-            # Print to both streams to ensure capture
-            print(error_msg, file=sys.stdout)
-            print(error_msg, file=sys.stderr)
-            
-            # Force flush
-            sys.stdout.flush()
-            sys.stderr.flush()
-            
-            # Wait a split second to allow buffer to drain before raising
-            time.sleep(0.5)
-            
-            raise e
-    
-    output_template = os.path.join(output_dir, f'{sanitized_title}.%(ext)s')
-    expected_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
-    if os.path.exists(expected_file):
-        os.remove(expected_file)
-        print(f"🗑️  Removed existing file to re-download with H.264 codec")
-    
-    ydl_opts = {
-        **_COMMON_YDL_OPTS,
-        'format': (
-            'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
-            'bestvideo[vcodec^=avc1]+bestaudio/'
-            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
-            'bestvideo+bestaudio/'
-            'best[ext=mp4]/'
-            'best'
-        ),
-        'outtmpl': output_template,
-        'merge_output_format': 'mp4',
-        'overwrites': True,
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    
-    downloaded_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
-    
-    if not os.path.exists(downloaded_file):
-        for f in os.listdir(output_dir):
-            if f.startswith(sanitized_title) and f.endswith('.mp4'):
-                downloaded_file = os.path.join(output_dir, f)
-                break
-    
-    step_end_time = time.time()
-    print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
-    
-    return downloaded_file, sanitized_title
+                """
+                print(error_msg, file=sys.stdout)
+                print(error_msg, file=sys.stderr)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                time.sleep(0.5)
+                raise e
+
+        output_template = os.path.join(output_dir, f'{sanitized_title}.%(ext)s')
+        expected_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
+        if os.path.exists(expected_file):
+            os.remove(expected_file)
+            print(f"🗑️  Removed existing file to re-download with H.264 codec")
+
+        ydl_opts = {
+            **_COMMON_YDL_OPTS,
+            'format': (
+                'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[vcodec^=avc1]+bestaudio/'
+                'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo+bestaudio/'
+                'best[ext=mp4]/'
+                'best'
+            ),
+            'outtmpl': output_template,
+            'merge_output_format': 'mp4',
+            'overwrites': True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        downloaded_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
+
+        if not os.path.exists(downloaded_file):
+            for f in os.listdir(output_dir):
+                if f.startswith(sanitized_title) and f.endswith('.mp4'):
+                    downloaded_file = os.path.join(output_dir, f)
+                    break
+
+        step_end_time = time.time()
+        print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
+
+        return downloaded_file, sanitized_title
+
+    finally:
+        # Nettoyage systématique de la copie temporaire, même en cas d'erreur
+        if job_cookies_path and os.path.exists(job_cookies_path):
+            os.remove(job_cookies_path)
 
 def process_video_to_vertical(input_video, final_output_video):
     """
