@@ -9,7 +9,7 @@ services:
       - "4000:8000"
     volumes:
       - output-data:/app/output
-      - /var/apps/secrets/cookies.txt:/app/cookies.txt:ro
+      - /var/apps/secrets/cookies.txt:/app/cookies.txt
     environment:
       - NODE_ENV=production
     env_file:
