@@ -540,9 +540,11 @@ def download_youtube_video(url, output_dir="."):
         'nocheckcertificate': True,
         'cachedir': False,
         'cookiefile': os.getenv('YOUTUBE_COOKIES'),
+        "cookiesfrombrowser": None,
+        "no_cookiefile_write": True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embed', 'android', 'mweb', 'web'],
+                'player_client': ['tv_embed', 'android', 'mweb', 'web', 'ios', 'web_creator'],
                 'player_skip': ['webpage', 'configs'],
             },
             'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
