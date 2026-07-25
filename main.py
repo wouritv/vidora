@@ -520,6 +520,7 @@ def _resolve_cookiefile_from_env():
         return None
 
 
+
 def download_youtube_video(url, output_dir="."):
     """
     Downloads a YouTube video using yt-dlp.
@@ -528,6 +529,37 @@ def download_youtube_video(url, output_dir="."):
     print(f"🔍 yt-dlp version: {yt_dlp.version.__version__}")
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
+
+    def _build_opts(use_cookies: bool, job_cookies_path):
+        return {
+            'quiet': False,
+            'verbose': True,
+            'no_warnings': False,
+            'socket_timeout': 30,
+            'retries': 10,
+            'fragment_retries': 10,
+            'nocheckcertificate': True,
+            'cachedir': False,
+            'cookiefile': job_cookies_path if use_cookies else None,
+            'proxy': os.getenv('YOUTUBE_PROXY') or None,
+            'extractor_args': {
+                'youtube': {
+                    # Sans cookies : android/ios fonctionnent nativement, pas de mur SABR.
+                    # Avec cookies (fallback) : on retombe sur mweb/web + PO Token.
+                    'player_client': ['android', 'ios'] if not use_cookies else ['mweb', 'web'],
+                    'player_skip': ['webpage', 'configs'],
+                    'formats': ['missing_pot'],
+                },
+                'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
+            },
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/120.0.0.0 Safari/537.36'
+                ),
+            },
+        }
 
     # --- Copie isolée des cookies pour CE job précis ---
     # Évite que plusieurs téléchargements concurrents écrivent en même temps
@@ -540,50 +572,29 @@ def download_youtube_video(url, output_dir="."):
         os.close(fd)
         shutil.copy(master_cookies_path, job_cookies_path)
 
-    # Common yt-dlp options to work around YouTube bot detection.
-    # tv_embed / android ne nécessitent ni cookies ni PO Token dans la
-    # majorité des cas — on les tente en premier. web/web_creator (les plus
-    # susceptibles de nécessiter un PO Token + cookies stables) sont gardés
-    # en tout dernier recours seulement.
-    _COMMON_YDL_OPTS = {
-        'quiet': False,
-        'verbose': True,
-        'no_warnings': False,
-        'socket_timeout': 30,
-        'retries': 10,
-        'fragment_retries': 10,
-        'nocheckcertificate': True,
-        'cachedir': False,
-        'cookiefile': job_cookies_path,
-        'proxy': os.getenv('YOUTUBE_PROXY') or None,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'mweb', 'web'],
-                'player_skip': ['webpage', 'configs'],
-            },
-            'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
-        },
-        'http_headers': {
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0.0.0 Safari/537.36'
-            ),
-        },
-    }
-
     try:
-        with yt_dlp.YoutubeDL(_COMMON_YDL_OPTS) as ydl:
+        info = None
+        last_error = None
+
+        # 1er essai : SANS cookies, android/ios — combinaison validée qui
+        # fonctionne avec le proxy résidentiel, pas de blocage SABR.
+        for use_cookies in (False, True):
+            _COMMON_YDL_OPTS = _build_opts(use_cookies, job_cookies_path)
             try:
-                info = ydl.extract_info(url, download=False)
-                video_title = info.get('title', 'youtube_video')
-                sanitized_title = sanitize_filename(video_title)
+                with yt_dlp.YoutubeDL(_COMMON_YDL_OPTS) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                break  # succès, on sort de la boucle
             except Exception as e:
-                import sys
+                last_error = e
+                print(f"⚠️ Échec avec use_cookies={use_cookies}: {e}")
+                continue
 
-                print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
+        if info is None:
+            import sys
 
-                error_msg = f"""
+            print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
+
+            error_msg = f"""
 
 ❌ ================================================================= ❌
 ❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED
@@ -598,14 +609,17 @@ REASON: YouTube has blocked the download request (Error 429/Unavailable).
 2. Use the 'Upload Video' tab in this app to process it.
 ---------------------------------------------------------------------
 
-Technical Details: {str(e)}
-                """
-                print(error_msg, file=sys.stdout)
-                print(error_msg, file=sys.stderr)
-                sys.stdout.flush()
-                sys.stderr.flush()
-                time.sleep(0.5)
-                raise e
+Technical Details: {str(last_error)}
+            """
+            print(error_msg, file=sys.stdout)
+            print(error_msg, file=sys.stderr)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            time.sleep(0.5)
+            raise last_error
+
+        video_title = info.get('title', 'youtube_video')
+        sanitized_title = sanitize_filename(video_title)
 
         output_template = os.path.join(output_dir, f'{sanitized_title}.%(ext)s')
         expected_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
@@ -613,6 +627,7 @@ Technical Details: {str(e)}
             os.remove(expected_file)
             print(f"🗑️  Removed existing file to re-download with H.264 codec")
 
+        # Réutilise la même config qui a réussi l'extraction (use_cookies déterminé ci-dessus)
         ydl_opts = {
             **_COMMON_YDL_OPTS,
             'format': (
