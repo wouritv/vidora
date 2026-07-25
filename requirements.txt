@@ -3,6 +3,7 @@ ultralytics==8.4.46
 tqdm==4.67.3
 yt-dlp
 bgutil-ytdlp-pot-provider
+yt-dlp-ytse
 faster-whisper==1.2.1
 google-genai==1.75.0
 python-dotenv==1.2.2
