@@ -554,10 +554,11 @@ def download_youtube_video(url, output_dir="."):
         'fragment_retries': 10,
         'nocheckcertificate': True,
         'cachedir': False,
-        'cookiefile': job_cookies_path,   # copie isolée, jamais le fichier maître
+        'cookiefile': job_cookies_path,
+        'proxy': os.getenv('YOUTUBE_PROXY') or None,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb', 'web', 'web_creator'],
+                'player_client': ['android', 'ios', 'mweb', 'web'],
                 'player_skip': ['webpage', 'configs'],
             },
             'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
@@ -647,6 +648,7 @@ Technical Details: {str(e)}
         # Nettoyage systématique de la copie temporaire, même en cas d'erreur
         if job_cookies_path and os.path.exists(job_cookies_path):
             os.remove(job_cookies_path)
+
 
 def process_video_to_vertical(input_video, final_output_video):
     """
