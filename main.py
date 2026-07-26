@@ -521,146 +521,166 @@ def _resolve_cookiefile_from_env():
 
 
 
-def download_youtube_video(url, output_dir="."):
-    """
-    Downloads a YouTube video using yt-dlp.
-    Returns the path to the downloaded video and the video title.
-    """
-    print(f"🔍 yt-dlp version: {yt_dlp.version.__version__}")
-    print("📥 Downloading video from YouTube...")
-    step_start_time = time.time()
-
-    def _build_opts(use_cookies: bool, job_cookies_path):
-        return {
-            'quiet': False,
-            'verbose': True,
-            'no_warnings': False,
-            'socket_timeout': 30,
-            'retries': 10,
-            'fragment_retries': 10,
-            'nocheckcertificate': True,
-            'cachedir': False,
-            'cookiefile': job_cookies_path if use_cookies else None,
-            'proxy': os.getenv('YOUTUBE_PROXY') or None,
-            'extractor_args': {
-                'youtube': {
-                    # Sans cookies : android/ios fonctionnent nativement, pas de mur SABR.
-                    # Avec cookies (fallback) : on retombe sur mweb/web + PO Token.
-                    'player_client': ['android', 'ios'] if not use_cookies else ['mweb', 'web'],
-                    'player_skip': ['webpage', 'configs'],
-                    'formats': ['missing_pot'],
-                },
-                'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
+def _build_ytdlp_opts(use_cookies: bool, job_cookies_path):
+    """Construit les options yt-dlp selon la stratégie (avec/sans cookies)."""
+    return {
+        'quiet': False,
+        'verbose': True,
+        'no_warnings': False,
+        'socket_timeout': 30,
+        'retries': 10,
+        'fragment_retries': 10,
+        'nocheckcertificate': True,
+        'cachedir': False,
+        'cookiefile': job_cookies_path if use_cookies else None,
+        'proxy': os.getenv('YOUTUBE_PROXY') or None,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios'] if not use_cookies else ['mweb', 'web'],
+                'player_skip': ['webpage', 'configs'],
+                'formats': ['missing_pot'],
             },
-            'http_headers': {
-                'User-Agent': (
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/120.0.0.0 Safari/537.36'
-                ),
-            },
-        }
+            'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
+        },
+        'http_headers': {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0.0.0 Safari/537.36'
+            ),
+        },
+    }
 
-    # --- Copie isolée des cookies pour CE job précis ---
-    # Évite que plusieurs téléchargements concurrents écrivent en même temps
-    # dans le même fichier cookies.txt, ce qui corrompt le fichier et fait
-    # invalider la session par YouTube ("cookies no longer valid").
+
+def _make_job_cookies_copy():
+    """
+    Copie isolee des cookies pour ce job precis. Evite que plusieurs
+    telechargements concurrents ecrivent en meme temps dans le meme fichier
+    cookies.txt, ce qui corrompt le fichier et fait invalider la session
+    par YouTube ("cookies no longer valid").
+    """
     master_cookies_path = os.getenv('YOUTUBE_COOKIES')
-    job_cookies_path = None
-    if master_cookies_path and os.path.exists(master_cookies_path):
-        fd, job_cookies_path = tempfile.mkstemp(suffix='.txt', prefix='ytcookies_')
-        os.close(fd)
-        shutil.copy(master_cookies_path, job_cookies_path)
+    if not master_cookies_path or not os.path.exists(master_cookies_path):
+        return None
+    fd, job_cookies_path = tempfile.mkstemp(suffix='.txt', prefix='ytcookies_')
+    os.close(fd)
+    shutil.copy(master_cookies_path, job_cookies_path)
+    return job_cookies_path
 
-    try:
-        info = None
-        last_error = None
 
-        # 1er essai : SANS cookies, android/ios — combinaison validée qui
-        # fonctionne avec le proxy résidentiel, pas de blocage SABR.
-        for use_cookies in (False, True):
-            _COMMON_YDL_OPTS = _build_opts(use_cookies, job_cookies_path)
-            try:
-                with yt_dlp.YoutubeDL(_COMMON_YDL_OPTS) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                break  # succès, on sort de la boucle
-            except Exception as e:
-                last_error = e
-                print(f"⚠️ Échec avec use_cookies={use_cookies}: {e}")
-                continue
+def _extract_info_with_fallback(url, job_cookies_path):
+    """
+    Tente l'extraction sans cookies (android/ios, valide avec le proxy),
+    puis avec cookies en fallback (mweb/web + PO Token) si necessaire.
+    Retourne (info, opts_utilisees) ou leve la derniere erreur rencontree.
+    """
+    last_error = None
+    for use_cookies in (False, True):
+        opts = _build_ytdlp_opts(use_cookies, job_cookies_path)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            return info, opts
+        except Exception as e:
+            last_error = e
+            print(f"WARNING Echec avec use_cookies={use_cookies}: {e}")
+    raise last_error
 
-        if info is None:
-            import sys
 
-            print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
+def _print_download_failure(error):
+    """Affiche le message d'erreur utilisateur en cas d'echec total."""
+    print("YOUTUBE DOWNLOAD ERROR", file=sys.stderr)
+    error_msg = f"""
 
-            error_msg = f"""
-
-❌ ================================================================= ❌
-❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED
-❌ ================================================================= ❌
+FATAL ERROR: YOUTUBE DOWNLOAD FAILED
 
 REASON: YouTube has blocked the download request (Error 429/Unavailable).
         This is likely a temporary IP ban on this server.
 
-👇 SOLUTION FOR USER 👇
+SOLUTION FOR USER
 ---------------------------------------------------------------------
 1. Download the video manually to your computer.
 2. Use the 'Upload Video' tab in this app to process it.
 ---------------------------------------------------------------------
 
-Technical Details: {str(last_error)}
-            """
-            print(error_msg, file=sys.stdout)
-            print(error_msg, file=sys.stderr)
-            sys.stdout.flush()
-            sys.stderr.flush()
-            time.sleep(0.5)
-            raise last_error
+Technical Details: {str(error)}
+    """
+    print(error_msg, file=sys.stdout)
+    print(error_msg, file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    time.sleep(0.5)
+
+
+def _locate_downloaded_file(output_dir, sanitized_title):
+    """Retrouve le fichier telecharge, meme si l'extension differe de .mp4."""
+    downloaded_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
+    if os.path.exists(downloaded_file):
+        return downloaded_file
+    for f in os.listdir(output_dir):
+        if f.startswith(sanitized_title) and f.endswith('.mp4'):
+            return os.path.join(output_dir, f)
+    return downloaded_file
+
+
+def _run_download(url, output_dir, sanitized_title, base_opts):
+    """Lance le telechargement effectif avec le format H.264 prioritaire."""
+    output_template = os.path.join(output_dir, f'{sanitized_title}.%(ext)s')
+    expected_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
+    if os.path.exists(expected_file):
+        os.remove(expected_file)
+        print("Removed existing file to re-download with H.264 codec")
+
+    ydl_opts = {
+        **base_opts,
+        'format': (
+            'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
+            'bestvideo[vcodec^=avc1]+bestaudio/'
+            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
+            'bestvideo+bestaudio/'
+            'best[ext=mp4]/'
+            'best'
+        ),
+        'outtmpl': output_template,
+        'merge_output_format': 'mp4',
+        'overwrites': True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    return _locate_downloaded_file(output_dir, sanitized_title)
+
+
+def download_youtube_video(url, output_dir="."):
+    """
+    Downloads a YouTube video using yt-dlp.
+    Returns the path to the downloaded video and the video title.
+    """
+    print(f"yt-dlp version: {yt_dlp.version.__version__}")
+    print("Downloading video from YouTube...")
+    step_start_time = time.time()
+
+    job_cookies_path = _make_job_cookies_copy()
+
+    try:
+        try:
+            info, base_opts = _extract_info_with_fallback(url, job_cookies_path)
+        except Exception as e:
+            _print_download_failure(e)
+            raise
 
         video_title = info.get('title', 'youtube_video')
         sanitized_title = sanitize_filename(video_title)
 
-        output_template = os.path.join(output_dir, f'{sanitized_title}.%(ext)s')
-        expected_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
-        if os.path.exists(expected_file):
-            os.remove(expected_file)
-            print(f"🗑️  Removed existing file to re-download with H.264 codec")
-
-        # Réutilise la même config qui a réussi l'extraction (use_cookies déterminé ci-dessus)
-        ydl_opts = {
-            **_COMMON_YDL_OPTS,
-            'format': (
-                'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[vcodec^=avc1]+bestaudio/'
-                'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo+bestaudio/'
-                'best[ext=mp4]/'
-                'best'
-            ),
-            'outtmpl': output_template,
-            'merge_output_format': 'mp4',
-            'overwrites': True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        downloaded_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
-
-        if not os.path.exists(downloaded_file):
-            for f in os.listdir(output_dir):
-                if f.startswith(sanitized_title) and f.endswith('.mp4'):
-                    downloaded_file = os.path.join(output_dir, f)
-                    break
+        downloaded_file = _run_download(url, output_dir, sanitized_title, base_opts)
 
         step_end_time = time.time()
-        print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
+        print(f"Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
 
         return downloaded_file, sanitized_title
 
     finally:
-        # Nettoyage systématique de la copie temporaire, même en cas d'erreur
         if job_cookies_path and os.path.exists(job_cookies_path):
             os.remove(job_cookies_path)
 
