@@ -553,13 +553,10 @@ def _build_ytdlp_opts(use_cookies: bool, job_cookies_path, proxy_session_id):
             },
             'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
         },
-        'http_headers': {
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0.0.0 Safari/537.36'
-            ),
-        },
+        # Pas de 'http_headers' custom ici : yt-dlp applique automatiquement
+        # les en-têtes cohérents avec le client choisi (android/ios/web...).
+        # Un User-Agent forcé en dur entre en conflit avec l'URL signée
+        # par YouTube pour un client précis (ex: c=IOS) et cause un 403.
     }
 
 
@@ -645,6 +642,7 @@ def _run_download(url, output_dir, sanitized_title, base_opts):
     ydl_opts = {
         **base_opts,
         'format': (
+            '18/22/'
             'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
             'bestvideo[vcodec^=avc1]+bestaudio/'
             'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
@@ -697,7 +695,6 @@ def download_youtube_video(url, output_dir="."):
     finally:
         if job_cookies_path and os.path.exists(job_cookies_path):
             os.remove(job_cookies_path)
-
 
 
 def process_video_to_vertical(input_video, final_output_video):
