@@ -21,6 +21,8 @@ import json
 
 import shutil
 import tempfile
+import uuid
+
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -519,10 +521,19 @@ def _resolve_cookiefile_from_env():
         print(f"⚠️ Failed to write cookies file: {e}")
         return None
 
-
-
-def _build_ytdlp_opts(use_cookies: bool, job_cookies_path):
+def _build_ytdlp_opts(use_cookies: bool, job_cookies_path, proxy_session_id):
     """Construit les options yt-dlp selon la stratégie (avec/sans cookies)."""
+    proxy_url = os.getenv('YOUTUBE_PROXY')
+    if proxy_url and proxy_session_id:
+        # Ajoute un identifiant de session au username pour garder la même IP
+        # de sortie tout le long du job (extraction + téléchargement).
+        # Sans ça, DataImpulse peut changer d'IP entre les deux requêtes,
+        # ce qui fait rejeter l'URL signée par YouTube (HTTP 403).
+        scheme, rest = proxy_url.split('://', 1)
+        userpass, hostport = rest.split('@', 1)
+        user, password = userpass.split(':', 1)
+        proxy_url = f"{scheme}://{user}__sessid.{proxy_session_id}:{password}@{hostport}"
+
     return {
         'quiet': False,
         'verbose': True,
@@ -533,7 +544,7 @@ def _build_ytdlp_opts(use_cookies: bool, job_cookies_path):
         'nocheckcertificate': True,
         'cachedir': False,
         'cookiefile': job_cookies_path if use_cookies else None,
-        'proxy': os.getenv('YOUTUBE_PROXY') or None,
+        'proxy': proxy_url or None,
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'ios'] if not use_cookies else ['mweb', 'web'],
@@ -568,7 +579,7 @@ def _make_job_cookies_copy():
     return job_cookies_path
 
 
-def _extract_info_with_fallback(url, job_cookies_path):
+def _extract_info_with_fallback(url, job_cookies_path, proxy_session_id):
     """
     Tente l'extraction sans cookies (android/ios, valide avec le proxy),
     puis avec cookies en fallback (mweb/web + PO Token) si necessaire.
@@ -576,7 +587,7 @@ def _extract_info_with_fallback(url, job_cookies_path):
     """
     last_error = None
     for use_cookies in (False, True):
-        opts = _build_ytdlp_opts(use_cookies, job_cookies_path)
+        opts = _build_ytdlp_opts(use_cookies, job_cookies_path, proxy_session_id)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -662,10 +673,13 @@ def download_youtube_video(url, output_dir="."):
     step_start_time = time.time()
 
     job_cookies_path = _make_job_cookies_copy()
+    # ID de session unique pour ce job — garantit la même IP de sortie
+    # proxy pour toutes les requêtes (extraction + téléchargement).
+    proxy_session_id = uuid.uuid4().hex[:12]
 
     try:
         try:
-            info, base_opts = _extract_info_with_fallback(url, job_cookies_path)
+            info, base_opts = _extract_info_with_fallback(url, job_cookies_path, proxy_session_id)
         except Exception as e:
             _print_download_failure(e)
             raise
@@ -683,6 +697,7 @@ def download_youtube_video(url, output_dir="."):
     finally:
         if job_cookies_path and os.path.exists(job_cookies_path):
             os.remove(job_cookies_path)
+
 
 
 def process_video_to_vertical(input_video, final_output_video):
