@@ -4,25 +4,7 @@ import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
 import ResultCard from "../components/ResultCard";
-
-const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
-const ENCRYPTION_PREFIX = "ENC:";
-
-function decrypt(text) {
-    if (!text) return "";
-    if (!text.startsWith(ENCRYPTION_PREFIX)) return text;
-
-    try {
-        const raw = text.slice(ENCRYPTION_PREFIX.length);
-        const xor = atob(raw);
-        return xor
-            .split("")
-            .map((c, i) => String.fromCodePoint(c.codePointAt(0) ^ SECRET_KEY.codePointAt(i % SECRET_KEY.length)))
-            .join("");
-    } catch {
-        return "";
-    }
-}
+import { decrypt } from "../lib/encryption";
 
 function statusLabel(status) {
     if (status === "termine") return "Termine";

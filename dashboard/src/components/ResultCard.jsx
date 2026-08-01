@@ -5,9 +5,7 @@ import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
-
-const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || 'OpenShorts-Static-Salt-Change-Me';
-const ENCRYPTION_PREFIX = 'ENC:';
+import { decrypt } from '../lib/encryption';
 const SUPPORTED_SOCIAL_PLATFORMS = ['tiktok', 'instagram', 'youtube', 'facebook', 'linkedin'];
 
 const PLATFORM_LABELS = {
@@ -18,20 +16,6 @@ const PLATFORM_LABELS = {
     linkedin: 'LinkedIn',
 };
 
-function decrypt(text) {
-    if (!text) return '';
-    if (!text.startsWith(ENCRYPTION_PREFIX)) return text;
-    try {
-        const raw = text.slice(ENCRYPTION_PREFIX.length);
-        const xor = atob(raw);
-        return xor
-            .split('')
-            .map((c, i) => String.fromCodePoint(c.codePointAt(0) ^ SECRET_KEY.codePointAt(i % SECRET_KEY.length)))
-            .join('');
-    } catch {
-        return '';
-    }
-}
 
 function readConnectedPlatformsFromSettings() {
     try {

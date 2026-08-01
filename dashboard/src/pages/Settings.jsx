@@ -6,33 +6,7 @@ import {
 import { useAuth } from '../state/AuthContext';
 import { useTheme } from '../state/ThemeContext';
 import ServiceUsage from "../components/ServiceUsage.jsx";
-
-const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || 'OpenShorts-Static-Salt-Change-Me';
-const ENCRYPTION_PREFIX = 'ENC:';
-
-function encrypt(text) {
-  if (!text) return '';
-  const xor = text
-    .split('')
-    .map((c, i) => String.fromCodePoint(c.codePointAt(0) ^ SECRET_KEY.codePointAt(i % SECRET_KEY.length)))
-    .join('');
-  return `${ENCRYPTION_PREFIX}${btoa(xor)}`;
-}
-
-function decrypt(text) {
-  if (!text) return '';
-  if (!text.startsWith(ENCRYPTION_PREFIX)) return text;
-  try {
-    const raw = text.slice(ENCRYPTION_PREFIX.length);
-    const xor = atob(raw);
-    return xor
-      .split('')
-      .map((c, i) => String.fromCodePoint(c.codePointAt(0) ^ SECRET_KEY.codePointAt(i % SECRET_KEY.length)))
-      .join('');
-  } catch {
-    return '';
-  }
-}
+import { decrypt, encrypt } from '../lib/encryption';
 
 const SOCIAL_NETWORKS = [
   {

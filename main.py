@@ -36,15 +36,16 @@ load_dotenv()
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
 MIN_CLIP_DURATION_SECONDS = 90
+MAX_CLIP_DURATIONS_SECOND = 40
 
 GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 30 and 60 seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 30 and {max_clip_duration_seconds} seconds long.
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
 - Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
 - Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
-- Each clip between 30 and 60 s (inclusive).
+- Each clip between 30 and {max_clip_duration_seconds} s (inclusive).
 - Prefer starting 0.2–0.4 s BEFORE the hook and ending 0.2–0.4 s AFTER the payoff.
 - Use silence moments for natural cuts; never cut in the middle of a word or phrase.
 - STRICTLY FORBIDDEN to use time formats other than absolute seconds.
@@ -59,7 +60,7 @@ WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
 
 STRICT EXCLUSIONS:
 - No generic intros/outros or purely sponsorship segments unless they contain the hook.
-- No clips < 30 s or > 60 s.
+- No clips < 30 s or > {max_clip_duration_seconds} s.
 
 OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
 {{
@@ -88,6 +89,7 @@ face_detection = mp_face_detection.FaceDetection(model_selection=0, min_detectio
 # Scene analysis thresholds
 MIN_FACE_AREA_RATIO = 0.01
 IOU_MATCH_THRESHOLD = 0.3
+MIN_SAMPLES_PER_SCENE = 3
 MAX_SAMPLES_PER_SCENE = 15
 MIN_ACTIVE_CORRELATION = 0.25
 
@@ -386,8 +388,24 @@ def _iou(box_a, box_b):
 
 def _build_scene_sample_indices(start_f, end_f, fps):
     step = max(1, int(fps * 0.3))
-    indices = list(range(start_f, end_f, step))[:MAX_SAMPLES_PER_SCENE]
-    return indices or [start_f]
+    max_samples = max(1, int(MAX_SAMPLES_PER_SCENE))
+    min_samples = max(1, min(int(MIN_SAMPLES_PER_SCENE), max_samples))
+
+    indices = list(range(start_f, end_f, step))[:max_samples]
+    if not indices:
+        return [start_f]
+
+    # Ensure a minimum number of sample frames when scene span allows it.
+    existing = set(indices)
+    candidate = start_f
+    while len(indices) < min_samples and candidate < end_f:
+        if candidate not in existing:
+            indices.append(candidate)
+            existing.add(candidate)
+        candidate += 1
+
+    indices.sort()
+    return indices[:max_samples]
 
 
 def _update_tracked_faces(tracked_faces, candidates):
@@ -1587,6 +1605,7 @@ def _build_analysis_prompt(transcript_result, video_duration):
         video_duration=video_duration,
         transcript_text=json.dumps(transcript_result.get("text", "")),
         words_json=json.dumps(words),
+        max_clip_duration_seconds=MAX_CLIP_DURATIONS_SECOND,
     )
 
 
@@ -1797,9 +1816,12 @@ def _normalize_short_durations(clips_data, video_duration):
     if not isinstance(shorts, list):
         return clips_data
 
-    max_duration = _safe_float(video_duration, 0.0)
-    if max_duration <= 0:
+    source_duration = _safe_float(video_duration, 0.0)
+    if source_duration <= 0:
         return clips_data
+
+    configured_max_duration = max(1.0, float(MAX_CLIP_DURATIONS_SECOND))
+    max_duration = min(source_duration, configured_max_duration)
 
     min_duration = min(float(MIN_CLIP_DURATION_SECONDS), max_duration)
     normalized_shorts = []
