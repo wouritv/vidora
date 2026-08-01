@@ -38,6 +38,18 @@ function statusClass(status) {
     return "bg-white/5 border-white/10 text-zinc-300";
 }
 
+function getConnectedPlatforms() {
+    try {
+        const raw = localStorage.getItem("openshorts-connected-networks") || "{}";
+        const parsed = JSON.parse(raw);
+        const supported = ["tiktok", "instagram", "youtube", "facebook", "linkedin"];
+        const connected = supported.filter((platform) => Boolean(parsed?.[platform]));
+        return connected.length > 0 ? connected : ["tiktok", "instagram", "youtube"];
+    } catch {
+        return ["tiktok", "instagram", "youtube"];
+    }
+}
+
 function toResultCardClip(item, videoUrl) {
     const start = Number.isFinite(Number(item?.reel_start)) ? Number(item.reel_start) : 0;
     const fallbackDuration = Number.isFinite(Number(item?.reel_duration)) ? Number(item.reel_duration) : 30;
@@ -46,7 +58,7 @@ function toResultCardClip(item, videoUrl) {
     return {
         start,
         end,
-        video_url: videoUrl || item?.reel_playback_url || item?.reel_download_url || item?.reel_url || "",
+        video_url: videoUrl || item?.media_url || item?.reel_playback_url || item?.reel_download_url || item?.reel_url || "",
         video_title_for_youtube_short: item?.reel_title || "Sans titre",
         video_description_for_tiktok: item?.reel_description || "",
         video_description_for_instagram: item?.reel_description || "",
@@ -216,25 +228,23 @@ export default function ReelsPage() {
         const encryptedUploadPostKey = localStorage.getItem("uploadPostKey_v3") || "";
         const apiKey = decrypt(encryptedUploadPostKey);
         const uploadPostUser = globalThis.localStorage.getItem("uploadUserId") || "";
-
-        if (!apiKey || !uploadPostUser) {
-            globalThis.alert("Configure Upload-Post API key and profile in Settings before sharing.");
-            return;
-        }
+        const selectedPlatforms = getConnectedPlatforms();
 
         setSharingId(reelId);
         try {
+            const payload = {
+                platforms: selectedPlatforms,
+            };
+            if (apiKey) payload.api_key = apiKey;
+            if (uploadPostUser) payload.user_id = uploadPostUser;
+
             const response = await fetch(getApiUrl(`/api/reels/${reelId}/share`), {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     "X-User-Id": user.id,
                 },
-                body: JSON.stringify({
-                    api_key: apiKey,
-                    user_id: uploadPostUser,
-                    platforms: ["tiktok", "instagram", "youtube"],
-                }),
+                body: JSON.stringify(payload),
             });
 
             if (!response.ok) {
@@ -253,7 +263,7 @@ export default function ReelsPage() {
 
     const handlePreview = async (item) => {
         setPreviewItem(item);
-        setPreviewUrl(item.reel_playback_url || item.reel_download_url || item.reel_url || "");
+        setPreviewUrl(item.media_url || item.reel_playback_url || item.reel_download_url || item.reel_url || "");
         const mediaUrl = await fetchFreshMediaUrl(item.id);
         if (mediaUrl) setPreviewUrl(mediaUrl);
     };
@@ -487,6 +497,7 @@ export default function ReelsPage() {
                                     clip={previewClip}
                                     index={previewClipIndex}
                                     jobId={previewJobId}
+                                    compactActions={false}
                                 />
                             )}
                         </div>

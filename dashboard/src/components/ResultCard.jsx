@@ -1,29 +1,84 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock } from 'lucide-react';
+import { Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Wand2, Type, Calendar, Clock, Languages, Facebook, Linkedin } from 'lucide-react';
 import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
+import TranslateModal from './TranslateModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
-export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
+const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || 'OpenShorts-Static-Salt-Change-Me';
+const ENCRYPTION_PREFIX = 'ENC:';
+const SUPPORTED_SOCIAL_PLATFORMS = ['tiktok', 'instagram', 'youtube', 'facebook', 'linkedin'];
+
+const PLATFORM_LABELS = {
+    tiktok: 'TikTok',
+    instagram: 'Instagram',
+    youtube: 'YouTube Shorts',
+    facebook: 'Facebook',
+    linkedin: 'LinkedIn',
+};
+
+function decrypt(text) {
+    if (!text) return '';
+    if (!text.startsWith(ENCRYPTION_PREFIX)) return text;
+    try {
+        const raw = text.slice(ENCRYPTION_PREFIX.length);
+        const xor = atob(raw);
+        return xor
+            .split('')
+            .map((c, i) => String.fromCodePoint(c.codePointAt(0) ^ SECRET_KEY.codePointAt(i % SECRET_KEY.length)))
+            .join('');
+    } catch {
+        return '';
+    }
+}
+
+function readConnectedPlatformsFromSettings() {
+    try {
+        const raw = globalThis.localStorage.getItem('openshorts-connected-networks') || '{}';
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return [];
+        return SUPPORTED_SOCIAL_PLATFORMS.filter((platform) => Boolean(parsed[platform]));
+    } catch {
+        return [];
+    }
+}
+
+function inputFilenameFromVideoUrl(videoUrl) {
+    if (!videoUrl || videoUrl.startsWith('blob:')) return undefined;
+    try {
+        const clean = videoUrl.split('?')[0] || '';
+        const filename = clean.split('/').pop();
+        return filename || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+export default function ResultCard({ clip, index, jobId, onPlay, onPause, compactActions = false }) {
     const safeClip = clip && typeof clip === 'object' ? clip : {};
     const clipStart = Number.isFinite(Number(safeClip.start)) ? Number(safeClip.start) : 0;
     const clipEnd = Number.isFinite(Number(safeClip.end)) ? Number(safeClip.end) : clipStart + 30;
     const rawVideoUrl = typeof safeClip.video_url === 'string' ? safeClip.video_url : '';
-    const uploadPostKey = globalThis.localStorage.getItem('uploadPostKey_v3') || '';
+    const uploadPostKey = decrypt(globalThis.localStorage.getItem('uploadPostKey_v3') || '');
     const uploadUserId = globalThis.localStorage.getItem('uploadUserId') || '';
+    const connectedPlatforms = readConnectedPlatformsFromSettings();
+    const defaultPlatforms = connectedPlatforms.length > 0 ? connectedPlatforms : ['tiktok', 'instagram', 'youtube'];
     const hasClipContext = Boolean(jobId) && Number.isFinite(Number(index));
 
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
+    const [showTranslateModal, setShowTranslateModal] = useState(false);
     const videoRef = React.useRef(null);
     const originalVideoUrl = rawVideoUrl ? getApiUrl(rawVideoUrl) : '';
     const [currentVideoUrl, setCurrentVideoUrl] = useState(originalVideoUrl);
 
     const [platforms, setPlatforms] = useState({
-        tiktok: true,
-        instagram: true,
-        youtube: true
+        tiktok: defaultPlatforms.includes('tiktok'),
+        instagram: defaultPlatforms.includes('instagram'),
+        youtube: defaultPlatforms.includes('youtube'),
+        facebook: defaultPlatforms.includes('facebook'),
+        linkedin: defaultPlatforms.includes('linkedin'),
     });
     const [postTitle, setPostTitle] = useState("");
     const [postDescription, setPostDescription] = useState("");
@@ -35,6 +90,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
 
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
+    const [isTranslating, setIsTranslating] = useState(false);
     const [isHooking, setIsHooking] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [editError, setEditError] = useState(null);
@@ -54,6 +110,38 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
             })
             .catch(() => {});
     }, [jobId, index]);
+
+    // Keep player source in sync when preview URL updates (fixes stale/empty playback in modal previews).
+    useEffect(() => {
+        setCurrentVideoUrl(originalVideoUrl);
+    }, [originalVideoUrl]);
+
+    useEffect(() => {
+        if (!videoRef.current) return;
+        videoRef.current.pause();
+        videoRef.current.load();
+    }, [currentVideoUrl]);
+
+    // Release generated object URLs to avoid leaking browser memory.
+    useEffect(() => () => {
+        if (currentVideoUrl && currentVideoUrl.startsWith('blob:')) {
+            URL.revokeObjectURL(currentVideoUrl);
+        }
+    }, [currentVideoUrl]);
+
+    useEffect(() => {
+        const nextPlatforms = {
+            tiktok: defaultPlatforms.includes('tiktok'),
+            instagram: defaultPlatforms.includes('instagram'),
+            youtube: defaultPlatforms.includes('youtube'),
+            facebook: defaultPlatforms.includes('facebook'),
+            linkedin: defaultPlatforms.includes('linkedin'),
+        };
+        setPlatforms((prev) => {
+            const changed = Object.keys(nextPlatforms).some((k) => prev[k] !== nextPlatforms[k]);
+            return changed ? nextPlatforms : prev;
+        });
+    }, [defaultPlatforms.join('|')]);
 
     // Initialize/Reset form when modal opens
     useEffect(() => {
@@ -267,16 +355,52 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
         }
     };
 
+    const handleTranslate = async ({ targetLanguage }) => {
+        if (!hasClipContext) {
+            setEditError('Actions indisponibles: ce reel est detache de son job original.');
+            setTimeout(() => setEditError(null), 5000);
+            return;
+        }
+        setIsTranslating(true);
+        setEditError(null);
+        try {
+            const payload = {
+                job_id: jobId,
+                clip_index: index,
+                target_language: targetLanguage,
+            };
+            const inferredFilename = inputFilenameFromVideoUrl(currentVideoUrl) || inputFilenameFromVideoUrl(originalVideoUrl);
+            if (inferredFilename) payload.input_filename = inferredFilename;
+
+            const res = await fetch(getApiUrl('/api/translate'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                throw new Error(errText || 'Translate failed');
+            }
+
+            const data = await res.json();
+            if (data.new_video_url) {
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                if (videoRef.current) videoRef.current.load();
+            }
+            setShowTranslateModal(false);
+        } catch (e) {
+            setEditError(e.message || 'Translate failed');
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsTranslating(false);
+        }
+    };
+
     const handlePost = async () => {
         if (!hasClipContext) {
             setPostResult({ success: false, msg: 'Publication indisponible: reel detache de son job original.' });
             return;
         }
-        if (!uploadPostKey || !uploadUserId) {
-            setPostResult({ success: false, msg: "Missing API Key or User ID." });
-            return;
-        }
-
         const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
         if (selectedPlatforms.length === 0) {
             setPostResult({ success: false, msg: "Select at least one platform." });
@@ -295,12 +419,14 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
             const payload = {
                 job_id: jobId,
                 clip_index: index,
-                api_key: uploadPostKey,
-                user_id: uploadUserId,
                 platforms: selectedPlatforms,
                 title: postTitle,
                 description: postDescription
             };
+
+            // Optional overrides: backend can fallback to server-side env vars.
+            if (uploadPostKey) payload.api_key = uploadPostKey;
+            if (uploadUserId) payload.user_id = uploadUserId;
 
             if (isScheduling && scheduleDate) {
                 // Convert to ISO-8601
@@ -343,11 +469,13 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
             {/* Left: Video Preview (Responsive Width) */}
             <div className="w-full md:w-[180px] lg:w-[200px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
                 <video
+                    key={currentVideoUrl || 'empty-video-src'}
                     ref={videoRef}
                     src={currentVideoUrl}
                     controls
                     className="w-full h-full object-cover"
                     playsInline
+                    preload="metadata"
                     onPlay={() => {
                         const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
                         onPlay && onPlay(clipStart + currentTime);
@@ -424,40 +552,55 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                 )}
 
                 {/* Actions Footer */}
-                <div className="grid grid-cols-2 gap-3 mt-auto pt-4 border-t border-white/5">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-auto pt-4 border-t border-white/5">
                     <button
                         onClick={handleAutoEdit}
                         disabled={isEditing || !hasClipContext}
-                        className="col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
+                        title="Auto Edit"
+                        className={`col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
                         {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isEditing ? 'Editing...' : 'Auto Edit'}
+                        {!compactActions ? (isEditing ? 'Editing...' : 'Auto Edit') : null}
                     </button>
 
                     <button
                         onClick={() => setShowSubtitleModal(true)}
                         disabled={isSubtitling || !hasClipContext}
-                        className="col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
+                        title="Subtitles"
+                        className={`col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
                         {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
-                        {isSubtitling ? 'Adding...' : 'Subtitles'}
+                        {!compactActions ? (isSubtitling ? 'Adding...' : 'Subtitles') : null}
+                    </button>
+
+                    <button
+                        onClick={() => setShowTranslateModal(true)}
+                        disabled={isTranslating || !hasClipContext}
+                        title="Translate"
+                        className={`col-span-1 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
+                    >
+                        {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
+                        {!compactActions ? (isTranslating ? 'Translating...' : 'Translate') : null}
                     </button>
 
                     <button
                         onClick={() => setShowHookModal(true)}
                         disabled={isHooking || !hasClipContext}
-                        className="col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
+                        title="Viral Hook"
+                        className={`col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
                         {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isHooking ? 'Adding...' : 'Viral Hook'}
+                        {!compactActions ? (isHooking ? 'Adding...' : 'Viral Hook') : null}
                     </button>
 
                     <button
                         onClick={() => setShowModal(true)}
                         disabled={!hasClipContext}
-                        className="col-span-1 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                        title="Post"
+                        className={`col-span-1 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
-                        <Share2 size={14} className="shrink-0" /> Post
+                        <Share2 size={14} className="shrink-0" />
+                        {!compactActions ? 'Post' : null}
                     </button>
                 </div>
             </div>
@@ -475,12 +618,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
 
                         <h3 className="text-lg font-bold text-white mb-4">Post / Schedule</h3>
 
-                        {!uploadPostKey && (
-                            <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
-                                <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                                <div>Configure API Key in Settings first.</div>
+                        {!uploadPostKey || !uploadUserId ? (
+                            <div className="mb-4 p-3 bg-blue-500/10 border border-blue-500/20 text-blue-200 text-xs rounded-lg">
+                                API key/profile not found locally. The backend will use server-side social credentials if configured.
                             </div>
-                        )}
+                        ) : null}
 
                         <div className="space-y-4 mb-6">
                             {/* Title & Description */}
@@ -538,19 +680,30 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                             <div>
                                 <label className="block text-xs font-bold text-zinc-400 mb-2">Select Platforms</label>
                                 <div className="grid grid-cols-1 gap-2">
-                                    <label className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-white/5">
-                                        <input type="checkbox" checked={platforms.tiktok} onChange={e => setPlatforms({ ...platforms, tiktok: e.target.checked })} className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary" />
-                                        <div className="flex items-center gap-2 text-sm text-white"><Video size={16} className="text-cyan-400" /> TikTok</div>
-                                    </label>
-                                    <label className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-white/5">
-                                        <input type="checkbox" checked={platforms.instagram} onChange={e => setPlatforms({ ...platforms, instagram: e.target.checked })} className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary" />
-                                        <div className="flex items-center gap-2 text-sm text-white"><Instagram size={16} className="text-pink-400" /> Instagram</div>
-                                    </label>
-                                    <label className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-white/5">
-                                        <input type="checkbox" checked={platforms.youtube} onChange={e => setPlatforms({ ...platforms, youtube: e.target.checked })} className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary" />
-                                        <div className="flex items-center gap-2 text-sm text-white"><Youtube size={16} className="text-red-400" /> YouTube Shorts</div>
-                                    </label>
+                                    {SUPPORTED_SOCIAL_PLATFORMS.filter((platform) => connectedPlatforms.length === 0 || connectedPlatforms.includes(platform)).map((platform) => {
+                                        const Icon = platform === 'instagram' ? Instagram
+                                            : platform === 'youtube' ? Youtube
+                                                : platform === 'facebook' ? Facebook
+                                                    : platform === 'linkedin' ? Linkedin
+                                                        : Video;
+                                        return (
+                                            <label key={platform} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-white/5">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={Boolean(platforms[platform])}
+                                                    onChange={e => setPlatforms({ ...platforms, [platform]: e.target.checked })}
+                                                    className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                                                />
+                                                <div className="flex items-center gap-2 text-sm text-white">
+                                                    <Icon size={16} className="text-zinc-300" /> {PLATFORM_LABELS[platform]}
+                                                </div>
+                                            </label>
+                                        );
+                                    })}
                                 </div>
+                                {connectedPlatforms.length === 0 ? (
+                                    <p className="mt-2 text-xs text-zinc-500">No platform is marked as connected in Settings, so defaults are shown.</p>
+                                ) : null}
                             </div>
                         </div>
 
@@ -563,7 +716,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
 
                         <button
                             onClick={handlePost}
-                            disabled={posting || !uploadPostKey}
+                            disabled={posting}
                             className="w-full py-3 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-bold transition-all flex items-center justify-center gap-2"
                         >
                             {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Scheduling...' : 'Publishing...'}</> : <><Share2 size={16} /> {isScheduling ? 'Schedule Post' : 'Publish Now'}</>}
@@ -592,6 +745,14 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause }) {
                 initialText={safeClip.viral_hook_text}
                 durationInSeconds={Math.max(1, clipEnd - clipStart)}
                 existingSubtitles={activeLayers.subtitles}
+            />
+
+            <TranslateModal
+                isOpen={showTranslateModal}
+                onClose={() => setShowTranslateModal(false)}
+                onTranslate={handleTranslate}
+                isProcessing={isTranslating}
+                videoUrl={currentVideoUrl || originalVideoUrl}
             />
 
 

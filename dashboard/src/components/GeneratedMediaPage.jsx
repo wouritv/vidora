@@ -37,6 +37,18 @@ function statusClass(status) {
     return "bg-white/5 border-white/10 text-zinc-300";
 }
 
+function getConnectedPlatformsFallback(defaultPlatforms) {
+    try {
+        const raw = localStorage.getItem("openshorts-connected-networks") || "{}";
+        const parsed = JSON.parse(raw);
+        const supported = ["tiktok", "instagram", "youtube", "facebook", "linkedin"];
+        const connected = supported.filter((platform) => Boolean(parsed?.[platform]));
+        return connected.length > 0 ? connected : defaultPlatforms;
+    } catch {
+        return defaultPlatforms;
+    }
+}
+
 export default function GeneratedMediaPage({
     title,
     subtitle,
@@ -204,22 +216,20 @@ export default function GeneratedMediaPage({
         const encryptedUploadPostKey = localStorage.getItem("uploadPostKey_v3") || "";
         const apiKey = decrypt(encryptedUploadPostKey);
         const uploadPostUser = globalThis.localStorage.getItem("uploadUserId") || "";
-
-        if (!apiKey || !uploadPostUser) {
-            globalThis.alert("Configure Upload-Post API key and profile in Settings before sharing.");
-            return;
-        }
+        const selectedPlatforms = getConnectedPlatformsFallback(sharePlatforms);
 
         setSharingId(itemId);
         try {
+            const payload = {
+                platforms: selectedPlatforms,
+            };
+            if (apiKey) payload.api_key = apiKey;
+            if (uploadPostUser) payload.user_id = uploadPostUser;
+
             const response = await fetch(getApiUrl(`${shareEndpoint}/${itemId}/share`), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "X-User-Id": user.id },
-                body: JSON.stringify({
-                    api_key: apiKey,
-                    user_id: uploadPostUser,
-                    platforms: sharePlatforms,
-                }),
+                body: JSON.stringify(payload),
             });
 
             if (!response.ok) {

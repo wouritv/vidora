@@ -719,6 +719,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
                                 jobId={jobId}
                                 onPlay={(time) => handleClipPlay(time)}
                                 onPause={handleClipPause}
+                                compactActions={true}
                               />
                             ))}
                           </div>

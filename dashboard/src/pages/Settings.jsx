@@ -7,6 +7,33 @@ import { useAuth } from '../state/AuthContext';
 import { useTheme } from '../state/ThemeContext';
 import ServiceUsage from "../components/ServiceUsage.jsx";
 
+const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || 'OpenShorts-Static-Salt-Change-Me';
+const ENCRYPTION_PREFIX = 'ENC:';
+
+function encrypt(text) {
+  if (!text) return '';
+  const xor = text
+    .split('')
+    .map((c, i) => String.fromCodePoint(c.codePointAt(0) ^ SECRET_KEY.codePointAt(i % SECRET_KEY.length)))
+    .join('');
+  return `${ENCRYPTION_PREFIX}${btoa(xor)}`;
+}
+
+function decrypt(text) {
+  if (!text) return '';
+  if (!text.startsWith(ENCRYPTION_PREFIX)) return text;
+  try {
+    const raw = text.slice(ENCRYPTION_PREFIX.length);
+    const xor = atob(raw);
+    return xor
+      .split('')
+      .map((c, i) => String.fromCodePoint(c.codePointAt(0) ^ SECRET_KEY.codePointAt(i % SECRET_KEY.length)))
+      .join('');
+  } catch {
+    return '';
+  }
+}
+
 const SOCIAL_NETWORKS = [
   {
     id: 'linkedin',
@@ -60,6 +87,9 @@ export default function SettingsPage() {
     const stored = localStorage.getItem('openshorts-connected-networks');
     return stored ? JSON.parse(stored) : {};
   });
+  const [uploadPostKey, setUploadPostKey] = useState(() => decrypt(localStorage.getItem('uploadPostKey_v3') || ''));
+  const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
+  const [socialSaved, setSocialSaved] = useState(false);
 
   const handleSaveProfile = async () => {
     setIsSaving(true);
@@ -91,6 +121,13 @@ export default function SettingsPage() {
       localStorage.setItem('openshorts-connected-networks', JSON.stringify(updated));
       return updated;
     });
+  };
+
+  const handleSaveSocial = () => {
+    localStorage.setItem('uploadPostKey_v3', uploadPostKey ? encrypt(uploadPostKey.trim()) : '');
+    localStorage.setItem('uploadUserId', (uploadUserId || '').trim());
+    setSocialSaved(true);
+    setTimeout(() => setSocialSaved(false), 1800);
   };
 
   return (
@@ -269,8 +306,43 @@ export default function SettingsPage() {
         </div>
 
         <p className="text-sm text-zinc-400 mb-6">
-          Connect your social media accounts to easily share your creations directly from OpenShorts.
+          Configure your posting profile here. Reel posting reads connected platforms from this section.
         </p>
+
+        <div className="mb-6 space-y-3 rounded-lg border border-white/10 bg-white/5 p-4">
+          <p className="text-xs uppercase tracking-wide text-zinc-500">Upload-Post Profile (Optional)</p>
+          <div>
+            <label className="block text-xs font-medium text-zinc-300 mb-1">API Key</label>
+            <input
+              type="password"
+              value={uploadPostKey}
+              onChange={(e) => setUploadPostKey(e.target.value)}
+              placeholder="Apikey ..."
+              className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/60"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-zinc-300 mb-1">Profile User ID</label>
+            <input
+              type="text"
+              value={uploadUserId}
+              onChange={(e) => setUploadUserId(e.target.value)}
+              placeholder="username/profile id"
+              className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/60"
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-zinc-500">If left blank, server-side env credentials can be used.</p>
+            <button
+              type="button"
+              onClick={handleSaveSocial}
+              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500"
+            >
+              Save Social
+            </button>
+          </div>
+          {socialSaved ? <p className="text-xs text-green-400">Social settings saved.</p> : null}
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {SOCIAL_NETWORKS.map((network) => {

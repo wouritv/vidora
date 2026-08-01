@@ -252,6 +252,9 @@ Navigate to **`http://localhost:5175`**
 | `AWS_S3_BUCKET` | Private bucket for clip backup |
 | `AWS_S3_PUBLIC_BUCKET` | Public bucket for gallery/avatars |
 | `MAX_CONCURRENT_JOBS` | Concurrent processing limit (default: 5) |
+| `UPLOAD_POST_API_KEY` | Optional server-side Upload-Post API key fallback |
+| `UPLOAD_POST_USER_ID` | Optional server-side Upload-Post profile/user fallback |
+| `UPLOAD_POST_DEFAULT_PLATFORMS` | Default post targets if request omits platforms (e.g. `tiktok,instagram,youtube`) |
 
 **Client-side (encrypted in localStorage):**
 | Key | Description |
@@ -259,7 +262,7 @@ Navigate to **`http://localhost:5175`**
 | `GEMINI_API_KEY` | Google Gemini — required |
 | `FAL_KEY` | fal.ai — required for AI Shorts |
 | `ELEVENLABS_API_KEY` | ElevenLabs — required for voiceover/dubbing |
-| `UPLOAD_POST_API_KEY` | Upload-Post — required, for social posting |
+| `UPLOAD_POST_API_KEY` | Upload-Post — optional if server-side env fallback is configured |
 
 ---
 
@@ -280,7 +283,8 @@ Navigate to **`http://localhost:5175`**
 2. **Create Profile**: Go to [Manage Users](https://app.upload-post.com/manage-users)
 3. **Connect Accounts**: Link TikTok, Instagram, and/or YouTube
 4. **Get API Key**: Navigate to [API Keys](https://app.upload-post.com/api-keys)
-5. **Use in OpenShorts**: Paste the key in Settings
+5. **Use in OpenShorts**: Paste API key + profile user in `Settings` (optional when server env fallback is set)
+6. **Connected Platforms**: Enable available networks in `Settings > Connected Networks`; posting UIs read from this config
 
 ---
 

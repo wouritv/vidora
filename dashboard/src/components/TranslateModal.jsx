@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Loader2, Globe, Languages, AlertCircle } from 'lucide-react';
+import { X, Loader2, Globe, Languages } from 'lucide-react';
 import { getApiUrl } from '../config';
 
 const LANGUAGES = {
@@ -36,8 +36,41 @@ const LANGUAGES = {
     "en": "English",
 };
 
-export default function TranslateModal({ isOpen, onClose, onTranslate, isProcessing, videoUrl, hasApiKey }) {
+export default function TranslateModal({ isOpen, onClose, onTranslate, isProcessing, videoUrl }) {
     const [targetLanguage, setTargetLanguage] = useState('es');
+    const [languages, setLanguages] = useState(LANGUAGES);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        let cancelled = false;
+
+        const loadLanguages = async () => {
+            try {
+                const res = await fetch(getApiUrl('/api/translate/languages'));
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!Array.isArray(data?.languages)) return;
+
+                const next = {};
+                data.languages.forEach((item) => {
+                    if (item?.code && item?.name) next[item.code] = item.name;
+                });
+                if (!cancelled && Object.keys(next).length > 0) {
+                    setLanguages(next);
+                    if (!next[targetLanguage]) {
+                        setTargetLanguage(Object.keys(next)[0]);
+                    }
+                }
+            } catch {
+                // Keep static fallback list.
+            }
+        };
+
+        loadLanguages();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, targetLanguage]);
 
     if (!isOpen) return null;
 
@@ -68,13 +101,6 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                     </div>
                 </div>
 
-                {!hasApiKey && (
-                    <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
-                        <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div>Configure ElevenLabs API Key in Settings first.</div>
-                    </div>
-                )}
-
                 {/* Preview */}
                 <div className="mb-6 rounded-xl overflow-hidden bg-black aspect-video relative">
                     <video
@@ -98,7 +124,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                         className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-green-500/50 appearance-none cursor-pointer"
                         disabled={isProcessing}
                     >
-                        {Object.entries(LANGUAGES).sort((a, b) => a[1].localeCompare(b[1])).map(([code, name]) => (
+                        {Object.entries(languages).sort((a, b) => a[1].localeCompare(b[1])).map(([code, name]) => (
                             <option key={code} value={code}>
                                 {name}
                             </option>
@@ -137,7 +163,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                     </button>
                     <button
                         onClick={handleSubmit}
-                        disabled={isProcessing || !hasApiKey}
+                        disabled={isProcessing}
                         className="flex-1 py-3 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
                         {isProcessing ? (

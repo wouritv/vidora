@@ -46,6 +46,8 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
+OUTPUT_SWEEP_INTERVAL_SECONDS = int(os.environ.get("OUTPUT_SWEEP_INTERVAL_SECONDS", str(6 * 3600)))
+OUTPUT_SWEEP_MIN_AGE_SECONDS = int(os.environ.get("OUTPUT_SWEEP_MIN_AGE_SECONDS", "1800"))
 DISABLE_YOUTUBE_URL = os.environ.get("DISABLE_YOUTUBE_URL", "false").lower() in ("1", "true", "yes")
 
 # Application State
@@ -105,6 +107,50 @@ def _cleanup_directory(path: str) -> None:
             shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
+
+
+def _active_output_paths() -> set[str]:
+    active_paths: set[str] = set()
+    for job_data in jobs.values():
+        if job_data.get("status") not in ("queued", "processing"):
+            continue
+        out_dir = job_data.get("output_dir")
+        if out_dir:
+            active_paths.add(os.path.abspath(out_dir))
+    return active_paths
+
+
+def _sweep_output_directory(now_ts: float) -> int:
+    """Delete stale output artifacts in batches instead of per-job cleanup."""
+    if not os.path.isdir(OUTPUT_DIR):
+        return 0
+
+    removed = 0
+    active_paths = _active_output_paths()
+    thumbnails_dir = os.path.abspath(os.path.join(OUTPUT_DIR, "thumbnails"))
+
+    for child in os.listdir(OUTPUT_DIR):
+        child_path = os.path.join(OUTPUT_DIR, child)
+        abs_child = os.path.abspath(child_path)
+
+        if abs_child == thumbnails_dir:
+            continue
+        if abs_child in active_paths:
+            continue
+
+        try:
+            if now_ts - os.path.getmtime(child_path) < OUTPUT_SWEEP_MIN_AGE_SECONDS:
+                continue
+
+            if os.path.isdir(child_path):
+                shutil.rmtree(child_path, ignore_errors=True)
+            else:
+                os.remove(child_path)
+            removed += 1
+        except Exception:
+            continue
+
+    return removed
 
 
 def _reel_media_url_from_s3_key(s3_key: str) -> str:
@@ -195,21 +241,27 @@ async def cleanup_jobs():
     """Background task to remove old jobs and files."""
     import time
     print("🧹 Cleanup task started.")
+    last_output_sweep = 0.0
     while True:
         try:
             await asyncio.sleep(300) # Check every 5 minutes
             now = time.time()
-            
-            # Simple directory cleanup based on modification time
-            # Check OUTPUT_DIR
-            for job_id in os.listdir(OUTPUT_DIR):
-                job_path = os.path.join(OUTPUT_DIR, job_id)
-                if os.path.isdir(job_path):
-                    if now - os.path.getmtime(job_path) > JOB_RETENTION_SECONDS:
-                        print(f"🧹 Purging old job: {job_id}")
-                        shutil.rmtree(job_path, ignore_errors=True)
-                        if job_id in jobs:
-                            del jobs[job_id]
+
+            if OUTPUT_SWEEP_INTERVAL_SECONDS > 0 and (now - last_output_sweep) >= OUTPUT_SWEEP_INTERVAL_SECONDS:
+                removed_count = _sweep_output_directory(now)
+                print(f"🧹 Output sweep completed (removed {removed_count} entries).")
+                last_output_sweep = now
+
+            # Cleanup in-memory API jobs (artifacts are cleaned by batched output sweeps).
+            expired_api_jobs = [
+                jid for jid, jdata in list(jobs.items())
+                if jdata.get("status") in ("completed", "failed")
+                and jdata.get("output_dir")
+                and os.path.isdir(jdata["output_dir"])
+                and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
+            ]
+            for jid in expired_api_jobs:
+                del jobs[jid]
 
             # Cleanup SaaSShorts jobs from memory
             try:
@@ -439,8 +491,7 @@ async def run_job(job_id, job_data):
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
     finally:
-        # Reels are persisted remotely; local processing artifacts are always removed.
-        _cleanup_directory(output_dir)
+        # Keep generated artifacts in output/ until the periodic output sweep runs.
         if input_path and os.path.exists(input_path):
             try:
                 os.remove(input_path)
@@ -1576,9 +1627,9 @@ async def translate_clip(
 class SocialPostRequest(BaseModel):
     job_id: str
     clip_index: int
-    api_key: str
-    user_id: str
-    platforms: List[str] # ["tiktok", "instagram", "youtube"]
+    api_key: Optional[str] = None
+    user_id: Optional[str] = None
+    platforms: Optional[List[str]] = None # ["tiktok", "instagram", "youtube"]
     # Optional overrides if frontend wants to edit them
     title: Optional[str] = None
     description: Optional[str] = None
@@ -1586,6 +1637,32 @@ class SocialPostRequest(BaseModel):
     timezone: Optional[str] = "UTC"
 
 import httpx
+
+
+def _resolve_social_credentials(request_api_key: Optional[str], request_user_id: Optional[str]) -> tuple[str, str]:
+    api_key = (request_api_key or os.getenv("UPLOAD_POST_API_KEY") or "").strip()
+    user_id = (request_user_id or os.getenv("UPLOAD_POST_USER_ID") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Missing Upload-Post API key (request api_key or UPLOAD_POST_API_KEY env)")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing Upload-Post user id (request user_id or UPLOAD_POST_USER_ID env)")
+    return api_key, user_id
+
+
+def _resolve_social_platforms(platforms: Optional[List[str]]) -> List[str]:
+    allowed = {"tiktok", "instagram", "youtube", "facebook", "linkedin"}
+    candidate = [p.strip().lower() for p in (platforms or []) if isinstance(p, str) and p.strip()]
+    if not candidate:
+        env_value = os.getenv("UPLOAD_POST_DEFAULT_PLATFORMS", "tiktok,instagram,youtube")
+        candidate = [p.strip().lower() for p in env_value.split(",") if p.strip()]
+
+    deduped = []
+    for p in candidate:
+        if p in allowed and p not in deduped:
+            deduped.append(p)
+    if not deduped:
+        raise HTTPException(status_code=400, detail="No valid social platforms selected")
+    return deduped
 
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest):
@@ -1597,6 +1674,9 @@ async def post_to_socials(req: SocialPostRequest):
         raise HTTPException(status_code=400, detail="Job result not available")
         
     try:
+        api_key, user_id = _resolve_social_credentials(req.api_key, req.user_id)
+        selected_platforms = _resolve_social_platforms(req.platforms)
+
         clip = job['result']['clips'][req.clip_index]
         video_ref = str(clip.get('video_url') or '').strip()
         if not video_ref:
@@ -1625,14 +1705,14 @@ async def post_to_socials(req: SocialPostRequest):
         # Prepare form data
         url = "https://api.upload-post.com/api/upload"
         headers = {
-            "Authorization": f"Apikey {req.api_key}"
+            "Authorization": f"Apikey {api_key}"
         }
         
         # Prepare data as dict (httpx handles lists for multiple values)
         data_payload = {
-            "user": req.user_id,
+            "user": user_id,
             "title": final_title,
-            "platform[]": req.platforms, # Pass list directly
+            "platform[]": selected_platforms, # Pass list directly
             "async_upload": "true"  # Enable async upload
         }
 
@@ -1643,18 +1723,24 @@ async def post_to_socials(req: SocialPostRequest):
                 data_payload["timezone"] = req.timezone
         
         # Add Platform specifics
-        if "tiktok" in req.platforms:
+        if "tiktok" in selected_platforms:
              data_payload["tiktok_title"] = final_description
              
-        if "instagram" in req.platforms:
+        if "instagram" in selected_platforms:
              data_payload["instagram_title"] = final_description
              data_payload["media_type"] = "REELS"
 
-        if "youtube" in req.platforms:
+        if "youtube" in selected_platforms:
              yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
              data_payload["youtube_title"] = yt_title
              data_payload["youtube_description"] = final_description
              data_payload["privacyStatus"] = "public"
+
+        if "facebook" in selected_platforms:
+             data_payload["facebook_title"] = final_description or final_title
+
+        if "linkedin" in selected_platforms:
+             data_payload["linkedin_title"] = final_description or final_title
 
         # Send File
         files = {
@@ -1663,7 +1749,7 @@ async def post_to_socials(req: SocialPostRequest):
 
         # Switch to synchronous Client to avoid "sync request with AsyncClient" error with multipart/files
         with httpx.Client(timeout=120.0) as client:
-            print(f"📡 Sending to Upload-Post for platforms: {req.platforms}")
+            print(f"📡 Sending to Upload-Post for platforms: {selected_platforms}")
             response = client.post(url, headers=headers, data=data_payload, files=files)
             
         if response.status_code not in [200, 201, 202]: # Added 201
@@ -2798,36 +2884,40 @@ async def saasshorts_voices(
 
 
 class ReelShareRequest(BaseModel):
-    api_key: str
-    user_id: str
-    platforms: List[str]
+    api_key: Optional[str] = None
+    user_id: Optional[str] = None
+    platforms: Optional[List[str]] = None
     title: Optional[str] = None
     description: Optional[str] = None
     scheduled_date: Optional[str] = None
     timezone: Optional[str] = "UTC"
 
 
-def _reel_share_payload(final_title: str, final_description: str, payload: ReelShareRequest) -> Dict[str, Any]:
+def _reel_share_payload(final_title: str, final_description: str, user_id: str, platforms: List[str], scheduled_date: Optional[str], timezone: Optional[str]) -> Dict[str, Any]:
     data_payload: Dict[str, Any] = {
-        "user": payload.user_id,
+        "user": user_id,
         "title": final_title,
-        "platform[]": payload.platforms,
+        "platform[]": platforms,
         "async_upload": "true",
     }
-    if payload.scheduled_date:
-        data_payload["scheduled_date"] = payload.scheduled_date
-        if payload.timezone:
-            data_payload["timezone"] = payload.timezone
+    if scheduled_date:
+        data_payload["scheduled_date"] = scheduled_date
+        if timezone:
+            data_payload["timezone"] = timezone
 
-    if "tiktok" in payload.platforms:
+    if "tiktok" in platforms:
         data_payload["tiktok_title"] = final_description or final_title
-    if "instagram" in payload.platforms:
+    if "instagram" in platforms:
         data_payload["instagram_title"] = final_description or final_title
         data_payload["media_type"] = "REELS"
-    if "youtube" in payload.platforms:
+    if "youtube" in platforms:
         data_payload["youtube_title"] = final_title
         data_payload["youtube_description"] = final_description or final_title
         data_payload["privacyStatus"] = "public"
+    if "facebook" in platforms:
+        data_payload["facebook_title"] = final_description or final_title
+    if "linkedin" in platforms:
+        data_payload["linkedin_title"] = final_description or final_title
     return data_payload
 
 
@@ -2890,14 +2980,16 @@ async def share_reel(request: Request, reel_id: str, payload: ReelShareRequest):
 
     final_title = payload.title or row.get("reel_title") or "OpenShorts"
     final_description = payload.description or row.get("reel_description") or ""
+    api_key, user_id = _resolve_social_credentials(payload.api_key, payload.user_id)
+    selected_platforms = _resolve_social_platforms(payload.platforms)
 
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         media_response = await client.get(media_url)
         media_response.raise_for_status()
         upload_response = await client.post(
             "https://api.upload-post.com/api/upload",
-            headers={"Authorization": f"Apikey {payload.api_key}"},
-            data=_reel_share_payload(final_title, final_description, payload),
+            headers={"Authorization": f"Apikey {api_key}"},
+            data=_reel_share_payload(final_title, final_description, user_id, selected_platforms, payload.scheduled_date, payload.timezone),
             files={"video": (f"{reel_id}.mp4", media_response.content, "video/mp4")},
         )
 

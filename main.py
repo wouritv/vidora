@@ -22,6 +22,9 @@ import json
 import shutil
 import tempfile
 import uuid
+import wave
+
+
 
 
 import warnings
@@ -32,7 +35,7 @@ load_dotenv()
 
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
-MIN_CLIP_DURATION_SECONDS = 30
+MIN_CLIP_DURATION_SECONDS = 90
 
 GEMINI_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 30 and 60 seconds long.
@@ -79,7 +82,25 @@ model = YOLO('yolov8n.pt')
 # --- MediaPipe Setup ---
 # Use standard Face Detection (BlazeFace) for speed
 mp_face_detection = mp.solutions.face_detection
-face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+mp_face_mesh = mp.solutions.face_mesh
+face_detection = mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+
+# Scene analysis thresholds
+MIN_FACE_AREA_RATIO = 0.01
+IOU_MATCH_THRESHOLD = 0.3
+MAX_SAMPLES_PER_SCENE = 15
+MIN_ACTIVE_CORRELATION = 0.25
+
+SEPARATOR_THICKNESS_RATIO = 0.0025
+SEPARATOR_MIN_PX = 2
+SEPARATOR_MAX_PX = 8
+SEPARATOR_COLOR_BGR = (0, 0, 0)
+
+# MediaPipe FaceMesh mouth landmarks
+MOUTH_TOP = 13
+MOUTH_BOTTOM = 14
+MOUTH_LEFT = 78
+MOUTH_RIGHT = 308
 
 class SmoothedCameraman:
     """
@@ -110,63 +131,39 @@ class SmoothedCameraman:
         self.safe_zone_radius = self.crop_width * 0.25
 
     def update_target(self, face_box):
-        """
-        Updates the target center based on detected face/person.
-        """
+        """Updates the target center based on detected face/person."""
         if face_box:
-            x, y, w, h = face_box
+            x, _, w, _ = face_box
             self.target_center_x = x + w / 2
-    
+
+    def _advance_camera(self, diff):
+        """Move current_center_x toward target if outside the safe zone."""
+        if abs(diff) <= self.safe_zone_radius:
+            return
+        direction = 1 if diff > 0 else -1
+        speed = 15.0 if abs(diff) > self.crop_width * 0.5 else 3.0
+        self.current_center_x += direction * speed
+        new_diff = self.target_center_x - self.current_center_x
+        overshot = (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0)
+        if overshot:
+            self.current_center_x = self.target_center_x
+
+    def _clamp_center(self):
+        """Keep current_center_x within valid crop bounds."""
+        half_crop = self.crop_width / 2
+        self.current_center_x = max(half_crop, min(self.video_width - half_crop, self.current_center_x))
+
     def get_crop_box(self, force_snap=False):
-        """
-        Returns the (x1, y1, x2, y2) for the current frame.
-        """
+        """Returns (x1, y1, x2, y2) crop box for the current frame."""
         if force_snap:
             self.current_center_x = self.target_center_x
         else:
-            diff = self.target_center_x - self.current_center_x
-            
-            # SIMPLIFIED LOGIC:
-            # 1. Is the target outside the safe zone?
-            if abs(diff) > self.safe_zone_radius:
-                # 2. If yes, move towards it slowly (Linear Speed)
-                # Determine direction
-                direction = 1 if diff > 0 else -1
-                
-                # Speed: 2 pixels per frame (Slow pan)
-                # If the distance is HUGE (scene change or fast movement), speed up slightly
-                if abs(diff) > self.crop_width * 0.5:
-                    speed = 15.0 # Fast re-frame
-                else:
-                    speed = 3.0  # Slow, steady pan
-                
-                self.current_center_x += direction * speed
-                
-                # Check if we overshot (prevent oscillation)
-                new_diff = self.target_center_x - self.current_center_x
-                if (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0):
-                    self.current_center_x = self.target_center_x
-            
-            # If inside safe zone, DO NOTHING (Stationary Camera)
-                
-        # Clamp center
+            self._advance_camera(self.target_center_x - self.current_center_x)
+        self._clamp_center()
         half_crop = self.crop_width / 2
-        
-        if self.current_center_x - half_crop < 0:
-            self.current_center_x = half_crop
-        if self.current_center_x + half_crop > self.video_width:
-            self.current_center_x = self.video_width - half_crop
-            
-        x1 = int(self.current_center_x - half_crop)
-        x2 = int(self.current_center_x + half_crop)
-        
-        x1 = max(0, x1)
-        x2 = min(self.video_width, x2)
-        
-        y1 = 0
-        y2 = self.video_height
-        
-        return x1, y1, x2, y2
+        x1 = max(0, int(self.current_center_x - half_crop))
+        x2 = min(self.video_width, int(self.current_center_x + half_crop))
+        return x1, 0, x2, self.video_height
 
 class SpeakerTracker:
     """
@@ -187,100 +184,98 @@ class SpeakerTracker:
         self.next_id = 0
         self.known_faces = [] # [{'id': 0, 'center': x, 'last_frame': 123}]
 
-    def get_target(self, face_candidates, frame_number, width):
-        """
-        Decides which face to focus on.
-        face_candidates: list of {'box': [x,y,w,h], 'score': float}
-        """
+    def _find_best_match_id(self, center_x, frame_number, width):
+        best_match_id = -1
+        min_dist = width * 0.15
+        for known_face in self.known_faces:
+            if frame_number - known_face['last_frame'] > 30:
+                continue
+            dist = abs(center_x - known_face['center'])
+            if dist < min_dist:
+                min_dist = dist
+                best_match_id = known_face['id']
+        return best_match_id
+
+    def _allocate_face_id(self, best_match_id):
+        if best_match_id != -1:
+            return best_match_id
+        allocated = self.next_id
+        self.next_id += 1
+        return allocated
+
+    def _upsert_known_face(self, face_id, center_x, frame_number):
+        self.known_faces = [known_face for known_face in self.known_faces if known_face['id'] != face_id]
+        self.known_faces.append({'id': face_id, 'center': center_x, 'last_frame': frame_number})
+
+    def _build_current_candidates(self, face_candidates, frame_number, width):
         current_candidates = []
-        
-        # 1. Match faces to known IDs (simple distance tracking)
         for face in face_candidates:
-            x, y, w, h = face['box']
+            x, _, w, _ = face['box']
             center_x = x + w / 2
-            
-            best_match_id = -1
-            min_dist = width * 0.15 # Reduced matching radius to avoid jumping in groups
-            
-            # Try to match with known faces seen recently
-            for kf in self.known_faces:
-                if frame_number - kf['last_frame'] > 30: # Forgot faces older than 1s (was 2s)
-                    continue
-                    
-                dist = abs(center_x - kf['center'])
-                if dist < min_dist:
-                    min_dist = dist
-                    best_match_id = kf['id']
-            
-            # If no match, assign new ID
-            if best_match_id == -1:
-                best_match_id = self.next_id
-                self.next_id += 1
-            
-            # Update known face
-            self.known_faces = [kf for kf in self.known_faces if kf['id'] != best_match_id]
-            self.known_faces.append({'id': best_match_id, 'center': center_x, 'last_frame': frame_number})
-            
-            current_candidates.append({
-                'id': best_match_id,
-                'box': face['box'],
-                'score': face['score']
-            })
+            match_id = self._find_best_match_id(center_x, frame_number, width)
+            face_id = self._allocate_face_id(match_id)
+            self._upsert_known_face(face_id, center_x, frame_number)
+            current_candidates.append({'id': face_id, 'box': face['box'], 'score': face['score']})
+        return current_candidates
 
-        # 2. Update Scores with decay
-        for pid in list(self.speaker_scores.keys()):
-             self.speaker_scores[pid] *= 0.85 # Faster decay (was 0.9)
-             if self.speaker_scores[pid] < 0.1:
-                 del self.speaker_scores[pid]
+    def _decay_scores(self):
+        for pid in tuple(self.speaker_scores.keys()):
+            self.speaker_scores[pid] *= 0.85
+            if self.speaker_scores[pid] < 0.1:
+                del self.speaker_scores[pid]
 
-        # Add new scores
-        for cand in current_candidates:
-            pid = cand['id']
-            # Score is purely based on size (proximity) now that we don't have mouth
-            raw_score = cand['score'] / (width * width * 0.05)
+    def _accumulate_scores(self, current_candidates, width):
+        for candidate in current_candidates:
+            pid = candidate['id']
+            raw_score = candidate['score'] / (width * width * 0.05)
             self.speaker_scores[pid] = self.speaker_scores.get(pid, 0) + raw_score
 
-        # 3. Determine Best Speaker
-        if not current_candidates:
-            # If no one found, maintain last active speaker if cooldown allows
-            # to avoid black screen or jump to 0,0
-            return None 
-            
+    def _pick_best_candidate(self, current_candidates):
         best_candidate = None
-        max_score = -1
-        
-        for cand in current_candidates:
-            pid = cand['id']
+        max_score = -1.0
+        for candidate in current_candidates:
+            pid = candidate['id']
             total_score = self.speaker_scores.get(pid, 0)
-            
-            # Hysteresis: HUGE Bonus for current active speaker
             if pid == self.active_speaker_id:
-                total_score *= 3.0 # Sticky factor
-                
+                total_score *= 3.0
             if total_score > max_score:
                 max_score = total_score
-                best_candidate = cand
+                best_candidate = candidate
+        return best_candidate
 
-        # 4. Decide Switch
-        if best_candidate:
-            target_id = best_candidate['id']
-            
-            if target_id == self.active_speaker_id:
-                self.locked_counter += 1
-                return best_candidate['box']
-            
-            # New person
-            if frame_number - self.last_switch_frame < self.switch_cooldown:
-                old_cand = next((c for c in current_candidates if c['id'] == self.active_speaker_id), None)
-                if old_cand:
-                    return old_cand['box']
-            
-            self.active_speaker_id = target_id
-            self.last_switch_frame = frame_number
-            self.locked_counter = 0
+    def _find_active_candidate(self, current_candidates):
+        return next((cand for cand in current_candidates if cand['id'] == self.active_speaker_id), None)
+
+    def _can_switch_now(self, frame_number):
+        return (frame_number - self.last_switch_frame) >= self.switch_cooldown
+
+    def get_target(self, face_candidates, frame_number, width):
+        """Decides which face to focus on."""
+        current_candidates = self._build_current_candidates(face_candidates, frame_number, width)
+        self._decay_scores()
+        self._accumulate_scores(current_candidates, width)
+
+        if not current_candidates:
+            return None
+
+        best_candidate = self._pick_best_candidate(current_candidates)
+        if not best_candidate:
+            return None
+
+        target_id = best_candidate['id']
+        if target_id == self.active_speaker_id:
+            self.locked_counter += 1
             return best_candidate['box']
-            
-        return None
+
+        if not self._can_switch_now(frame_number):
+            old_candidate = self._find_active_candidate(current_candidates)
+            if old_candidate:
+                return old_candidate['box']
+
+        self.active_speaker_id = target_id
+        self.last_switch_frame = frame_number
+        self.locked_counter = 0
+        return best_candidate['box']
 
 def detect_face_candidates(frame):
     """
@@ -289,24 +284,30 @@ def detect_face_candidates(frame):
     height, width, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_detection.process(rgb_frame)
-    
+
     candidates = []
-    
+
     if not results.detections:
-        return []
-        
+        return candidates
+
     for detection in results.detections:
-        bboxC = detection.location_data.relative_bounding_box
-        x = int(bboxC.xmin * width)
-        y = int(bboxC.ymin * height)
-        w = int(bboxC.width * width)
-        h = int(bboxC.height * height)
-        
+        bbox = detection.location_data.relative_bounding_box
+        x = int(bbox.xmin * width)
+        y = int(bbox.ymin * height)
+        w = int(bbox.width * width)
+        h = int(bbox.height * height)
+
+        # Filter invalid / tiny detections (noise, logos, artifacts).
+        if w <= 0 or h <= 0:
+            continue
+        if (w * h) < (width * height * MIN_FACE_AREA_RATIO):
+            continue
+
         candidates.append({
             'box': [x, y, w, h],
-            'score': w * h # Area as score
+            'score': w * h  # Area as score
         })
-            
+
     return candidates
 
 def detect_person_yolo(frame):
@@ -340,91 +341,473 @@ def detect_person_yolo(frame):
                 
     return best_box
 
-def create_general_frame(frame, output_width, output_height):
-    """
-    Creates a 'General Shot' frame: 
-    - Background: Blurred zoom of original
-    - Foreground: Original video scaled to fit width, centered vertically.
-    """
+def _build_blurred_background(frame, output_width, output_height):
     orig_h, orig_w = frame.shape[:2]
-    
-    # 1. Background (Fill Height)
-    # Crop center to aspect ratio
     bg_scale = output_height / orig_h
     bg_w = int(orig_w * bg_scale)
     bg_resized = cv2.resize(frame, (bg_w, output_height))
-    
-    # Crop center of background
-    start_x = (bg_w - output_width) // 2
-    if start_x < 0: start_x = 0
-    background = bg_resized[:, start_x:start_x+output_width]
+    start_x = max(0, (bg_w - output_width) // 2)
+    background = bg_resized[:, start_x:start_x + output_width]
     if background.shape[1] != output_width:
         background = cv2.resize(background, (output_width, output_height))
-        
-    # Blur background
-    background = cv2.GaussianBlur(background, (51, 51), 0)
-    
-    # 2. Foreground (Fit Width)
+    return cv2.GaussianBlur(background, (51, 51), 0)
+
+
+def create_general_frame(frame, output_width, output_height):
+    """Create blurred-background layout with centered full-width foreground."""
+    orig_h, orig_w = frame.shape[:2]
+    background = _build_blurred_background(frame, output_width, output_height)
     scale = output_width / orig_w
     fg_h = int(orig_h * scale)
     foreground = cv2.resize(frame, (output_width, fg_h))
-    
-    # 3. Overlay
     y_offset = (output_height - fg_h) // 2
-    
-    # Clone background to avoid modifying it
     final_frame = background.copy()
-    final_frame[y_offset:y_offset+fg_h, :] = foreground
-    
+    final_frame[y_offset:y_offset + fg_h, :] = foreground
     return final_frame
+
+
+def _iou(box_a, box_b):
+    """Intersection-over-Union for two boxes [x, y, w, h]."""
+    ax, ay, aw, ah = box_a
+    bx, by, bw, bh = box_b
+
+    inter_x1 = max(ax, bx)
+    inter_y1 = max(ay, by)
+    inter_x2 = min(ax + aw, bx + bw)
+    inter_y2 = min(ay + ah, by + bh)
+
+    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+    if inter_area == 0:
+        return 0.0
+
+    union_area = aw * ah + bw * bh - inter_area
+    return inter_area / union_area if union_area > 0 else 0.0
+
+
+def _build_scene_sample_indices(start_f, end_f, fps):
+    step = max(1, int(fps * 0.3))
+    indices = list(range(start_f, end_f, step))[:MAX_SAMPLES_PER_SCENE]
+    return indices or [start_f]
+
+
+def _update_tracked_faces(tracked_faces, candidates):
+    for candidate in candidates:
+        matched_face = next(
+            (face for face in tracked_faces if _iou(candidate['box'], face['box']) >= IOU_MATCH_THRESHOLD),
+            None,
+        )
+        if matched_face:
+            matched_face['box'] = candidate['box']
+            matched_face['seen'] += 1
+        else:
+            tracked_faces.append({'box': candidate['box'], 'seen': 1})
+
+
+def count_distinct_faces_in_scene(cap, start_f, end_f, fps):
+    """Estimate distinct faces in a scene with sequential reads and IoU matching."""
+    frame_indices = _build_scene_sample_indices(start_f, end_f, fps)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+
+    tracked_faces = []
+    counts_per_frame = []
+    target_set = set(frame_indices)
+    current_f = start_f
+    last_wanted = frame_indices[-1]
+
+    while current_f <= last_wanted:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if current_f in target_set:
+            candidates = detect_face_candidates(frame)
+            counts_per_frame.append(len(candidates))
+            _update_tracked_faces(tracked_faces, candidates)
+        current_f += 1
+
+    min_seen = 2 if len(frame_indices) > 2 else 1
+    distinct_faces = [face for face in tracked_faces if face['seen'] >= min_seen]
+    distinct_faces.sort(key=lambda face: face['box'][0])
+    tracked_boxes = [face['box'] for face in distinct_faces]
+    return len(distinct_faces), len(frame_indices), counts_per_frame, tracked_boxes
+
+
+def _smooth_strategies(strategies):
+    """Smooth isolated strategy flips to reduce one-scene flicker."""
+    if len(strategies) < 3:
+        return strategies
+
+    smoothed = strategies.copy()
+    for i in range(1, len(strategies) - 1):
+        prev_s = strategies[i - 1]
+        curr_s = strategies[i]
+        next_s = strategies[i + 1]
+        if prev_s == next_s and curr_s != prev_s:
+            smoothed[i] = prev_s
+
+    return smoothed
+
+def _classify_scene_strategy(distinct_count):
+    if distinct_count == 0:
+        return 'GENERAL'
+    if distinct_count == 1:
+        return 'TRACK'
+    if 2 <= distinct_count <= 4:
+        return 'MULTI_SPEAKER'
+    return 'GENERAL'
+
 
 def analyze_scenes_strategy(video_path, scenes):
     """
-    Analyzes each scene to determine if it should be TRACK (Single person) or GENERAL (Group/Wide).
-    Returns list of strategies corresponding to scenes.
+    Analyzes each scene to determine if it should be TRACK (single person),
+    MULTI_SPEAKER (2-4 people) or GENERAL (crowd/b-roll/wide shot).
+
+    Retourne (strategies, tracked_boxes_per_scene).
     """
     cap = cv2.VideoCapture(video_path)
-    strategies = []
-    
     if not cap.isOpened():
-        return ['TRACK'] * len(scenes)
-        
+        return ['TRACK'] * len(scenes), [[] for _ in scenes]
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    raw_strategies = []
+    tracked_boxes_per_scene = []
+
     for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
-        # Sample 3 frames (start, middle, end)
-        frames_to_check = [
-            start.get_frames() + 5,
-            int((start.get_frames() + end.get_frames()) / 2),
-            end.get_frames() - 5
-        ]
-        
-        face_counts = []
-        for f_idx in frames_to_check:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            # Detect faces
-            candidates = detect_face_candidates(frame)
-            face_counts.append(len(candidates))
-            
-        # Decision Logic
-        if not face_counts:
-            avg_faces = 0
-        else:
-            avg_faces = sum(face_counts) / len(face_counts)
-            
-        # Strategy:
-        # 0 faces -> GENERAL (Landscape/B-roll)
-        # 1 face -> TRACK
-        # > 1.2 faces -> GENERAL (Group)
-        
-        if avg_faces > 1.2 or avg_faces < 0.5:
-            strategies.append('GENERAL')
-        else:
-            strategies.append('TRACK')
-            
+        start_f = start.get_frames()
+        end_f = end.get_frames()
+
+        # Garde-fou scènes très courtes (< ~0.5s)
+        if end_f - start_f < max(3, int(fps * 0.5)):
+            raw_strategies.append('TRACK')
+            tracked_boxes_per_scene.append([])
+            continue
+
+        distinct_count, n_samples, _, tracked_boxes = (
+            count_distinct_faces_in_scene(cap, start_f, end_f, fps)
+        )
+
+        if n_samples == 0:
+            raw_strategies.append('GENERAL')
+            tracked_boxes_per_scene.append([])
+            continue
+
+        strategy = _classify_scene_strategy(distinct_count)
+
+        raw_strategies.append(strategy)
+        tracked_boxes_per_scene.append(tracked_boxes)
+
     cap.release()
-    return strategies
+
+    strategies = _smooth_strategies(raw_strategies)
+
+    # Si le lissage a changé une scène vers une stratégie != MULTI_SPEAKER,
+    # les tracked_boxes associées ne sont plus pertinentes.
+    for i, (raw, smoothed) in enumerate(zip(raw_strategies, strategies)):
+        if raw != smoothed and smoothed != 'MULTI_SPEAKER':
+            tracked_boxes_per_scene[i] = []
+
+    return strategies, tracked_boxes_per_scene
+
+
+# ============================================================
+# RAFFINEMENT PAR ACTIVITÉ DE PAROLE (audio + mouvement des lèvres)
+# ============================================================
+
+def _extract_audio_rms(video_path, target_fps):
+    """
+    Extrait la piste audio via ffmpeg (mono 16kHz WAV), puis calcule une
+    énergie RMS par fenêtre alignée approximativement sur les frames vidéo.
+
+    Retourne un np.array, ou None si pas d'audio exploitable.
+    """
+    wav_path = "/tmp/_scene_audio_tmp.wav"
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn", "-ac", "1", "-ar", "16000",
+                "-f", "wav", wav_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            sr = wf.getframerate()
+            n_samples = wf.getnframes()
+            raw = wf.readframes(n_samples)
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    except Exception:
+        return None
+
+    if samples.size == 0:
+        return None
+
+    samples_per_video_frame = max(1, int(sr / target_fps))
+    rms_per_frame = []
+    for i in range(0, samples.size, samples_per_video_frame):
+        window = samples[i:i + samples_per_video_frame]
+        if window.size == 0:
+            continue
+        rms_per_frame.append(np.sqrt(np.mean(window ** 2)))
+
+    return np.array(rms_per_frame)
+
+
+def _mouth_aspect_ratio(landmarks, w, h):
+    """Ratio ouverture verticale / largeur de bouche (MAR)."""
+    top = landmarks[MOUTH_TOP]
+    bottom = landmarks[MOUTH_BOTTOM]
+    left = landmarks[MOUTH_LEFT]
+    right = landmarks[MOUTH_RIGHT]
+
+    vert = np.hypot((top.x - bottom.x) * w, (top.y - bottom.y) * h)
+    horiz = np.hypot((left.x - right.x) * w, (left.y - right.y) * h)
+
+    return vert / horiz if horiz > 0 else 0.0
+
+
+def _landmarks_to_box(landmarks, w, h):
+    xs = [lm.x * w for lm in landmarks]
+    ys = [lm.y * h for lm in landmarks]
+    return [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
+
+
+def _best_matching_face_id(box, tracked_boxes_template):
+    best_id, best_iou = None, 0.0
+    for i, ref_box in enumerate(tracked_boxes_template):
+        iou = _iou(box, ref_box)
+        if iou > best_iou:
+            best_iou, best_id = iou, i
+    if best_id is None or best_iou < 0.15:
+        return None
+    return best_id
+
+
+def _interpolate_signal_nans(arr):
+    if np.all(np.isnan(arr)):
+        return arr
+    nans = np.isnan(arr)
+    if nans.any():
+        arr[nans] = np.interp(np.flatnonzero(nans), np.flatnonzero(~nans), arr[~nans])
+    return arr
+
+
+def _track_mouth_signals(cap, start_f, end_f, tracked_boxes_template):
+    """
+    Relit la scène séquentiellement avec FaceMesh, et pour chaque visage
+    suivi (matché par IoU avec la box de référence), accumule un signal
+    temporel d'ouverture de bouche (MAR).
+
+    Retourne un dict {face_id: np.array(mar_signal_par_frame)}.
+    """
+    signals = {i: [] for i in range(len(tracked_boxes_template))}
+
+    with mp_face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=max(1, len(tracked_boxes_template)),
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+    ) as face_mesh:
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+        current_f = start_f
+
+        while current_f < end_f:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            h, w, _ = frame.shape
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = face_mesh.process(rgb)
+
+            frame_values = {i: np.nan for i in signals}
+
+            if results.multi_face_landmarks:
+                for face_landmarks in results.multi_face_landmarks:
+                    box = _landmarks_to_box(face_landmarks.landmark, w, h)
+                    best_id = _best_matching_face_id(box, tracked_boxes_template)
+                    if best_id is not None:
+                        frame_values[best_id] = _mouth_aspect_ratio(face_landmarks.landmark, w, h)
+
+            for i in signals:
+                signals[i].append(frame_values[i])
+
+            current_f += 1
+
+    for i in signals:
+        arr = np.array(signals[i], dtype=np.float32)
+        signals[i] = _interpolate_signal_nans(arr)
+
+    return signals
+
+
+def _count_active_speakers(audio_seg, mouth_signals, min_len):
+    active_speakers = 0
+    audio_std = np.std(audio_seg)
+    if audio_std == 0:
+        return 0
+
+    for signal in mouth_signals.values():
+        sig = signal[:min_len]
+        if np.all(np.isnan(sig)) or np.std(sig) == 0:
+            continue
+        corr = np.corrcoef(sig, audio_seg)[0, 1]
+        if not np.isnan(corr) and corr >= MIN_ACTIVE_CORRELATION:
+            active_speakers += 1
+    return active_speakers
+
+
+def refine_multi_speaker_scenes(video_path, scenes, strategies, tracked_boxes_per_scene):
+    """
+    Affine les scènes classées MULTI_SPEAKER en vérifiant, via corrélation
+    mouvement des lèvres <-> énergie audio, combien de personnes VISIBLES
+    parlent réellement.
+
+    - 1 seul visage corrélé à l'audio -> TRACK
+    - 2+ visages corrélés -> reste MULTI_SPEAKER
+    - Pas d'audio exploitable -> décision initiale conservée (fallback sûr)
+
+    Retourne la liste de stratégies raffinée.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return strategies
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    refined = strategies.copy()
+
+    for idx, (start, end) in enumerate(tqdm(scenes, desc="   Refining MULTI_SPEAKER scenes")):
+        if strategies[idx] != 'MULTI_SPEAKER':
+            continue
+
+        tracked_boxes = tracked_boxes_per_scene[idx]
+        if len(tracked_boxes) < 2:
+            continue
+
+        start_f = start.get_frames()
+        end_f = end.get_frames()
+        audio_rms = _extract_audio_rms(video_path, fps)
+        if audio_rms is None or audio_rms.size < 3:
+            continue
+
+        mouth_signals = _track_mouth_signals(cap, start_f, end_f, tracked_boxes)
+
+        min_len = min(audio_rms.size, min(len(s) for s in mouth_signals.values()))
+        if min_len < 3:
+            continue
+        audio_seg = audio_rms[:min_len]
+
+        active_speakers = _count_active_speakers(audio_seg, mouth_signals, min_len)
+
+        if active_speakers == 1:
+            refined[idx] = 'TRACK'
+        # active_speakers == 0 ou >= 2 -> on garde la décision initiale
+
+    cap.release()
+    return refined
+
+
+# ============================================================
+# RENDU DU SPLIT-SCREEN 50/50 (MULTI_SPEAKER)
+# ============================================================
+
+def _compute_separator_thickness(output_height):
+    """
+    Épaisseur de la bande de séparation, proportionnelle à la hauteur de
+    sortie, bornée entre SEPARATOR_MIN_PX et SEPARATOR_MAX_PX, forcée paire
+    pour un centrage pixel-parfait.
+    """
+    raw = output_height * SEPARATOR_THICKNESS_RATIO
+    thickness = int(round(raw))
+    thickness = max(SEPARATOR_MIN_PX, min(SEPARATOR_MAX_PX, thickness))
+
+    if thickness % 2 != 0:
+        thickness += 1
+
+    return thickness
+
+
+def _crop_centered_on_face(frame, face_box, target_w, target_h):
+    """
+    Recadre le frame source autour du visage donné pour remplir exactement
+    (target_w x target_h), en conservant le ratio d'aspect cible (crop,
+    pas de déformation), centré sur le visage.
+    """
+    src_h, src_w, _ = frame.shape
+    fx, fy, fw, fh = face_box
+    face_cx = fx + fw / 2
+    face_cy = fy + fh / 2
+
+    target_ratio = target_w / target_h
+    src_ratio = src_w / src_h
+
+    if target_ratio > src_ratio:
+        crop_w = src_w
+        crop_h = int(crop_w / target_ratio)
+    else:
+        crop_h = src_h
+        crop_w = int(crop_h * target_ratio)
+
+    crop_w = min(crop_w, src_w)
+    crop_h = min(crop_h, src_h)
+
+    x1 = int(face_cx - crop_w / 2)
+    y1 = int(face_cy - crop_h / 2)
+
+    x1 = max(0, min(x1, src_w - crop_w))
+    y1 = max(0, min(y1, src_h - crop_h))
+
+    cropped = frame[y1:y1 + crop_h, x1:x1 + crop_w]
+    resized = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+    return resized
+
+
+def render_multi_speaker_frame(frame, tracked_boxes, output_width, output_height):
+    """
+    Compose un frame en split-screen VERTICAL 50/50 (top/bottom).
+
+    - Toujours exactement 50% en haut / 50% en bas.
+    - Bande de séparation fine et noire, épaisseur proportionnelle à la
+      résolution de sortie.
+    - Si 3-4 visages détectés : garde les 2 avec la plus grande aire.
+    """
+    src_h, src_w, _ = frame.shape
+
+    separator_px = _compute_separator_thickness(output_height)
+
+    if len(tracked_boxes) > 2:
+        boxes_sorted_by_area = sorted(
+            tracked_boxes, key=lambda b: b[2] * b[3], reverse=True
+        )[:2]
+        boxes = sorted(boxes_sorted_by_area, key=lambda b: b[0])
+    elif len(tracked_boxes) == 2:
+        boxes = tracked_boxes
+    else:
+        boxes = [[0, 0, src_w, src_h], [0, 0, src_w, src_h]]
+
+    half_h = (output_height - separator_px) // 2
+    top_h = half_h
+    bottom_h = output_height - separator_px - top_h
+
+    canvas = np.zeros((output_height, output_width, 3), dtype=np.uint8)
+
+    for slot_idx, box in enumerate(boxes[:2]):
+        slot_h = top_h if slot_idx == 0 else bottom_h
+        crop = _crop_centered_on_face(frame, box, output_width, slot_h)
+        y_offset = 0 if slot_idx == 0 else (top_h + separator_px)
+        canvas[y_offset:y_offset + slot_h, 0:output_width] = crop
+
+    sep_start = top_h
+    sep_end = top_h + separator_px
+    canvas[sep_start:sep_end, 0:output_width] = SEPARATOR_COLOR_BGR
+
+    return canvas
 
 def detect_scenes(video_path):
     video = open_video(video_path)
@@ -697,221 +1080,257 @@ def download_youtube_video(url, output_dir="."):
             os.remove(job_cookies_path)
 
 
-def process_video_to_vertical(input_video, final_output_video):
-    """
-    Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
-    """
-    script_start_time = time.time()
-    
-    # Define temporary file paths based on the output name
+def _prepare_temp_paths(final_output_video):
     base_name = os.path.splitext(final_output_video)[0]
-    temp_video_output = f"{base_name}_temp_video.mp4"
-    temp_audio_output = f"{base_name}_temp_audio.aac"
-    
-    # Clean up previous temp files if they exist
-    if os.path.exists(temp_video_output): os.remove(temp_video_output)
-    if os.path.exists(temp_audio_output): os.remove(temp_audio_output)
-    if os.path.exists(final_output_video): os.remove(final_output_video)
+    return f"{base_name}_temp_video.mp4", f"{base_name}_temp_audio.aac"
 
-    print(f"🎬 Processing clip: {input_video}")
-    print("   Step 1: Detecting scenes...")
-    scenes, fps = detect_scenes(input_video)
-    
-    if not scenes:
-        print("   ❌ No scenes were detected. Using full video as one scene.")
-        # If scene detection fails or finds nothing, treat whole video as one scene
-        cap = cv2.VideoCapture(input_video)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        from scenedetect import FrameTimecode
-        scenes = [(FrameTimecode(0, fps), FrameTimecode(total_frames, fps))]
 
-    print(f"   ✅ Found {len(scenes)} scenes.")
+def _cleanup_existing_outputs(*paths):
+    for path in paths:
+        if os.path.exists(path):
+            os.remove(path)
 
-    print("\n   🧠 Step 2: Preparing Active Tracking...")
-    original_width, original_height = get_video_resolution(input_video)
-    
-    OUTPUT_HEIGHT = original_height
-    OUTPUT_WIDTH = int(OUTPUT_HEIGHT * ASPECT_RATIO)
-    if OUTPUT_WIDTH % 2 != 0:
-        OUTPUT_WIDTH += 1
 
-    # Initialize Cameraman
-    cameraman = SmoothedCameraman(OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height)
-    
-    # --- New Strategy: Per-Scene Analysis ---
-    print("\n   🤖 Step 3: Analyzing Scenes for Strategy (Single vs Group)...")
-    scene_strategies = analyze_scenes_strategy(input_video, scenes)
-    # scene_strategies is a list of 'TRACK' or 'General' corresponding to scenes
-    
-    print("\n   ✂️ Step 4: Processing video frames...")
-    
+def _fallback_single_scene(input_video, fps):
+    cap = cv2.VideoCapture(input_video)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    from scenedetect import FrameTimecode
+    return [(FrameTimecode(0, fps), FrameTimecode(total_frames, fps))]
+
+
+def _compute_output_dimensions(original_height):
+    output_height = original_height
+    output_width = int(output_height * ASPECT_RATIO)
+    if output_width % 2 != 0:
+        output_width += 1
+    return output_width, output_height
+
+
+def _build_scene_boundaries(scenes):
+    return [(start.get_frames(), end.get_frames()) for start, end in scenes]
+
+
+def _advance_scene_index(frame_number, current_scene_index, scene_boundaries):
+    if current_scene_index >= len(scene_boundaries):
+        return current_scene_index
+    _, end_f = scene_boundaries[current_scene_index]
+    if frame_number >= end_f and current_scene_index < len(scene_boundaries) - 1:
+        return current_scene_index + 1
+    return current_scene_index
+
+
+def _render_track_frame(frame, frame_number, scene_boundaries, speaker_tracker, cameraman, output_width, output_height, original_width):
+    if frame_number % 2 == 0:
+        candidates = detect_face_candidates(frame)
+        target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
+        if target_box:
+            cameraman.update_target(target_box)
+        else:
+            person_box = detect_person_yolo(frame)
+            if person_box:
+                cameraman.update_target(person_box)
+
+    is_scene_start = frame_number == scene_boundaries[0] if len(scene_boundaries) == 1 else False
+    x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
+    if y2 > y1 and x2 > x1:
+        cropped = frame[y1:y2, x1:x2]
+        return cv2.resize(cropped, (output_width, output_height))
+    return cv2.resize(frame, (output_width, output_height))
+
+
+def _render_multi_speaker_frame_live(frame, frame_number, cameraman, scene_boxes, output_width, output_height):
+    if frame_number % 2 == 0:
+        live_candidates = detect_face_candidates(frame)
+        if len(live_candidates) >= 2:
+            cameraman._ms_live_boxes = sorted([candidate['box'] for candidate in live_candidates], key=lambda b: b[0])
+    live_boxes = getattr(cameraman, '_ms_live_boxes', None)
+    render_boxes = live_boxes if live_boxes else scene_boxes
+    return render_multi_speaker_frame(frame, render_boxes, output_width, output_height)
+
+
+def _reset_cameraman(cameraman, original_width):
+    cameraman.current_center_x = original_width / 2
+    cameraman.target_center_x = original_width / 2
+
+
+def _render_frame_by_strategy(
+    frame,
+    frame_number,
+    current_scene_index,
+    scene_boundaries,
+    scene_strategies,
+    tracked_boxes_per_scene,
+    cameraman,
+    speaker_tracker,
+    output_width,
+    output_height,
+    original_width,
+):
+    strategy = scene_strategies[current_scene_index] if current_scene_index < len(scene_strategies) else 'TRACK'
+
+    if strategy == 'GENERAL':
+        _reset_cameraman(cameraman, original_width)
+        return create_general_frame(frame, output_width, output_height)
+
+    if strategy == 'MULTI_SPEAKER':
+        scene_boxes = tracked_boxes_per_scene[current_scene_index] if current_scene_index < len(tracked_boxes_per_scene) else []
+        _reset_cameraman(cameraman, original_width)
+        return _render_multi_speaker_frame_live(frame, frame_number, cameraman, scene_boxes, output_width, output_height)
+
+    scene_range = scene_boundaries[current_scene_index] if current_scene_index < len(scene_boundaries) else (0, 0)
+    is_scene_start = frame_number == scene_range[0]
+    if frame_number % 2 == 0:
+        candidates = detect_face_candidates(frame)
+        target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
+        if target_box:
+            cameraman.update_target(target_box)
+        else:
+            person_box = detect_person_yolo(frame)
+            if person_box:
+                cameraman.update_target(person_box)
+    x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
+    if y2 > y1 and x2 > x1:
+        return cv2.resize(frame[y1:y2, x1:x2], (output_width, output_height))
+    return cv2.resize(frame, (output_width, output_height))
+
+
+def _process_frames_to_temp_video(
+    input_video,
+    temp_video_output,
+    fps,
+    output_width,
+    output_height,
+    scene_boundaries,
+    scene_strategies,
+    tracked_boxes_per_scene,
+    cameraman,
+    speaker_tracker,
+    original_width,
+):
     command = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
-        '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
+        '-s', f'{output_width}x{output_height}', '-pix_fmt', 'bgr24',
         '-r', str(fps), '-i', '-', '-c:v', 'libx264',
         '-preset', 'fast', '-crf', '23', '-an', temp_video_output
     ]
-
     ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     cap = cv2.VideoCapture(input_video)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
     frame_number = 0
     current_scene_index = 0
-    
-    # Pre-calculate scene boundaries
-    scene_boundaries = []
-    for s_start, s_end in scenes:
-        scene_boundaries.append((s_start.get_frames(), s_end.get_frames()))
-
-    # Global tracker for single-person shots
-    speaker_tracker = SpeakerTracker(cooldown_frames=30)
 
     with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-
-            # Update Scene Index
-            if current_scene_index < len(scene_boundaries):
-                start_f, end_f = scene_boundaries[current_scene_index]
-                if frame_number >= end_f and current_scene_index < len(scene_boundaries) - 1:
-                    current_scene_index += 1
-            
-            # Determine Strategy for current frame based on scene
-            current_strategy = scene_strategies[current_scene_index] if current_scene_index < len(scene_strategies) else 'TRACK'
-            
-            # Apply Strategy
-            if current_strategy == 'GENERAL':
-                # "Plano General" -> Blur Background + Fit Width
-                output_frame = create_general_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT)
-                
-                # Reset cameraman/tracker so they don't drift while inactive
-                cameraman.current_center_x = original_width / 2
-                cameraman.target_center_x = original_width / 2
-                
-            else:
-                # "Single Speaker" -> Track & Crop
-                
-                # Detect every 2nd frame for performance
-                if frame_number % 2 == 0:
-                    candidates = detect_face_candidates(frame)
-                    target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
-                    if target_box:
-                        cameraman.update_target(target_box)
-                    else:
-                        person_box = detect_person_yolo(frame)
-                        if person_box:
-                            cameraman.update_target(person_box)
-
-                # Snap camera on scene change to avoid panning from previous scene position
-                is_scene_start = (frame_number == scene_boundaries[current_scene_index][0])
-                
-                x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
-                
-                # Crop
-                if y2 > y1 and x2 > x1:
-                    cropped = frame[y1:y2, x1:x2]
-                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
-                else:
-                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
-
+            current_scene_index = _advance_scene_index(frame_number, current_scene_index, scene_boundaries)
+            output_frame = _render_frame_by_strategy(
+                frame,
+                frame_number,
+                current_scene_index,
+                scene_boundaries,
+                scene_strategies,
+                tracked_boxes_per_scene,
+                cameraman,
+                speaker_tracker,
+                output_width,
+                output_height,
+                original_width,
+            )
             ffmpeg_process.stdin.write(output_frame.tobytes())
             frame_number += 1
             pbar.update(1)
-    
+
     ffmpeg_process.stdin.close()
     stderr_output = ffmpeg_process.stderr.read().decode()
     ffmpeg_process.wait()
     cap.release()
+    return ffmpeg_process.returncode, stderr_output
 
-    if ffmpeg_process.returncode != 0:
-        print("\n   ❌ FFmpeg frame processing failed.")
-        print("   Stderr:", stderr_output)
-        return False
 
-    print("\n   🔊 Step 5: Extracting audio...")
-    audio_extract_command = [
-        'ffmpeg', '-y', '-i', input_video, '-vn', '-acodec', 'copy', temp_audio_output
-    ]
+def _extract_audio_track(input_video, temp_audio_output):
+    audio_extract_command = ['ffmpeg', '-y', '-i', input_video, '-vn', '-acodec', 'copy', temp_audio_output]
     try:
         subprocess.run(audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return True
     except subprocess.CalledProcessError:
         print("\n   ❌ Audio extraction failed (maybe no audio?). Proceeding without audio.")
-        pass
+        return False
 
-    print("\n   ✨ Step 6: Merging...")
+
+def _merge_video_and_audio(temp_video_output, temp_audio_output, final_output_video):
     if os.path.exists(temp_audio_output):
         merge_command = [
             'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
             '-c:v', 'copy', '-c:a', 'copy', final_output_video
         ]
     else:
-         merge_command = [
-            'ffmpeg', '-y', '-i', temp_video_output,
-            '-c:v', 'copy', final_output_video
-        ]
-        
+        merge_command = ['ffmpeg', '-y', '-i', temp_video_output, '-c:v', 'copy', final_output_video]
+
     try:
         subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         print(f"   ✅ Clip saved to {final_output_video}")
-    except subprocess.CalledProcessError as e:
+        return True
+    except subprocess.CalledProcessError as exc:
         print("\n   ❌ Final merge failed.")
-        print("   Stderr:", e.stderr.decode())
+        print("   Stderr:", exc.stderr.decode())
         return False
 
-    # Clean up temp files
-    if os.path.exists(temp_video_output): os.remove(temp_video_output)
-    if os.path.exists(temp_audio_output): os.remove(temp_audio_output)
-    
-    return True
 
-""" def transcribe_video(video_path):
-    print("🎙️  Transcribing video with Faster-Whisper (CPU Optimized)...")
-    from faster_whisper import WhisperModel
-    
-    # Run on CPU with INT8 quantization for speed
-    model = WhisperModel("base", device="cpu", compute_type="int8")
-    
-    segments, info = model.transcribe(video_path, word_timestamps=True)
-    
-    print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
-    
-    # Convert to openai-whisper compatible format
-    transcript_segments = []
-    full_text = ""
-    
-    for segment in segments:
-        # Print progress to keep user informed (and prevent timeouts feeling)
-        print(f"   [{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}")
-        
-        seg_dict = {
-            'text': segment.text,
-            'start': segment.start,
-            'end': segment.end,
-            'words': []
-        }
-        
-        if segment.words:
-            for word in segment.words:
-                seg_dict['words'].append({
-                    'word': word.word,
-                    'start': word.start,
-                    'end': word.end,
-                    'probability': word.probability
-                })
-        
-        transcript_segments.append(seg_dict)
-        full_text += segment.text + " "
-        
-    return {
-        'text': full_text.strip(),
-        'segments': transcript_segments,
-        'language': info.language
-    } """
+def process_video_to_vertical(input_video, final_output_video):
+    """Convert horizontal video to vertical using scene strategies and tracking."""
+    temp_video_output, temp_audio_output = _prepare_temp_paths(final_output_video)
+    _cleanup_existing_outputs(temp_video_output, temp_audio_output, final_output_video)
+
+    print(f"🎬 Processing clip: {input_video}")
+    print("   Step 1: Detecting scenes...")
+    scenes, fps = detect_scenes(input_video)
+    if not scenes:
+        print("   ❌ No scenes were detected. Using full video as one scene.")
+        scenes = _fallback_single_scene(input_video, fps)
+    print(f"   ✅ Found {len(scenes)} scenes.")
+
+    print("\n   🧠 Step 2: Preparing Active Tracking...")
+    original_width, original_height = get_video_resolution(input_video)
+    output_width, output_height = _compute_output_dimensions(original_height)
+    cameraman = SmoothedCameraman(output_width, output_height, original_width, original_height)
+
+    print("\n   🤖 Step 3: Analyzing Scenes for Strategy (Single vs Group)...")
+    scene_strategies, tracked_boxes_per_scene = analyze_scenes_strategy(input_video, scenes)
+    scene_strategies = refine_multi_speaker_scenes(input_video, scenes, scene_strategies, tracked_boxes_per_scene)
+
+    print("\n   ✂️ Step 4: Processing video frames...")
+    scene_boundaries = _build_scene_boundaries(scenes)
+    speaker_tracker = SpeakerTracker(cooldown_frames=30)
+    return_code, stderr_output = _process_frames_to_temp_video(
+        input_video,
+        temp_video_output,
+        fps,
+        output_width,
+        output_height,
+        scene_boundaries,
+        scene_strategies,
+        tracked_boxes_per_scene,
+        cameraman,
+        speaker_tracker,
+        original_width,
+    )
+
+    if return_code != 0:
+        print("\n   ❌ FFmpeg frame processing failed.")
+        print("   Stderr:", stderr_output)
+        return False
+
+    print("\n   🔊 Step 5: Extracting audio...")
+    _extract_audio_track(input_video, temp_audio_output)
+
+    print("\n   ✨ Step 6: Merging...")
+    success = _merge_video_and_audio(temp_video_output, temp_audio_output, final_output_video)
+    _cleanup_existing_outputs(temp_video_output, temp_audio_output)
+    return success
 
 def _build_segments_from_word_list(words, language="unknown"):
     """
@@ -1547,7 +1966,7 @@ if __name__ == '__main__':
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):
         os.remove(input_video)
-        print(f"🗑️  Cleaned up downloaded video.")
+        print("🗑️  Cleaned up downloaded video.")
 
     total_time = time.time() - script_start_time
     print(f"\n⏱️  Total execution time: {total_time:.2f}s")
