@@ -4,32 +4,8 @@ import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { decrypt } from "../lib/encryption";
-
-function statusLabel(status) {
-    if (status === "termine") return "Termine";
-    if (status === "en_cours") return "En cours";
-    if (status === "echec") return "Echec";
-    return status || "-";
-}
-
-function statusClass(status) {
-    if (status === "termine") return "bg-green-500/10 border-green-500/30 text-green-300";
-    if (status === "en_cours") return "bg-blue-500/10 border-blue-500/30 text-blue-300";
-    if (status === "echec") return "bg-red-500/10 border-red-500/30 text-red-300";
-    return "bg-white/5 border-white/10 text-zinc-300";
-}
-
-function getConnectedPlatformsFallback(defaultPlatforms) {
-    try {
-        const raw = localStorage.getItem("openshorts-connected-networks") || "{}";
-        const parsed = JSON.parse(raw);
-        const supported = ["tiktok", "instagram", "youtube", "facebook", "linkedin"];
-        const connected = supported.filter((platform) => Boolean(parsed?.[platform]));
-        return connected.length > 0 ? connected : defaultPlatforms;
-    } catch {
-        return defaultPlatforms;
-    }
-}
+import { statusLabel, statusClass } from "../lib/status";
+import { getConnectedPlatforms } from "../lib/platforms";
 
 export default function GeneratedMediaPage({
     title,
@@ -198,7 +174,7 @@ export default function GeneratedMediaPage({
         const encryptedUploadPostKey = localStorage.getItem("uploadPostKey_v3") || "";
         const apiKey = decrypt(encryptedUploadPostKey);
         const uploadPostUser = globalThis.localStorage.getItem("uploadUserId") || "";
-        const selectedPlatforms = getConnectedPlatformsFallback(sharePlatforms);
+        const selectedPlatforms = getConnectedPlatforms(sharePlatforms);
 
         setSharingId(itemId);
         try {

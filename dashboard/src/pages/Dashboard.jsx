@@ -1,55 +1,10 @@
-import { ArrowRight, Sparkles, Image, Activity, CheckCircle2, AlertCircle } from "lucide-react";
+import { ArrowRight, Sparkles, Image } from "lucide-react";
 import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { getApiUrl } from "../config";
-
-const SESSION_KEY = "openshorts_session";
-const SESSION_MAX_AGE = 3600000;
-
-function readGenerationSession() {
-    try {
-        const raw = globalThis.localStorage.getItem(SESSION_KEY);
-        if (!raw) return null;
-        const parsed = JSON.parse(raw);
-        if (!parsed?.jobId || !parsed?.status) return null;
-        if (Date.now() - parsed.timestamp > SESSION_MAX_AGE) {
-            globalThis.localStorage.removeItem(SESSION_KEY);
-            return null;
-        }
-        return parsed;
-    } catch {
-        return null;
-    }
-}
-
-function normalizeFrontendStatus(status) {
-    if (status === "completed") return "complete";
-    if (status === "failed") return "error";
-    return status;
-}
-
-function statusMeta(status) {
-    if (status === "processing") {
-        return {
-            label: "En cours",
-            className: "bg-primary/10 border-primary/20 text-primary",
-            icon: Activity,
-        };
-    }
-    if (status === "complete") {
-        return {
-            label: "Termine",
-            className: "bg-green-500/10 border-green-500/20 text-green-400",
-            icon: CheckCircle2,
-        };
-    }
-    return {
-        label: "Erreur",
-        className: "bg-red-500/10 border-red-500/20 text-red-400",
-        icon: AlertCircle,
-    };
-}
+import { normalizeFrontendStatus, statusMeta } from "../lib/status";
+import { readGenerationSession, SESSION_KEY } from "../lib/session";
 
 export default function Dashboard() {
 

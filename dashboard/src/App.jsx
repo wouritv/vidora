@@ -12,6 +12,7 @@ import { getApiUrl } from './config';
 import { useLocation, useNavigate } from "react-router-dom";
 import { DASHBOARD_SIDEBAR_ITEMS } from "./lib/dashboard-nav";
 import { useAuth } from "./state/AuthContext";
+import { SESSION_KEY, SESSION_MAX_AGE } from "./lib/session";
 import SettingsPage from "./pages/Settings.jsx";
 
 const TikTokIcon = ({ size = 16, className = "" }) => (
@@ -313,8 +314,6 @@ const Sidebar = ({ currentTab, onNavigate }) => (
     </div>
 );
 
-const SESSION_KEY = 'openshorts_session';
-const SESSION_MAX_AGE = 3600000;
 
 const pollJob = async (jobId) => {
   try {

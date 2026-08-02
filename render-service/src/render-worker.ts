@@ -3,6 +3,7 @@ import path from "node:path";
 import { selectComposition, renderMedia } from "@remotion/renderer";
 import { getBundleLocation } from "./bundle.js";
 import { renderJobs } from "./server.js";
+import { buildRenderOutputLocation } from "./lib/render-utils.js";
 
 export interface RenderParams {
   renderId: string;
@@ -59,8 +60,7 @@ export async function executeRender(params: RenderParams): Promise<void> {
     fs.mkdirSync(jobOutputDir, { recursive: true });
 
     const timestamp = Date.now();
-    const outputFileName = `remotion_${clipIndex}_${timestamp}.mp4`;
-    const outputLocation = path.join(jobOutputDir, outputFileName);
+    const outputLocation = buildRenderOutputLocation(outputDir, jobId, clipIndex, timestamp);
 
     console.log(`[render-worker] Output: ${outputLocation}`);
 

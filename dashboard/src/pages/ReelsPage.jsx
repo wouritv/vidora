@@ -5,48 +5,9 @@ import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
 import ResultCard from "../components/ResultCard";
 import { decrypt } from "../lib/encryption";
-
-function statusLabel(status) {
-    if (status === "termine") return "Termine";
-    if (status === "en_cours") return "En cours";
-    if (status === "echec") return "Echec";
-    return status || "-";
-}
-
-function statusClass(status) {
-    if (status === "termine") return "bg-green-500/10 border-green-500/30 text-green-300";
-    if (status === "en_cours") return "bg-blue-500/10 border-blue-500/30 text-blue-300";
-    if (status === "echec") return "bg-red-500/10 border-red-500/30 text-red-300";
-    return "bg-white/5 border-white/10 text-zinc-300";
-}
-
-function getConnectedPlatforms() {
-    try {
-        const raw = localStorage.getItem("openshorts-connected-networks") || "{}";
-        const parsed = JSON.parse(raw);
-        const supported = ["tiktok", "instagram", "youtube", "facebook", "linkedin"];
-        const connected = supported.filter((platform) => Boolean(parsed?.[platform]));
-        return connected.length > 0 ? connected : ["tiktok", "instagram", "youtube"];
-    } catch {
-        return ["tiktok", "instagram", "youtube"];
-    }
-}
-
-function toResultCardClip(item, videoUrl) {
-    const start = Number.isFinite(Number(item?.reel_start)) ? Number(item.reel_start) : 0;
-    const fallbackDuration = Number.isFinite(Number(item?.reel_duration)) ? Number(item.reel_duration) : 30;
-    const end = Number.isFinite(Number(item?.reel_end)) ? Number(item.reel_end) : start + fallbackDuration;
-
-    return {
-        start,
-        end,
-        video_url: videoUrl || item?.media_url || item?.reel_playback_url || item?.reel_download_url || item?.reel_url || "",
-        video_title_for_youtube_short: item?.reel_title || "Sans titre",
-        video_description_for_tiktok: item?.reel_description || "",
-        video_description_for_instagram: item?.reel_description || "",
-        viral_hook_text: item?.reel_hook_text || "",
-    };
-}
+import { getConnectedPlatforms } from "../lib/platforms";
+import { toResultCardClip } from "../lib/clips";
+import { statusLabel, statusClass } from "../lib/status";
 
 export default function ReelsPage() {
     const { user } = useAuth();
@@ -210,7 +171,7 @@ export default function ReelsPage() {
         const encryptedUploadPostKey = localStorage.getItem("uploadPostKey_v3") || "";
         const apiKey = decrypt(encryptedUploadPostKey);
         const uploadPostUser = globalThis.localStorage.getItem("uploadUserId") || "";
-        const selectedPlatforms = getConnectedPlatforms();
+        const selectedPlatforms = getConnectedPlatforms(['tiktok', 'instagram', 'youtube']);
 
         setSharingId(reelId);
         try {

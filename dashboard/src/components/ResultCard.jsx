@@ -6,6 +6,8 @@ import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 import { decrypt } from '../lib/encryption';
+import { getConnectedPlatforms } from '../lib/platforms';
+import { inputFilenameFromVideoUrl } from '../lib/clips';
 const SUPPORTED_SOCIAL_PLATFORMS = ['tiktok', 'instagram', 'youtube', 'facebook', 'linkedin'];
 
 const PLATFORM_LABELS = {
@@ -18,25 +20,7 @@ const PLATFORM_LABELS = {
 
 
 function readConnectedPlatformsFromSettings() {
-    try {
-        const raw = globalThis.localStorage.getItem('openshorts-connected-networks') || '{}';
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object') return [];
-        return SUPPORTED_SOCIAL_PLATFORMS.filter((platform) => Boolean(parsed[platform]));
-    } catch {
-        return [];
-    }
-}
-
-function inputFilenameFromVideoUrl(videoUrl) {
-    if (!videoUrl || videoUrl.startsWith('blob:')) return undefined;
-    try {
-        const clean = videoUrl.split('?')[0] || '';
-        const filename = clean.split('/').pop();
-        return filename || undefined;
-    } catch {
-        return undefined;
-    }
+    return getConnectedPlatforms();
 }
 
 export default function ResultCard({ clip, index, jobId, onPlay, onPause, compactActions = false }) {

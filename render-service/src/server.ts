@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
 import { initBundle } from "./bundle.js";
 import { executeRender } from "./render-worker.js";
+import { buildRenderStatusResponse, resolveRenderVideoUrl } from "./lib/render-utils.js";
 
 // --- Render status types ---
 
@@ -83,12 +84,10 @@ app.post("/render", (req, res) => {
     `[render] Queued render ${renderId} for job=${jobId} clip=${clipIndex}`
   );
 
-  // Resolve video URL: convert frontend/backend URLs to renderer's own static server
-  // The renderer serves /output/* from the shared Docker volume
-  let resolvedVideoUrl = props.videoUrl;
-  const videoPathMatch = props.videoUrl.match(/\/videos\/([^/]+)\/(.+)$/);
-  if (videoPathMatch) {
-    resolvedVideoUrl = `http://localhost:${PORT}/output/${videoPathMatch[1]}/${videoPathMatch[2]}`;
+  // Resolve video URL: convert frontend/backend URLs to renderer's own static server.
+  // The renderer serves /output/* from the shared Docker volume.
+  const resolvedVideoUrl = resolveRenderVideoUrl(props.videoUrl, PORT);
+  if (resolvedVideoUrl !== props.videoUrl) {
     console.log(`[render] Resolved video URL: ${props.videoUrl} -> ${resolvedVideoUrl}`);
   }
 
@@ -130,22 +129,7 @@ app.get("/render/:renderId", (req, res) => {
     return;
   }
 
-  const response: Record<string, unknown> = {
-    renderId: job.renderId,
-    status: job.status,
-  };
-
-  if (job.progress !== undefined) {
-    response.progress = job.progress;
-  }
-  if (job.outputUrl) {
-    response.outputUrl = job.outputUrl;
-  }
-  if (job.error) {
-    response.error = job.error;
-  }
-
-  res.json(response);
+  res.json(buildRenderStatusResponse(job));
 });
 
 // --- Start server ---
