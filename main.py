@@ -35,17 +35,17 @@ load_dotenv()
 
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
-MIN_CLIP_DURATION_SECONDS = 90
-MAX_CLIP_DURATIONS_SECOND = 40
+MIN_CLIP_DURATION_SECONDS = 30
+MAX_CLIP_DURATIONS_SECOND = 90
 
 GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 30 and {max_clip_duration_seconds} seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between {min_clip_duration_seconds} and {max_clip_duration_seconds} seconds long.
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
 - Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
 - Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
-- Each clip between 30 and {max_clip_duration_seconds} s (inclusive).
+- Each clip between {min_clip_duration_seconds} and {max_clip_duration_seconds} s (inclusive).
 - Prefer starting 0.2–0.4 s BEFORE the hook and ending 0.2–0.4 s AFTER the payoff.
 - Use silence moments for natural cuts; never cut in the middle of a word or phrase.
 - STRICTLY FORBIDDEN to use time formats other than absolute seconds.
@@ -60,7 +60,7 @@ WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
 
 STRICT EXCLUSIONS:
 - No generic intros/outros or purely sponsorship segments unless they contain the hook.
-- No clips < 30 s or > {max_clip_duration_seconds} s.
+- No clips < {min_clip_duration_seconds} s or > {max_clip_duration_seconds} s.
 
 OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
 {{
@@ -1606,6 +1606,7 @@ def _build_analysis_prompt(transcript_result, video_duration):
         transcript_text=json.dumps(transcript_result.get("text", "")),
         words_json=json.dumps(words),
         max_clip_duration_seconds=MAX_CLIP_DURATIONS_SECOND,
+        min_clip_duration_seconds=MIN_CLIP_DURATION_SECONDS,
     )
 
 
@@ -1811,7 +1812,6 @@ def _build_external_costs(transcript, clips_data):
 
 
 def _normalize_short_durations(clips_data, video_duration):
-    """Ensure generated clips have a minimum duration while staying in bounds."""
     shorts = clips_data.get("shorts") if isinstance(clips_data, dict) else None
     if not isinstance(shorts, list):
         return clips_data
@@ -1820,10 +1820,9 @@ def _normalize_short_durations(clips_data, video_duration):
     if source_duration <= 0:
         return clips_data
 
-    configured_max_duration = max(1.0, float(MAX_CLIP_DURATIONS_SECOND))
-    max_duration = min(source_duration, configured_max_duration)
+    min_clip_duration = float(MIN_CLIP_DURATION_SECONDS)
+    max_clip_duration = float(MAX_CLIP_DURATIONS_SECOND)
 
-    min_duration = min(float(MIN_CLIP_DURATION_SECONDS), max_duration)
     normalized_shorts = []
 
     for clip in shorts:
@@ -1832,16 +1831,27 @@ def _normalize_short_durations(clips_data, video_duration):
 
         start = _safe_float(clip.get("start"), 0.0)
         end = _safe_float(clip.get("end"), 0.0)
-        start = max(0.0, min(start, max_duration))
-        end = max(0.0, min(end, max_duration))
+
+        # timestamps absolus dans la vidéo
+        start = max(0.0, min(start, source_duration))
+        end = max(0.0, min(end, source_duration))
 
         if end <= start:
             continue
 
-        if (end - start) < min_duration:
-            end = min(max_duration, start + min_duration)
-            if (end - start) < min_duration:
-                start = max(0.0, end - min_duration)
+        duration = end - start
+
+        if duration < min_clip_duration:
+            end = min(source_duration, start + min_clip_duration)
+            duration = end - start
+            if duration < min_clip_duration:
+                continue
+
+        if duration > max_clip_duration:
+            end = start + max_clip_duration
+            if end > source_duration:
+                end = source_duration
+                start = max(0.0, end - max_clip_duration)
 
         if end <= start:
             continue
