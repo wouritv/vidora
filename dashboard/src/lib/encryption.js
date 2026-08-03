@@ -9,7 +9,7 @@ export function encrypt(text) {
   if (!text) return '';
   const bytes = Array.from(new TextEncoder().encode(text));
   const xored = xorBytes(bytes);
-  return `${ENCRYPTION_PREFIX}${btoa(String.fromCharCode(...xored))}`;
+  return `${ENCRYPTION_PREFIX}${btoa(String.fromCodePoint(...xored))}`;
 }
 
 export function decrypt(text) {
@@ -18,7 +18,7 @@ export function decrypt(text) {
 
   try {
     const decoded = atob(text.slice(ENCRYPTION_PREFIX.length));
-    const bytes = Array.from(decoded, c => c.charCodeAt(0));
+    const bytes = Array.from(decoded, c => c.codePointAt(0));
     const xored = xorBytes(bytes);
     return new TextDecoder().decode(new Uint8Array(xored));
   } catch {

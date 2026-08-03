@@ -71,7 +71,7 @@ export function formatDate(date) {
 export function detectTimezone() {
     try {
         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        if (TIMEZONES.find((t) => t.value === tz)) return tz;
+        if (TIMEZONES.some((t) => t.value === tz)) return tz;
         return 'UTC';
     } catch {
         return 'UTC';
