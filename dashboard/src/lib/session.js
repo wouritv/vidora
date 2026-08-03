@@ -1,4 +1,4 @@
-export const SESSION_KEY = 'openshorts_session';
+export const SESSION_KEY = 'Vidora_session';
 export const SESSION_MAX_AGE = 3_600_000; // 1 hour in ms
 
 /**

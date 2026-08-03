@@ -58,7 +58,7 @@ export default function SettingsPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
   const [connectedNetworks, setConnectedNetworks] = useState(() => {
-    const stored = localStorage.getItem('openshorts-connected-networks');
+    const stored = localStorage.getItem('Vidora-connected-networks');
     return stored ? JSON.parse(stored) : {};
   });
   const [uploadPostKey, setUploadPostKey] = useState(() => decrypt(localStorage.getItem('uploadPostKey_v3') || ''));
@@ -69,7 +69,7 @@ export default function SettingsPage() {
     setIsSaving(true);
     try {
       // Save to localStorage as a fallback since we might not have direct profile updates
-      localStorage.setItem('openshorts-display-name', displayName);
+      localStorage.setItem('Vidora-display-name', displayName);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
       setIsEditing(false);
@@ -92,7 +92,7 @@ export default function SettingsPage() {
         ...prev,
         [networkId]: !prev[networkId]
       };
-      localStorage.setItem('openshorts-connected-networks', JSON.stringify(updated));
+      localStorage.setItem('Vidora-connected-networks', JSON.stringify(updated));
       return updated;
     });
   };
@@ -143,7 +143,7 @@ export default function SettingsPage() {
               )}
             </button>
           </div>
-          <p className="text-xs text-zinc-500 mt-2">Your unique identifier in OpenShorts</p>
+          <p className="text-xs text-zinc-500 mt-2">Your unique identifier in Vidora</p>
         </div>
 
         {/* Email */}
@@ -220,7 +220,7 @@ export default function SettingsPage() {
           <h2 className="text-xl font-semibold">Appearance</h2>
         </div>
 
-        <p className="text-sm text-zinc-400 mb-4">Choose how OpenShorts looks on your device</p>
+        <p className="text-sm text-zinc-400 mb-4">Choose how Vidora looks on your device</p>
 
         <div className="grid grid-cols-3 gap-3">
           {/* Light Theme */}

@@ -18,7 +18,7 @@ Three theme options:
 - **Dark**: Dark interface for reduced eye strain
 - **System**: Automatically matches your OS preference
 
-Theme preference is saved to localStorage under `openshorts-theme`.
+Theme preference is saved to localStorage under `Vidora-theme`.
 
 ### 3. Connected Networks
 Connect your social media accounts to enable direct sharing of generated clips:
@@ -28,7 +28,7 @@ Connect your social media accounts to enable direct sharing of generated clips:
 - Facebook
 - Instagram
 
-Network connections are stored locally in localStorage under `openshorts-connected-networks`.
+Network connections are stored locally in localStorage under `Vidora-connected-networks`.
 
 ## API Keys Configuration
 
@@ -94,9 +94,9 @@ Response example:
 ### Storage Keys
 | Key | Purpose |
 |-----|---------|
-| `openshorts-theme` | User's theme preference (dark/light/system) |
-| `openshorts-display-name` | User's display name (cached locally) |
-| `openshorts-connected-networks` | JSON object of connected social networks |
+| `Vidora-theme` | User's theme preference (dark/light/system) |
+| `Vidora-display-name` | User's display name (cached locally) |
+| `Vidora-connected-networks` | JSON object of connected social networks |
 
 ### Theme Implementation
 - Uses Tailwind's `class` darkMode strategy

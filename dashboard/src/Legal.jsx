@@ -2,7 +2,7 @@ import React from 'react';
 import { ArrowLeft } from 'lucide-react';
 
 const LAST_UPDATED = '2026-05-06';
-const ISSUES_URL = 'https://github.com/mutonby/openshorts/issues';
+const ISSUES_URL = 'https://github.com/mutonby/Vidora/issues';
 
 function Section({ title, children }) {
     return (
@@ -37,7 +37,7 @@ export default function Legal() {
 
                 <Section title="The short version">
                     <p>
-                        OpenShorts is a free, open-source AI clip generator. There are no accounts, no payments, and we
+                        Vidora is a free, open-source AI clip generator. There are no accounts, no payments, and we
                         do not persistently store the videos you upload or the clips we generate. By using the Service
                         you agree to the points below.
                     </p>
@@ -64,7 +64,7 @@ export default function Legal() {
                     </ul>
                     <p>
                         If you submit content you do not have rights to, that is your responsibility, not ours. You
-                        agree to indemnify OpenShorts and its contributors against any third-party claim arising from
+                        agree to indemnify Vidora and its contributors against any third-party claim arising from
                         content you submitted.
                     </p>
                 </Section>
@@ -96,7 +96,7 @@ export default function Legal() {
 
                 <Section title="Third-party APIs">
                     <p>
-                        When you use a feature that requires it, OpenShorts forwards relevant data to the third-party
+                        When you use a feature that requires it, Vidora forwards relevant data to the third-party
                         API for which you provided a key — Google Gemini (AI analysis), ElevenLabs (optional dubbing),
                         Upload-Post (optional social posting). Those services have their own terms and privacy policies
                         which apply in addition to this notice.
@@ -135,7 +135,7 @@ export default function Legal() {
 
                 <Section title="Self-hosted instances">
                     <p>
-                        OpenShorts is open source and may be self-hosted. This notice applies only to the hosted
+                        Vidora is open source and may be self-hosted. This notice applies only to the hosted
                         version we operate. Self-hosted instances are operated by their respective administrators, and
                         their data handling, retention, and policies are their responsibility, not ours.
                     </p>

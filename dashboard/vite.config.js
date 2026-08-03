@@ -16,8 +16,8 @@ export default defineConfig({
   },
   server: {
     allowedHosts: [
-      'openshorts.app',
-      'www.openshorts.app'
+      'Vidora.app',
+      'www.Vidora.app'
     ],
     proxy: {
       '/api': {

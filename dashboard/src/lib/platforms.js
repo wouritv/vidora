@@ -14,7 +14,7 @@ export const PLATFORM_LABELS = {
     linkedin: 'LinkedIn',
 };
 
-const CONNECTED_NETWORKS_KEY = 'openshorts-connected-networks';
+const CONNECTED_NETWORKS_KEY = 'Vidora-connected-networks';
 
 /**
  * Read connected platforms from localStorage.

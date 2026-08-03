@@ -2555,7 +2555,7 @@ async def gallery_html_page():
           </div>
         </a>'''
 
-        ld_items.append(f'{{"@type":"ListItem","position":{i+1},"url":"https://openshorts.app/video/{video_id}","name":"{title}"}}')
+        ld_items.append(f'{{"@type":"ListItem","position":{i+1},"url":"https://Vidora.app/video/{video_id}","name":"{title}"}}')
 
     ld_json = f'{{"@context":"https://schema.org","@type":"CollectionPage","name":"AI UGC Video Gallery","mainEntity":{{"@type":"ItemList","numberOfItems":{len(videos)},"itemListElement":[{",".join(ld_items)}]}}}}'
 
@@ -2563,10 +2563,10 @@ async def gallery_html_page():
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI UGC Video Gallery | OpenShorts</title>
+<title>AI UGC Video Gallery | Vidora</title>
 <meta name="description" content="Browse {len(videos)} AI-generated UGC marketing videos. Create viral TikTok and Instagram Reels for your SaaS product.">
 <meta name="robots" content="index, follow">
-<meta property="og:title" content="AI UGC Video Gallery | OpenShorts">
+<meta property="og:title" content="AI UGC Video Gallery | Vidora">
 <meta property="og:type" content="website">
 <meta property="og:description" content="Browse AI-generated UGC marketing videos for SaaS products.">
 <script type="application/ld+json">{ld_json}</script>
@@ -2581,7 +2581,7 @@ h1{{font-size:28px;font-weight:700;padding:40px 20px 0;text-align:center}}
 </style>
 </head>
 <body>
-<nav><strong style="font-size:18px">OpenShorts</strong><a href="/" class="cta">Create Your Video</a></nav>
+<nav><strong style="font-size:18px">Vidora</strong><a href="/" class="cta">Create Your Video</a></nav>
 <h1>AI-Generated UGC Videos</h1>
 <p class="subtitle">{len(videos)} videos generated · Low Cost & Premium modes</p>
 <div class="grid">{cards_html}</div>
@@ -2622,7 +2622,7 @@ async def video_html_page(video_id: str):
 <html lang="{language}">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} - AI UGC Video | OpenShorts</title>
+<title>{title} - AI UGC Video | Vidora</title>
 <meta name="description" content="{caption} {hashtags}">
 <meta property="og:type" content="video.other">
 <meta property="og:title" content="{title}">
@@ -2654,7 +2654,7 @@ h1{{font-size:22px;font-weight:700;margin-bottom:8px}}
 </style>
 </head>
 <body>
-<nav><strong>OpenShorts</strong><a href="/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
+<nav><strong>Vidora</strong><a href="/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
 <div class="container">
 <div><video src="{video_url}" poster="{actor_url}" controls autoplay playsinline style="aspect-ratio:9/16;object-fit:cover"></video></div>
 <div>
@@ -2978,7 +2978,7 @@ async def share_reel(request: Request, reel_id: str, payload: ReelShareRequest):
     if not media_url:
         raise HTTPException(status_code=400, detail="No media URL available")
 
-    final_title = payload.title or row.get("reel_title") or "OpenShorts"
+    final_title = payload.title or row.get("reel_title") or "Vidora"
     final_description = payload.description or row.get("reel_description") or ""
     api_key, user_id = _resolve_social_credentials(payload.api_key, payload.user_id)
     selected_platforms = _resolve_social_platforms(payload.platforms)

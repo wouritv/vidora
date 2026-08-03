@@ -20,7 +20,7 @@ describe('PLATFORM_LABELS', () => {
 });
 
 describe('getConnectedPlatforms', () => {
-    const KEY = 'openshorts-connected-networks';
+    const KEY = 'Vidora-connected-networks';
 
     afterEach(() => {
         localStorage.removeItem(KEY);

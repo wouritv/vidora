@@ -5,7 +5,7 @@ const ThemeContext = createContext(null);
 export function ThemeProvider({ children }) {
   const [theme, setTheme] = useState(() => {
     // Read from localStorage on mount
-    const stored = localStorage.getItem('openshorts-theme');
+    const stored = localStorage.getItem('Vidora-theme');
     if (stored === 'dark' || stored === 'light' || stored === 'system') {
       return stored;
     }
@@ -15,7 +15,7 @@ export function ThemeProvider({ children }) {
 
   useEffect(() => {
     // Save to localStorage whenever theme changes
-    localStorage.setItem('openshorts-theme', theme);
+    localStorage.setItem('Vidora-theme', theme);
 
     // Apply theme to DOM
     const root = document.documentElement;
