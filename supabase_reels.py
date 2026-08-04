@@ -1,3 +1,4 @@
+"""
 import os
 import re
 from datetime import datetime, timezone
@@ -120,6 +121,27 @@ async def get_reel(reel_id: str, user_id: str) -> Optional[Dict[str, Any]]:
 	return rows[0]
 
 
+async def get_reel_by_job_clip(job_id: str, clip_index: int) -> Optional[Dict[str, Any]]:
+	endpoint = f"{SUPABASE_URL}/rest/v1/{SUPABASE_REELS_TABLE}"
+	params = {
+		"select": "*",
+		"reel_job_id": f"eq.{job_id}",
+		"reel_clip_index": f"eq.{clip_index}",
+		"deleted_at": "is.null",
+		"order": "reel_updated_at.desc",
+		"limit": "1",
+	}
+
+	async with httpx.AsyncClient(timeout=20.0) as client:
+		response = await client.get(endpoint, headers=_headers(), params=params)
+	response.raise_for_status()
+
+	rows = response.json()
+	if not rows:
+		return None
+	return rows[0]
+
+
 async def soft_delete_reel(reel_id: str, user_id: str) -> bool:
 	endpoint = f"{SUPABASE_URL}/rest/v1/{SUPABASE_REELS_TABLE}"
 	params = {
@@ -143,3 +165,4 @@ async def soft_delete_reel(reel_id: str, user_id: str) -> bool:
 	deleted = response.json()
 	return bool(deleted)
 
+ """

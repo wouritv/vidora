@@ -17,6 +17,34 @@ export function inputFilenameFromVideoUrl(videoUrl) {
 }
 
 /**
+ * Return a browser-safe media URL.
+ * - blob: URLs are returned as-is.
+ * - Relative / same-origin URLs are returned as-is.
+ * - External URLs are proxied through the backend to avoid CORS issues
+ *   during browser-side Remotion rendering.
+ *
+ * @param {string} videoUrl
+ * @returns {string}
+ */
+export function toBrowserSafeMediaUrl(videoUrl) {
+    if (!videoUrl) return '';
+    if (videoUrl.startsWith('blob:')) return videoUrl;
+
+    try {
+        const parsed = new URL(videoUrl, window.location.origin);
+        if (parsed.origin === window.location.origin) {
+            return parsed.toString();
+        }
+
+        const proxyUrl = new URL('/api/media/proxy', window.location.origin);
+        proxyUrl.searchParams.set('url', videoUrl);
+        return proxyUrl.toString();
+    } catch {
+        return videoUrl;
+    }
+}
+
+/**
  * Map a raw reel DB item + its resolved video URL to the shape expected
  * by <ResultCard />.
  *

@@ -1,4 +1,4 @@
-# robots.txt for Vidora
+# robots.txt for Vireel
 # Allow all search engines and AI bots to crawl the site
 
 User-agent: *
@@ -30,4 +30,4 @@ User-agent: Google-Extended
 Allow: /
 
 # Sitemap
-Sitemap: https://Vidora.app/sitemap.xml
+Sitemap: https://Vireel.app/sitemap.xml

@@ -14,7 +14,7 @@
 │                                                                 │
 │ User ID:                                                        │
 │ [00000000-0000-0000-0000-000000000000]  [Copy]                │
-│ Your unique identifier in Vidora                            │
+│ Your unique identifier in Vireel                            │
 │                                                                 │
 │ Email:                                                          │
 │ ✉ [user@example.com                    ]                       │
@@ -29,7 +29,7 @@
 │ 🌙 APPEARANCE                                                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│ Choose how Vidora looks on your device                      │
+│ Choose how Vireel looks on your device                      │
 │                                                                 │
 │  ☀️          🌙          🖥️                                      │
 │  Light      Dark       System                                   │
@@ -42,7 +42,7 @@
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │ Connect your social media accounts to easily share your        │
-│ creations directly from Vidora.                            │
+│ creations directly from Vireel.                            │
 │                                                                 │
 │ ┌──────────────────┐  ┌──────────────────┐                    │
 │ │ 💼 LinkedIn      │  │ 🎵 TikTok        │                    │
@@ -320,7 +320,7 @@ Borders: slate-200
 
 ### When User Selects "Light"
 ```
-1. localStorage.setItem('Vidora-theme', 'light')
+1. localStorage.setItem('Vireel-theme', 'light')
 2. document.documentElement.classList.add('light')
 3. document.documentElement.classList.remove('dark')
 4. CSS variables re-evaluated:

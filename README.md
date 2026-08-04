@@ -1,11 +1,11 @@
-# Vidora.app
+# Vireel.app
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Open Source](https://badges.frapsoft.com/os/v1/open-source.svg?v=103)](https://opensource.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![GitHub stars](https://img.shields.io/github/stars/mutonby/Vidora?style=social)](https://github.com/mutonby/Vidora)
-[![Last Commit](https://img.shields.io/github/last-commit/mutonby/Vidora)](https://github.com/mutonby/Vidora/commits/main)
+[![GitHub stars](https://img.shields.io/github/stars/mutonby/Vireel?style=social)](https://github.com/mutonby/Vireel)
+[![Last Commit](https://img.shields.io/github/last-commit/mutonby/Vireel)](https://github.com/mutonby/Vireel/commits/main)
 
 **Free & open source AI video platform** with 3 tools in one: **Clip Generator**, **AI Shorts (UGC videos with AI actors)**, and **YouTube Studio**. Self-hosted with Docker. No watermarks, no limits.
 
@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/b45fa983-16b4-48b5-ac5b-a267836b9ad9
 
 
 ### Video Tutorial: How it works
-[![Vidora Tutorial](https://img.youtube.com/vi/xlyjD1qCaX0/maxresdefault.jpg)](https://www.youtube.com/watch?v=xlyjD1qCaX0 "Click to watch the video on YouTube")
+[![Vireel Tutorial](https://img.youtube.com/vi/xlyjD1qCaX0/maxresdefault.jpg)](https://www.youtube.com/watch?v=xlyjD1qCaX0 "Click to watch the video on YouTube")
 
 *Click the image above to watch the full walkthrough.*
 
@@ -89,7 +89,7 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 
 ### Social Auto-Publishing
 - **One-click posting** to TikTok, Instagram Reels, and YouTube Shorts simultaneously
-- **Schedule uploads** for any date and time — plan your content calendar and let Vidora publish automatically
+- **Schedule uploads** for any date and time — plan your content calendar and let Vireel publish automatically
 - **Multi-platform distribution** — publish to all your social networks at once from a single interface
 - Upload-Post integration with async uploads
 
@@ -114,20 +114,20 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 
 ## AI Shorts Showcase
 
-Videos generated with Vidora AI Shorts — no camera, no studio, no actors:
+Videos generated with Vireel AI Shorts — no camera, no studio, no actors:
 
 | | | |
 |:---:|:---:|:---:|
-| [![Biohacking for Investors](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/cdceec1b/actor.png)](https://Vidora.app/video/cdceec1b) | [![Secret Weapon for Devs](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/d3a80b6b/actor.png)](https://Vidora.app/video/d3a80b6b) | [![El Secreto de los Agentes de IA](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/8ab7de92/actor.png)](https://Vidora.app/video/8ab7de92) |
+| [![Biohacking for Investors](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/cdceec1b/actor.png)](https://Vireel.app/video/cdceec1b) | [![Secret Weapon for Devs](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/d3a80b6b/actor.png)](https://Vireel.app/video/d3a80b6b) | [![El Secreto de los Agentes de IA](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/8ab7de92/actor.png)](https://Vireel.app/video/8ab7de92) |
 | **Biohacking for Investors** · LOW COST | **Secret Weapon for Devs** · LOW COST | **El Secreto de los Agentes de IA** · PREMIUM |
 
-> Browse all videos at [Vidora.app/gallery](https://Vidora.app/gallery)
+> Browse all videos at [Vireel.app/gallery](https://Vireel.app/gallery)
 
 ---
 
-## Vidora vs Competitors
+## Vireel vs Competitors
 
-| Feature | Vidora | Opus Clip | CapCut | Vizard | Klap | Descript |
+| Feature | Vireel | Opus Clip | CapCut | Vizard | Klap | Descript |
 |---------|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Price** | **Free** | $15-29/mo | $8/mo | $15-20/mo | $23-63/mo | $24-65/mo |
 | **Self-hosted** | **Yes** | No | No | No | No | No |
@@ -150,7 +150,7 @@ Videos generated with Vidora AI Shorts — no camera, no studio, no actors:
 
 ## How Much Does It Cost?
 
-Vidora is free. You only pay for the AI APIs you use — and most have generous free tiers:
+Vireel is free. You only pay for the AI APIs you use — and most have generous free tiers:
 
 | Service | Free Tier | Paid Cost | Used For |
 |---------|-----------|-----------|----------|
@@ -178,8 +178,8 @@ Vidora is free. You only pay for the AI APIs you use — and most have generous 
 
 ### 1. Clone
 ```bash
-git clone https://github.com/your-username/Vidora.git
-cd Vidora
+git clone https://github.com/your-username/Vireel.git
+cd Vireel
 ```
 
 ### 2. Configure (optional)
@@ -283,14 +283,14 @@ Navigate to **`http://localhost:5175`**
 2. **Create Profile**: Go to [Manage Users](https://app.upload-post.com/manage-users)
 3. **Connect Accounts**: Link TikTok, Instagram, and/or YouTube
 4. **Get API Key**: Navigate to [API Keys](https://app.upload-post.com/api-keys)
-5. **Use in Vidora**: Paste API key + profile user in `Settings` (optional when server env fallback is set)
+5. **Use in Vireel**: Paste API key + profile user in `Settings` (optional when server env fallback is set)
 6. **Connected Platforms**: Enable available networks in `Settings > Connected Networks`; posting UIs read from this config
 
 ---
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=mutonby/Vidora&type=Date)](https://star-history.com/#mutonby/Vidora&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=mutonby/Vireel&type=Date)](https://star-history.com/#mutonby/Vireel&Date)
 
 ## Contributions
 
@@ -298,4 +298,4 @@ Contributions are welcome! Whether it's adding new AI models, improving the lip-
 
 ## License
 
-MIT License. Vidora is yours to use, modify, and scale.
+MIT License. Vireel is yours to use, modify, and scale.

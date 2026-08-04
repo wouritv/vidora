@@ -1,7 +1,7 @@
 services:
   backend:
     build: .
-    container_name: vidora-backend
+    container_name: vireel-backend
     ports:
       - "4000:8000"
     volumes:
@@ -19,7 +19,7 @@ services:
     env_file:
       - path: ./dashboard/.env
         required: false
-    container_name: vidora-frontend
+    container_name: vireel-frontend
     ports:
       - "4001:5173"
     volumes:
@@ -33,7 +33,7 @@ services:
     build:
       context: .
       dockerfile: render-service/Dockerfile
-    container_name: vidora-renderer
+    container_name: vireel-renderer
     ports:
       - "4002:3100"
     volumes:

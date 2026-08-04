@@ -1,44 +1,55 @@
-import React, { useState, useEffect } from 'react';
-import { X, Type, Loader2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Type, Loader2, Languages, Globe } from 'lucide-react';
 import { getApiUrl } from '../config';
 import RemotionPreview from './RemotionPreview';
+import { ANIMATION_OPTIONS, COLOR_PRESETS, DEFAULT_SUBTITLE_FORM_STYLE, FONT_OPTIONS, HIGHLIGHT_COLOR_PRESETS } from '../lib/subtitleOptions';
 
-const FONT_OPTIONS = [
-    { value: 'Verdana', label: 'Verdana' },
-    { value: 'Arial', label: 'Arial' },
-    { value: 'Impact', label: 'Impact' },
-    { value: 'Helvetica', label: 'Helvetica' },
-    { value: 'Georgia', label: 'Georgia' },
-    { value: 'Courier New', label: 'Courier New' },
-];
+const LANGUAGES = {
+    es: 'Spanish',
+    fr: 'French',
+    de: 'German',
+    it: 'Italian',
+    pt: 'Portuguese',
+    pl: 'Polish',
+    hi: 'Hindi',
+    ja: 'Japanese',
+    ko: 'Korean',
+    zh: 'Chinese',
+    ar: 'Arabic',
+    ru: 'Russian',
+    tr: 'Turkish',
+    nl: 'Dutch',
+    sv: 'Swedish',
+    id: 'Indonesian',
+    fil: 'Filipino',
+    ms: 'Malay',
+    vi: 'Vietnamese',
+    th: 'Thai',
+    uk: 'Ukrainian',
+    el: 'Greek',
+    cs: 'Czech',
+    fi: 'Finnish',
+    ro: 'Romanian',
+    da: 'Danish',
+    bg: 'Bulgarian',
+    hr: 'Croatian',
+    sk: 'Slovak',
+    ta: 'Tamil',
+    en: 'English',
+};
 
-const COLOR_PRESETS = [
-    { color: '#FFFFFF', label: 'White' },
-    { color: '#FFFF00', label: 'Yellow' },
-    { color: '#00FFFF', label: 'Cyan' },
-    { color: '#00FF00', label: 'Green' },
-    { color: '#FF0000', label: 'Red' },
-    { color: '#FF69B4', label: 'Pink' },
-];
-
-const ANIMATION_OPTIONS = [
-    { value: 'pop', label: 'Pop' },
-    { value: 'word-highlight', label: 'Glow' },
-    { value: 'karaoke', label: 'Karaoke' },
-    { value: 'none', label: 'None' },
-];
-
-export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, jobId, clipIndex, existingHook }) {
-    const [position, setPosition] = useState('bottom');
-    const [fontSize, setFontSize] = useState(24);
-    const [fontName, setFontName] = useState('Verdana');
-    const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [highlightColor, setHighlightColor] = useState('#FFDD00');
-    const [borderColor, setBorderColor] = useState('#000000');
-    const [borderWidth, setBorderWidth] = useState(2);
-    const [bgColor, setBgColor] = useState('#000000');
-    const [bgOpacity, setBgOpacity] = useState(0.0);
-    const [animation, setAnimation] = useState('pop');
+export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, jobId, clipIndex, existingHook, existingEffects }) {
+    const previewCacheRef = useRef({});
+    const [position, setPosition] = useState(DEFAULT_SUBTITLE_FORM_STYLE.position);
+    const [fontSize, setFontSize] = useState(DEFAULT_SUBTITLE_FORM_STYLE.fontSize);
+    const [fontName, setFontName] = useState(DEFAULT_SUBTITLE_FORM_STYLE.fontName);
+    const [fontColor, setFontColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.fontColor);
+    const [highlightColor, setHighlightColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.highlightColor);
+    const [borderColor, setBorderColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.borderColor);
+    const [borderWidth, setBorderWidth] = useState(DEFAULT_SUBTITLE_FORM_STYLE.borderWidth);
+    const [bgColor, setBgColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.bgColor);
+    const [bgOpacity, setBgOpacity] = useState(DEFAULT_SUBTITLE_FORM_STYLE.bgOpacity);
+    const [animation, setAnimation] = useState(DEFAULT_SUBTITLE_FORM_STYLE.animation);
     const [showTextEditor, setShowTextEditor] = useState(false);
 
     // Remotion preview state
@@ -48,10 +59,49 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     const [durationSec, setDurationSec] = useState(30);
     const [captionsLoading, setCaptionsLoading] = useState(false);
     const [useRemotionPreview, setUseRemotionPreview] = useState(false);
+    const [translationEnabled, setTranslationEnabled] = useState(false);
+    const [targetLanguage, setTargetLanguage] = useState('es');
+    const [languages, setLanguages] = useState(LANGUAGES);
+    const [translatedPreviewCaptions, setTranslatedPreviewCaptions] = useState([]);
+    const [previewProviders, setPreviewProviders] = useState([]);
+    const [previewError, setPreviewError] = useState('');
+    const [isPreviewTranslating, setIsPreviewTranslating] = useState(false);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        let cancelled = false;
+
+        const loadLanguages = async () => {
+            try {
+                const res = await fetch(getApiUrl('/api/translate/languages'));
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!Array.isArray(data?.languages)) return;
+
+                const next = {};
+                data.languages.forEach((item) => {
+                    if (item?.code && item?.name) next[item.code] = item.name;
+                });
+                if (!cancelled && Object.keys(next).length > 0) {
+                    setLanguages(next);
+                    if (!next[targetLanguage]) {
+                        setTargetLanguage(Object.keys(next)[0]);
+                    }
+                }
+            } catch {
+                // Keep static fallback list.
+            }
+        };
+
+        loadLanguages();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, targetLanguage]);
 
     // Fetch word-level captions when modal opens
     useEffect(() => {
-        if (!isOpen || !jobId || clipIndex === undefined) return;
+        if (!isOpen || !jobId || clipIndex === undefined || clipIndex === null || clipIndex < 0) return;
 
         setCaptionsLoading(true);
         fetch(getApiUrl(`/api/clip/${jobId}/${clipIndex}/transcript`))
@@ -70,6 +120,84 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
             .catch(() => setUseRemotionPreview(false))
             .finally(() => setCaptionsLoading(false));
     }, [isOpen, jobId, clipIndex]);
+
+    useEffect(() => {
+        if (!isOpen || !translationEnabled || !jobId || clipIndex === undefined || clipIndex === null || clipIndex < 0 || !targetLanguage) {
+            return;
+        }
+
+        const previewInputUrl = videoUrl && !videoUrl.startsWith('blob:')
+            ? (videoUrl.startsWith('http') ? videoUrl : `${window.location.origin}${videoUrl}`)
+            : undefined;
+        const previewCacheKey = `${jobId}:${clipIndex}:${targetLanguage}`;
+        const cachedPreview = previewCacheRef.current[previewCacheKey];
+        if (cachedPreview) {
+            setPreviewError('');
+            setTranslatedPreviewCaptions(cachedPreview.captions || []);
+            setPreviewProviders(Array.isArray(cachedPreview.providers) ? cachedPreview.providers : []);
+            if (cachedPreview.durationSec) {
+                setDurationSec(cachedPreview.durationSec);
+            }
+            setIsPreviewTranslating(false);
+            return;
+        }
+
+        setTranslatedPreviewCaptions([]);
+        setPreviewProviders([]);
+
+        const controller = new AbortController();
+        const timeout = setTimeout(async () => {
+            setIsPreviewTranslating(true);
+            setPreviewError('');
+
+            try {
+                const res = await fetch(getApiUrl('/api/translate/captions'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        job_id: jobId,
+                        clip_index: clipIndex,
+                        target_language: targetLanguage,
+                        input_url: previewInputUrl,
+                    }),
+                    signal: controller.signal,
+                });
+
+                if (!res.ok) {
+                    const errText = await res.text();
+                    throw new Error(errText || 'Preview translation failed');
+                }
+
+                const data = await res.json();
+                previewCacheRef.current[previewCacheKey] = {
+                    captions: Array.isArray(data.captions) ? data.captions : [],
+                    providers: Array.isArray(data.providers) ? data.providers : [],
+                    durationSec: data.durationSec || 0,
+                };
+                const nextCaptions = Array.isArray(data.captions) ? data.captions : [];
+                setTranslatedPreviewCaptions(nextCaptions);
+                setPreviewProviders(Array.isArray(data.providers) ? data.providers : []);
+                if (nextCaptions.length > 0) {
+                    setUseRemotionPreview(true);
+                }
+                if (data.durationSec) {
+                    setDurationSec(data.durationSec);
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') return;
+                setTranslatedPreviewCaptions([]);
+                setPreviewProviders([]);
+                setPreviewError(error.message || 'Preview translation failed');
+            } finally {
+                setIsPreviewTranslating(false);
+            }
+        }, 250);
+
+        return () => {
+            controller.abort();
+            clearTimeout(timeout);
+        };
+    }, [clipIndex, isOpen, jobId, targetLanguage, translationEnabled, videoUrl]);
 
     // When user edits text, redistribute words across original timestamps
     const handleTextEdit = (newText) => {
@@ -95,9 +223,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
     if (!isOpen) return null;
 
+    const effectiveCaptions = translationEnabled ? translatedPreviewCaptions : captions;
+
     // Build subtitle config for Remotion
     const subtitleConfig = {
-        captions,
+        captions: effectiveCaptions,
         position,
         style: {
             fontFamily: fontName,
@@ -125,7 +255,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     const fallbackPreviewStyle = {
         fontFamily: fontName,
         color: fontColor,
-        fontSize: '20px',
+        fontSize: `${fontSize}px`,
         fontWeight: 'bold',
         maxWidth: '85%',
         padding: '6px 12px',
@@ -164,6 +294,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                             durationInSeconds={durationSec}
                             subtitles={subtitleConfig}
                             hook={existingHook || null}
+                            effects={existingEffects || null}
                         />
                     ) : (
                         <>
@@ -189,6 +320,71 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                     <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar pr-1">
                         {/* Position Selector */}
+                        <div className="p-3 rounded-lg border border-white/10 bg-white/[0.03]">
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <p className="text-xs font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-2">
+                                        <Languages size={14} className="text-emerald-400" />
+                                        Activer la traduction
+                                    </p>
+                                    <p className="text-[11px] text-zinc-500 mt-1">Conserve les memes styles/animations avec preview en direct.</p>
+                                </div>
+                                <label className="relative inline-flex items-center cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={translationEnabled}
+                                        onChange={(e) => {
+                                            const enabled = e.target.checked;
+                                            setTranslationEnabled(enabled);
+                                            setPreviewError('');
+                                            if (!enabled) {
+                                                setTranslatedPreviewCaptions([]);
+                                                setPreviewProviders([]);
+                                                setIsPreviewTranslating(false);
+                                            }
+                                        }}
+                                        className="sr-only peer"
+                                    />
+                                    <div className="w-9 h-5 bg-zinc-700 rounded-full peer peer-checked:bg-emerald-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all peer-checked:after:translate-x-full" />
+                                </label>
+                            </div>
+
+                            {translationEnabled ? (
+                                <div className="mt-3 space-y-3 animate-[fadeIn_0.2s_ease-out]">
+                                    <div>
+                                        <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">
+                                            <Globe size={12} className="inline mr-1" />
+                                            Language
+                                        </label>
+                                        <select
+                                            value={targetLanguage}
+                                            onChange={(e) => setTargetLanguage(e.target.value)}
+                                            className="w-full bg-black/40 border border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-emerald-500/50"
+                                            disabled={isProcessing}
+                                        >
+                                            {Object.entries(languages)
+                                                .sort((a, b) => a[1].localeCompare(b[1]))
+                                                .map(([code, name]) => (
+                                                    <option key={code} value={code}>{name}</option>
+                                                ))}
+                                        </select>
+                                    </div>
+
+                                    {isPreviewTranslating ? (
+                                        <div className="text-xs text-emerald-300 flex items-center gap-2">
+                                            <Loader2 size={12} className="animate-spin" />
+                                            Updating translated preview...
+                                        </div>
+                                    ) : null}
+                                    {previewError ? (
+                                        <div className="text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg p-2">
+                                            {previewError}
+                                        </div>
+                                    ) : null}
+                                </div>
+                            ) : null}
+                        </div>
+
                         <div>
                             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Position</label>
                             <div className="grid grid-cols-3 gap-2">
@@ -212,16 +408,18 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <button
                                         key={opt.value}
                                         onClick={() => setAnimation(opt.value)}
-                                        className={`p-2 rounded-lg border text-center text-xs font-medium transition-all ${animation === opt.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                        title={opt.desc}
+                                        className={`p-2 rounded-lg border text-center transition-all ${animation === opt.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                     >
-                                        {opt.label}
+                                        <div className="text-xs font-medium">{opt.label}</div>
+                                        <div className="text-[10px] text-zinc-500 leading-tight mt-0.5 line-clamp-2">{opt.desc}</div>
                                     </button>
                                 ))}
                             </div>
                         </div>
 
                         {/* Editable Transcript (collapsible) */}
-                        {useRemotionPreview && (
+                        {useRemotionPreview && !translationEnabled && (
                             <div>
                                 <button
                                     type="button"
@@ -245,16 +443,48 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Font Family */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Font</label>
-                            <select
-                                value={fontName}
-                                onChange={(e) => setFontName(e.target.value)}
-                                className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50"
-                            >
-                                {FONT_OPTIONS.map((f) => (
-                                    <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">
+                                Police — <span className="text-zinc-500 normal-case font-normal" style={{ fontFamily: fontName }}>{fontName}</span>
+                            </label>
+                            <div className="max-h-52 overflow-y-auto custom-scrollbar pr-1 space-y-2">
+                                {[...new Set(FONT_OPTIONS.map(f => f.category))].map(cat => (
+                                    <div key={cat}>
+                                        <div className="text-[10px] text-zinc-600 uppercase tracking-wider mb-1 px-0.5">{cat}</div>
+                                        <div className="grid grid-cols-2 gap-1">
+                                            {FONT_OPTIONS.filter(f => f.category === cat).map((f) => (
+                                                <button
+                                                    key={f.value}
+                                                    onClick={() => setFontName(f.value)}
+                                                    className={`px-2 py-1.5 rounded-lg border text-sm text-center truncate transition-all ${fontName === f.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-300 hover:bg-white/10 hover:border-white/20'}`}
+                                                    style={{ fontFamily: f.value }}
+                                                    title={f.label}
+                                                >
+                                                    {f.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
                                 ))}
-                            </select>
+                            </div>
+                        </div>
+
+                        {/* Font Size */}
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">
+                                Taille du texte <span className="text-zinc-500 normal-case font-normal">({fontSize}px)</span>
+                            </label>
+                            <input
+                                type="range"
+                                min="14"
+                                max="40"
+                                value={fontSize}
+                                onChange={(e) => setFontSize(Number(e.target.value))}
+                                className="w-full accent-primary"
+                            />
+                            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
+                                <span>Petit</span>
+                                <span>Grand</span>
+                            </div>
                         </div>
 
                         {/* Text Color */}
@@ -281,7 +511,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         <div>
                             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Highlight Color</label>
                             <div className="flex flex-wrap gap-2">
-                                {[{ color: '#FFDD00', label: 'Gold' }, { color: '#FF4444', label: 'Red' }, { color: '#00FF88', label: 'Green' }, { color: '#00BBFF', label: 'Blue' }, { color: '#FF69B4', label: 'Pink' }].map((c) => (
+                                {HIGHLIGHT_COLOR_PRESETS.map((c) => (
                                     <button
                                         key={c.color}
                                         onClick={() => setHighlightColor(c.color)}
@@ -357,6 +587,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                     <button
                         onClick={() => onGenerate({
                             position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
+                            targetLanguage: translationEnabled ? targetLanguage : null,
+                            translatedCaptions: translationEnabled ? translatedPreviewCaptions : [],
+                            previewDurationSec: translationEnabled ? durationSec : null,
                             // Remotion data
                             remotion: useRemotionPreview ? subtitleConfig : null,
                         })}

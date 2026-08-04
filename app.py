@@ -3,6 +3,7 @@ import uuid
 import subprocess
 import threading
 import json
+import hashlib
 import shutil
 import glob
 import time
@@ -10,10 +11,13 @@ import asyncio
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse, unquote
+from urllib.request import Request as UrlRequest, urlopen
+from starlette.background import BackgroundTask
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from s3_uploader import (
     list_all_clips,
@@ -25,12 +29,15 @@ from s3_uploader import (
     generate_presigned_url,
 )
 from ia_captions import router as ia_captions_router
-from supabase_reels import (
+from supabase_request import (
     insert_reels as supabase_insert_reels,
     list_reels as supabase_list_reels,
     get_reel as supabase_get_reel,
+    get_reel_by_job_clip as supabase_get_reel_by_job_clip,
     soft_delete_reel as supabase_soft_delete_reel,
-    is_supabase_reels_configured,
+    is_supabase_configured,
+    list_abonnements as supabase_list_abonnements,
+    get_user_abonnement,
 )
 
 load_dotenv()
@@ -109,6 +116,189 @@ def _cleanup_directory(path: str) -> None:
         pass
 
 
+def _resolve_job_metadata_path(job_id: str) -> Optional[str]:
+    """Find metadata JSON for a job, including legacy root-output layouts."""
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if json_files:
+        return json_files[0]
+
+    # Backward-compat rescue for artifacts emitted into OUTPUT_DIR root.
+    if _relocate_root_job_artifacts(job_id, output_dir):
+        json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+        if json_files:
+            return json_files[0]
+
+    # Last-chance fallback: read directly from root if relocation could not run.
+    root_candidates = sorted(
+        glob.glob(os.path.join(OUTPUT_DIR, f"{job_id}_*_metadata.json")),
+        key=lambda path: os.path.getmtime(path),
+        reverse=True,
+    )
+    if root_candidates:
+        return root_candidates[0]
+
+    return None
+
+
+def _estimate_transcript_duration_seconds(transcript: Dict[str, Any]) -> float:
+    segments = (transcript or {}).get("segments") or []
+    max_end = 0.0
+    for seg in segments:
+        try:
+            max_end = max(max_end, float(seg.get("end", 0) or 0))
+        except Exception:
+            continue
+
+    try:
+        meta_seconds = float(((transcript or {}).get("meta") or {}).get("audio_seconds", 0) or 0)
+    except Exception:
+        meta_seconds = 0.0
+
+    return max(max_end, meta_seconds)
+
+
+async def _resolve_reel_input_url(job_id: str, clip_index: int) -> Optional[str]:
+    if not is_supabase_configured():
+        return None
+
+    try:
+        row = await supabase_get_reel_by_job_clip(job_id, clip_index)
+    except Exception as e:
+        print(f"⚠️ Supabase reel lookup failed for metadata hydration: {e}")
+        return None
+
+    if not row:
+        return None
+
+    # Prefer a fresh presigned URL from S3 key; fallback to stored URL.
+    return _reel_media_url_from_s3_key(row.get("reel_s3_key") or "") or row.get("reel_url") or None
+
+
+def _resolve_local_video_from_input_ref(input_ref: Optional[str]) -> Optional[tuple[str, str]]:
+    """Resolve /videos/<job_id>/<filename> refs to local output file when possible."""
+    ref = (input_ref or "").strip()
+    if not ref:
+        return None
+
+    parsed = urlparse(ref)
+    path_part = parsed.path or ref
+    if not path_part.startswith("/videos/"):
+        return None
+
+    parts = path_part.split("/")
+    if len(parts) < 4:
+        return None
+
+    ref_job_id = parts[2]
+    ref_filename = _sanitize_input_filename("/".join(parts[3:]))
+    if not ref_job_id or not ref_filename:
+        return None
+
+    candidate_path = os.path.join(OUTPUT_DIR, ref_job_id, ref_filename)
+    if not os.path.exists(candidate_path):
+        return None
+
+    return candidate_path, ref_filename
+
+
+async def _hydrate_missing_job_metadata(
+    job_id: str,
+    clip_index: int,
+    input_url: Optional[str] = None,
+) -> Optional[str]:
+    """Create minimal metadata for old reels by downloading and transcribing the clip on demand."""
+    source_ref = (input_url or "").strip() or await _resolve_reel_input_url(job_id, clip_index)
+    if not source_ref:
+        return None
+
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    local_ref = _resolve_local_video_from_input_ref(source_ref)
+    if local_ref:
+        local_video_path, local_video_name = local_ref
+        hydrated_video_path = os.path.join(output_dir, local_video_name)
+        if os.path.abspath(local_video_path) != os.path.abspath(hydrated_video_path):
+            try:
+                shutil.copy(local_video_path, hydrated_video_path)
+                local_video_path = hydrated_video_path
+            except Exception as e:
+                print(f"⚠️ Could not copy local reel for metadata hydration: {e}")
+                return None
+    else:
+        parsed_source = urlparse(source_ref)
+        if parsed_source.scheme not in ("http", "https"):
+            return None
+
+        try:
+            local_video_path, local_video_name = _download_input_url_to_job_dir(source_ref, job_id)
+        except Exception as e:
+            print(f"⚠️ Could not download reel for metadata hydration: {e}")
+            return None
+
+    try:
+        from main import transcribe_video
+
+        loop = asyncio.get_event_loop()
+        transcript = await loop.run_in_executor(None, transcribe_video, local_video_path)
+    except Exception as e:
+        print(f"⚠️ Could not transcribe reel for metadata hydration: {e}")
+        return None
+
+    duration_sec = max(0.5, _estimate_transcript_duration_seconds(transcript))
+
+    shorts = [
+        {
+            "title": f"Clip {i + 1}",
+            "start": 0.0,
+            "end": duration_sec,
+            "duration": duration_sec,
+            "video_url": "",
+        }
+        for i in range(clip_index + 1)
+    ]
+    shorts[clip_index]["video_url"] = f"/videos/{job_id}/{local_video_name}"
+
+    metadata = {
+        "shorts": shorts,
+        "transcript": transcript,
+        "generated_from_reel_fallback": {
+            "created_at": int(time.time()),
+            "source": "supabase_reel_or_input_url",
+            "clip_index": clip_index,
+        },
+    }
+
+    metadata_path = os.path.join(output_dir, f"{job_id}_fallback_metadata.json")
+    try:
+        _persist_metadata_json(metadata_path, metadata)
+    except Exception as e:
+        print(f"⚠️ Failed to write hydrated metadata: {e}")
+        return None
+
+    return metadata_path
+
+
+async def _get_or_build_job_metadata(
+    job_id: str,
+    clip_index: int,
+    input_url: Optional[str] = None,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    metadata_path = _resolve_job_metadata_path(job_id)
+    if not metadata_path:
+        metadata_path = await _hydrate_missing_job_metadata(job_id, clip_index, input_url=input_url)
+    if not metadata_path:
+        return None, None
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            return metadata_path, json.load(f)
+    except Exception as e:
+        print(f"⚠️ Failed to read metadata: {e}")
+        return None, None
+
+
 def _active_output_paths() -> set[str]:
     active_paths: set[str] = set()
     for job_data in jobs.values():
@@ -182,7 +372,7 @@ async def _persist_reels_for_job(
 ) -> List[Dict[str, Any]]:
     if not user_id:
         raise RuntimeError("Missing app user id for reel persistence")
-    if not is_supabase_reels_configured():
+    if not is_supabase_configured():
         raise RuntimeError("Supabase reels is not configured")
 
     bucket = os.environ.get("AWS_S3_BUCKET", "")
@@ -365,6 +555,52 @@ def enqueue_output(out, job_id):
         print(f"Error reading output for job {job_id}: {e}")
     finally:
         out.close()
+
+
+async def _close_proxy_stream(upstream, client):
+    try:
+        await upstream.aclose()
+    finally:
+        await client.aclose()
+
+
+@app.get("/api/media/proxy")
+async def proxy_media(request: Request, url: str):
+    """Proxy remote media through the backend so browser-side Remotion can fetch it same-origin."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="Invalid media URL")
+
+    import httpx
+
+    forward_headers = {}
+    if request.headers.get("range"):
+        forward_headers["Range"] = request.headers["range"]
+    if request.headers.get("user-agent"):
+        forward_headers["User-Agent"] = request.headers["user-agent"]
+
+    client = httpx.AsyncClient(follow_redirects=True, timeout=120.0)
+    try:
+        upstream = await client.send(client.build_request("GET", url, headers=forward_headers), stream=True)
+    except Exception:
+        await client.aclose()
+        raise
+
+    passthrough_headers = {}
+    for header in ("content-type", "content-length", "accept-ranges", "content-range", "etag", "last-modified", "cache-control"):
+        value = upstream.headers.get(header)
+        if value:
+            passthrough_headers[header] = value
+
+    passthrough_headers["Access-Control-Allow-Origin"] = "*"
+    passthrough_headers["Access-Control-Expose-Headers"] = "Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified"
+
+    return StreamingResponse(
+        upstream.aiter_bytes(),
+        status_code=upstream.status_code,
+        headers=passthrough_headers,
+        background=BackgroundTask(_close_proxy_stream, upstream, client),
+    )
 
 async def run_job(job_id, job_data):
     """Executes the subprocess for a specific job."""
@@ -688,6 +924,51 @@ class EditRequest(BaseModel):
     clip_index: int
     api_key: Optional[str] = None
     input_filename: Optional[str] = None
+    input_url: Optional[str] = None
+
+
+def _sanitize_input_filename(value: Optional[str]) -> Optional[str]:
+    """Normalize a filename or URL into a safe local basename."""
+    if not value:
+        return None
+
+    candidate = str(value).strip()
+    if not candidate:
+        return None
+
+    parsed = urlparse(candidate)
+    if parsed.scheme or parsed.netloc:
+        candidate = os.path.basename(parsed.path)
+    else:
+        candidate = os.path.basename(candidate.split('?')[0])
+
+    candidate = unquote(candidate)
+    return candidate or None
+
+
+def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, str]:
+    """Download a remote clip URL into output/<job_id> and return (path, filename)."""
+    parsed = urlparse(input_url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Invalid input URL")
+
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    source_name = _sanitize_input_filename(input_url) or f"remote_{job_id}.mp4"
+    filename = f"remote_{uuid.uuid4().hex[:8]}_{source_name}"
+    local_path = os.path.join(output_dir, filename)
+
+    try:
+        request = UrlRequest(input_url, headers={"User-Agent": "Vireel/1.0"})
+        with urlopen(request, timeout=45) as response, open(local_path, "wb") as f:
+            shutil.copyfileobj(response, f)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Could not download input URL: {e}")
+
+    return local_path, filename
 
 @app.post("/api/edit")
 async def edit_clip(
@@ -700,28 +981,35 @@ async def edit_clip(
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
 
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[req.job_id]
-    if 'result' not in job or 'clips' not in job['result']:
-        raise HTTPException(status_code=400, detail="Job result not available")
-        
+    job = jobs.get(req.job_id)
+
     try:
         # Resolve Input Path: Prefer explict input_filename from frontend (chaining edits)
         if req.input_filename:
-            # Security: Ensure just a filename, no paths
-            safe_name = os.path.basename(req.input_filename)
+            # Security: Ensure just a filename, no paths or signed query params
+            safe_name = _sanitize_input_filename(req.input_filename)
+            if not safe_name:
+                raise HTTPException(status_code=400, detail="Invalid input filename")
             input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
             filename = safe_name
         else:
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found")
+            if 'result' not in job or 'clips' not in job['result']:
+                raise HTTPException(status_code=400, detail="Job result not available")
             # Fallback to original clip
             clip = job['result']['clips'][req.clip_index]
             filename = clip['video_url'].split('/')[-1]
             input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-        
+
+        # Reels page may provide only a signed URL and no live in-memory job.
+        if not os.path.exists(input_path) and req.input_url:
+            input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
+
         if not os.path.exists(input_path):
              raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+        os.makedirs(os.path.join(OUTPUT_DIR, req.job_id), exist_ok=True)
 
         # Define output path for edited video
         edited_filename = f"edited_{filename}"
@@ -824,22 +1112,23 @@ class SubtitleRequest(BaseModel):
     bg_color: str = "#000000"
     bg_opacity: float = 0.0
     input_filename: Optional[str] = None
+    input_url: Optional[str] = None
+    input_url: Optional[str] = None
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
 async def get_clip_transcript(job_id: str, clip_index: int):
     """Return word-level captions for a specific clip, formatted for Remotion."""
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    output_dir = os.path.join(OUTPUT_DIR, job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-
-    if not json_files:
-        raise HTTPException(status_code=404, detail="Metadata not found")
-
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    # Do not depend on in-memory jobs: Reels page must keep working after restarts.
+    _, data = await _get_or_build_job_metadata(job_id, clip_index)
+    if not data:
+        # Graceful fallback when metadata cannot be reconstructed.
+        return {
+            "captions": [],
+            "durationSec": 0,
+            "language": "en",
+            "missing": "metadata",
+        }
 
     transcript = data.get('transcript')
     if not transcript:
@@ -904,6 +1193,7 @@ class EffectsGenerateRequest(BaseModel):
     job_id: str
     clip_index: int
     input_filename: Optional[str] = None
+    input_url: Optional[str] = None
 
 @app.post("/api/effects/generate")
 async def generate_effects_config(
@@ -916,25 +1206,32 @@ async def generate_effects_config(
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header)")
 
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[req.job_id]
-    if 'result' not in job or 'clips' not in job['result']:
-        raise HTTPException(status_code=400, detail="Job result not available")
+    job = jobs.get(req.job_id)
 
     try:
         # Resolve input path
         if req.input_filename:
-            safe_name = os.path.basename(req.input_filename)
+            safe_name = _sanitize_input_filename(req.input_filename)
+            if not safe_name:
+                raise HTTPException(status_code=400, detail="Invalid input filename")
             input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
+            filename = safe_name
         else:
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found")
+            if 'result' not in job or 'clips' not in job['result']:
+                raise HTTPException(status_code=400, detail="Job result not available")
             clip = job['result']['clips'][req.clip_index]
             filename = clip['video_url'].split('/')[-1]
             input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
 
+        if not os.path.exists(input_path) and req.input_url:
+            input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
+
         if not os.path.exists(input_path):
             raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+        os.makedirs(os.path.join(OUTPUT_DIR, req.job_id), exist_ok=True)
 
         def run_effects_generation():
             editor = VideoEditor(api_key=final_api_key)
@@ -1012,21 +1309,15 @@ async def generate_effects_config(
 
 @app.post("/api/subtitle")
 async def add_subtitles(req: SubtitleRequest):
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Reload job data from disk just in case metadata was updated
-    job = jobs[req.job_id]
-    
+    # Reload job data from disk just in case metadata was updated.
+    # The in-memory job may be gone on the Reels page; metadata on disk is enough.
+    job = jobs.get(req.job_id)
+
     # We need to access metadata.json to get the transcript
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-    
-    if not json_files:
+    metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
+    if not metadata_path or not data:
         raise HTTPException(status_code=404, detail="Metadata not found")
-        
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
         
     transcript = data.get('transcript')
     if not transcript:
@@ -1040,16 +1331,20 @@ async def add_subtitles(req: SubtitleRequest):
     
     # Video Path
     if req.input_filename:
-        # Use chained file
-        filename = os.path.basename(req.input_filename)
+        filename = _sanitize_input_filename(req.input_filename)
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid input filename")
     else:
         # Fallback to standard naming
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+             base_name = os.path.basename(metadata_path).replace('_metadata.json', '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
          
     input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path) and req.input_url:
+        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
+
     if not os.path.exists(input_path):
         # Try looking for edited version if url implied it?
         # Just fail if not found.
@@ -1099,8 +1394,8 @@ async def add_subtitles(req: SubtitleRequest):
         raise HTTPException(status_code=500, detail=str(e))
         
     # 3. Update Result and Metadata
-    # Update InMemory Jobs
-    if req.clip_index < len(job['result']['clips']):
+    # Update InMemory Jobs (only if the job is still alive in memory)
+    if job and req.clip_index < len(job.get('result', {}).get('clips', [])):
          job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
     
     # Update Metadata on Disk (Persistence)
@@ -1111,9 +1406,8 @@ async def add_subtitles(req: SubtitleRequest):
             data['shorts'] = clips
             
             # Write back
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
+            _persist_metadata_json(metadata_path, data)
+            print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
         # Non-critical, but good for persistence
@@ -1128,23 +1422,17 @@ class HookRequest(BaseModel):
     clip_index: int
     text: str
     input_filename: Optional[str] = None
+    input_url: Optional[str] = None
     position: Optional[str] = "top" # top, center, bottom
     size: Optional[str] = "M" # S, M, L
 
 @app.post("/api/hook")
 async def add_hook(req: HookRequest):
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[req.job_id]
+    job = jobs.get(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-    
-    if not json_files:
+    metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
+    if not metadata_path or not data:
         raise HTTPException(status_code=404, detail="Metadata not found")
-        
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
         
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
@@ -1154,14 +1442,19 @@ async def add_hook(req: HookRequest):
     
     # Video Path
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _sanitize_input_filename(req.input_filename)
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid input filename")
     else:
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+             base_name = os.path.basename(metadata_path).replace('_metadata.json', '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
          
     input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path) and req.input_url:
+        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
+
     if not os.path.exists(input_path):
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
         
@@ -1187,7 +1480,7 @@ async def add_hook(req: HookRequest):
         
     # Update Persistence (Same logic as subtitles)
     # Update InMemory Jobs
-    if req.clip_index < len(job['result']['clips']):
+    if job and req.clip_index < len(job.get('result', {}).get('clips', [])):
          job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
     
     # Update Metadata on Disk
@@ -1195,9 +1488,8 @@ async def add_hook(req: HookRequest):
         if req.clip_index < len(clips):
             clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
             data['shorts'] = clips
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Metadata updated with hook video for clip {req.clip_index}")
+            _persist_metadata_json(metadata_path, data)
+            print(f"✅ Metadata updated with hook video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -1214,6 +1506,7 @@ class TranslateRequest(BaseModel):
     target_language: str
     source_language: Optional[str] = None
     input_filename: Optional[str] = None
+    input_url: Optional[str] = None
 
     # Subtitle style options (same spirit as SubtitleRequest)
     position: str = "bottom"  # top, middle, bottom
@@ -1269,8 +1562,11 @@ def _load_clip_segments_from_metadata(data: Dict, clip_index: int) -> List[Dict]
     transcript = data.get("transcript") or {}
     all_segments = transcript.get("segments") or []
     shorts = data.get("shorts") or []
-    if clip_index >= len(shorts):
-        raise HTTPException(status_code=404, detail="Clip not found")
+    if not shorts:
+        return []
+
+    if clip_index < 0 or clip_index >= len(shorts):
+        clip_index = min(max(clip_index, 0), len(shorts) - 1)
 
     clip = shorts[clip_index]
     clip_start = float(clip.get("start", 0))
@@ -1357,6 +1653,29 @@ def _translate_text_gemini(text: str, source_lang: str, target_lang: str) -> str
     return out
 
 
+def _get_translation_cache(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    cache = data.get("translation_cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        data["translation_cache"] = cache
+    return cache
+
+
+def _build_translation_cache_key(source_lang: str, target_lang: str, text: str) -> str:
+    normalized_source = _normalize_lang(source_lang) or "auto"
+    normalized_target = _normalize_lang(target_lang)
+    normalized_text = " ".join((text or "").split())
+    digest = hashlib.sha256(
+        f"{normalized_source}:{normalized_target}:{normalized_text}".encode("utf-8")
+    ).hexdigest()
+    return f"{normalized_source}:{normalized_target}:{digest}"
+
+
+def _persist_metadata_json(metadata_path: str, data: Dict[str, Any]) -> None:
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+
 def _translate_segments_with_fallback(segments: List[Dict], source_lang: str, target_lang: str) -> List[Dict]:
     translated = []
     for seg in segments:
@@ -1378,6 +1697,85 @@ def _translate_segments_with_fallback(segments: List[Dict], source_lang: str, ta
             "provider": provider,
         })
     return translated
+
+
+def _translate_segments_with_cache(
+    segments: List[Dict],
+    source_lang: str,
+    target_lang: str,
+    translation_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> tuple[List[Dict], Dict[str, int]]:
+    translated: List[Dict] = []
+    cache_hits = 0
+    cache_misses = 0
+    cache_store = translation_cache if isinstance(translation_cache, dict) else None
+
+    for seg in segments:
+        src_text = seg.get("text") or ""
+        cache_key = _build_translation_cache_key(source_lang, target_lang, src_text)
+        cached_entry = cache_store.get(cache_key) if cache_store is not None else None
+
+        if isinstance(cached_entry, dict) and (cached_entry.get("text") or "").strip():
+            translated.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": cached_entry["text"],
+                "provider": cached_entry.get("provider") or "cache",
+            })
+            cache_hits += 1
+            continue
+
+        translated_segment = _translate_segments_with_fallback([seg], source_lang, target_lang)[0]
+        translated.append(translated_segment)
+        cache_misses += 1
+
+        if cache_store is not None:
+            cache_store[cache_key] = {
+                "text": translated_segment["text"],
+                "provider": translated_segment.get("provider") or "unknown",
+                "source_language": _normalize_lang(source_lang) or "auto",
+                "target_language": _normalize_lang(target_lang),
+                "cached_at": int(time.time()),
+            }
+
+    return translated, {"hits": cache_hits, "misses": cache_misses}
+
+
+def _translated_segments_to_caption_words(segments: List[Dict]) -> List[Dict]:
+    captions: List[Dict] = []
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+
+        words = [token for token in text.split() if token]
+        if not words:
+            continue
+
+        start_ms = int(round(float(seg.get("start", 0)) * 1000))
+        end_ms = int(round(float(seg.get("end", 0)) * 1000))
+        if end_ms <= start_ms:
+            end_ms = start_ms + 200
+
+        total_duration_ms = max(1, end_ms - start_ms)
+        step_ms = max(1, total_duration_ms // len(words))
+
+        for index, word in enumerate(words):
+            word_start_ms = start_ms + (index * step_ms)
+            if index == len(words) - 1:
+                word_end_ms = end_ms
+            else:
+                word_end_ms = min(end_ms, start_ms + ((index + 1) * step_ms))
+            if word_end_ms <= word_start_ms:
+                word_end_ms = word_start_ms + 1
+
+            captions.append({
+                "text": word,
+                "startMs": word_start_ms,
+                "endMs": word_end_ms,
+            })
+
+    return captions
 
 
 def _write_translated_srt(segments: List[Dict], srt_path: str) -> bool:
@@ -1419,24 +1817,74 @@ async def get_languages():
     }
 
 
+@app.post("/api/translate/captions")
+async def translate_captions(req: TranslateRequest):
+    """Translate reel transcript into Remotion-friendly timed word captions."""
+    metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
+    if not metadata_path or not data:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    translation_cache = _get_translation_cache(data)
+
+    clips = data.get("shorts", [])
+    if not clips:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    normalized_clip_index = req.clip_index
+    if normalized_clip_index < 0 or normalized_clip_index >= len(clips):
+        normalized_clip_index = min(max(normalized_clip_index, 0), len(clips) - 1)
+
+    clip_data = clips[normalized_clip_index]
+    source_lang = _normalize_lang(req.source_language) or _normalize_lang((data.get("transcript") or {}).get("language"))
+    target_lang = _normalize_lang(req.target_language)
+    if not target_lang:
+        raise HTTPException(status_code=400, detail="target_language is required")
+
+    source_segments = _load_clip_segments_from_metadata(data, normalized_clip_index)
+    if not source_segments:
+        raise HTTPException(status_code=400, detail="No transcript segments found for this clip range")
+
+    def run_translate_segments():
+        return _translate_segments_with_cache(source_segments, source_lang, target_lang, translation_cache)
+
+    loop = asyncio.get_event_loop()
+    translated_segments, cache_stats = await loop.run_in_executor(None, run_translate_segments)
+
+    if cache_stats["misses"] > 0:
+        try:
+            _persist_metadata_json(metadata_path, data)
+        except Exception as e:
+            print(f"⚠️ Failed to persist translation cache: {e}")
+
+    captions = _translated_segments_to_caption_words(translated_segments)
+    if not captions:
+        raise HTTPException(status_code=500, detail="Failed to build translated captions")
+
+    providers = sorted({seg.get("provider", "unknown") for seg in translated_segments if seg.get("provider")})
+
+    return {
+        "success": True,
+        "mode": "remotion_subtitles",
+        "captions": captions,
+        "durationSec": max(0, float(clip_data.get("end", 0)) - float(clip_data.get("start", 0))),
+        "source_language": source_lang or "auto",
+        "target_language": target_lang,
+        "providers": providers,
+        "cache": cache_stats,
+    }
+
+
 @app.post("/api/translate")
 async def translate_clip(req: TranslateRequest):
     """
     Translate subtitles only (OpenAI first, Gemini fallback),
     keep original voice/audio track unchanged.
     """
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[req.job_id]
+    job = jobs.get(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-
-    if not json_files:
+    metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
+    if not metadata_path or not data:
         raise HTTPException(status_code=404, detail="Metadata not found")
-
-    with open(json_files[0], "r", encoding="utf-8") as f:
-        data = json.load(f)
+    translation_cache = _get_translation_cache(data)
 
     clips = data.get("shorts", [])
     if req.clip_index >= len(clips):
@@ -1446,14 +1894,19 @@ async def translate_clip(req: TranslateRequest):
 
     # Resolve input video path
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _sanitize_input_filename(req.input_filename)
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid input filename")
     else:
         filename = clip_data.get("video_url", "").split("/")[-1]
         if not filename:
-            base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
+            base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
             filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path) and req.input_url:
+        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
+
     if not os.path.exists(input_path):
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
@@ -1470,10 +1923,10 @@ async def translate_clip(req: TranslateRequest):
     try:
         # 1) Translate text segments (OpenAI primary, Gemini fallback)
         def run_translate_segments():
-            return _translate_segments_with_fallback(source_segments, source_lang, target_lang)
+            return _translate_segments_with_cache(source_segments, source_lang, target_lang, translation_cache)
 
         loop = asyncio.get_event_loop()
-        translated_segments = await loop.run_in_executor(None, run_translate_segments)
+        translated_segments, cache_stats = await loop.run_in_executor(None, run_translate_segments)
 
         # 2) Write translated SRT
         base, ext = os.path.splitext(filename)
@@ -1510,8 +1963,8 @@ async def translate_clip(req: TranslateRequest):
         print(f"❌ Translation(subtitles-only) Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Update in-memory job result
-    if req.clip_index < len(job.get("result", {}).get("clips", [])):
+    # Update in-memory job result if the job is still alive in memory.
+    if job and req.clip_index < len(job.get("result", {}).get("clips", [])):
         job["result"]["clips"][req.clip_index]["video_url"] = f"/videos/{req.job_id}/{output_filename}"
 
     # Persist metadata
@@ -1520,9 +1973,8 @@ async def translate_clip(req: TranslateRequest):
             clips[req.clip_index]["video_url"] = f"/videos/{req.job_id}/{output_filename}"
             clips[req.clip_index]["translated_subtitles_language"] = target_lang
             data["shorts"] = clips
-            with open(json_files[0], "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Metadata updated with translated-subtitle video for clip {req.clip_index}")
+            _persist_metadata_json(metadata_path, data)
+            print(f"✅ Metadata updated with translated-subtitle video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -1533,6 +1985,7 @@ async def translate_clip(req: TranslateRequest):
         "srt_url": f"/videos/{req.job_id}/{srt_filename}",
         "source_language": source_lang or "auto",
         "target_language": target_lang,
+        "cache": cache_stats,
     }
 
 """ @app.get("/api/translate/languages")
@@ -1570,7 +2023,9 @@ async def translate_clip(
 
     # Video Path
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _sanitize_input_filename(req.input_filename)
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid input filename")
     else:
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
@@ -1578,6 +2033,9 @@ async def translate_clip(
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path) and getattr(req, "input_url", None):
+        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
+
     if not os.path.exists(input_path):
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
@@ -1605,7 +2063,7 @@ async def translate_clip(
         raise HTTPException(status_code=500, detail=str(e))
 
     # Update InMemory Jobs
-    if req.clip_index < len(job['result']['clips']):
+    if job and req.clip_index < len(job.get('result', {}).get('clips', [])):
          job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
 
     # Update Metadata on Disk
@@ -2555,7 +3013,7 @@ async def gallery_html_page():
           </div>
         </a>'''
 
-        ld_items.append(f'{{"@type":"ListItem","position":{i+1},"url":"https://Vidora.app/video/{video_id}","name":"{title}"}}')
+        ld_items.append(f'{{"@type":"ListItem","position":{i+1},"url":"https://Vireel.app/video/{video_id}","name":"{title}"}}')
 
     ld_json = f'{{"@context":"https://schema.org","@type":"CollectionPage","name":"AI UGC Video Gallery","mainEntity":{{"@type":"ItemList","numberOfItems":{len(videos)},"itemListElement":[{",".join(ld_items)}]}}}}'
 
@@ -2563,10 +3021,10 @@ async def gallery_html_page():
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI UGC Video Gallery | Vidora</title>
+<title>AI UGC Video Gallery | Vireel</title>
 <meta name="description" content="Browse {len(videos)} AI-generated UGC marketing videos. Create viral TikTok and Instagram Reels for your SaaS product.">
 <meta name="robots" content="index, follow">
-<meta property="og:title" content="AI UGC Video Gallery | Vidora">
+<meta property="og:title" content="AI UGC Video Gallery | Vireel">
 <meta property="og:type" content="website">
 <meta property="og:description" content="Browse AI-generated UGC marketing videos for SaaS products.">
 <script type="application/ld+json">{ld_json}</script>
@@ -2581,7 +3039,7 @@ h1{{font-size:28px;font-weight:700;padding:40px 20px 0;text-align:center}}
 </style>
 </head>
 <body>
-<nav><strong style="font-size:18px">Vidora</strong><a href="/" class="cta">Create Your Video</a></nav>
+<nav><strong style="font-size:18px">Vireel</strong><a href="/" class="cta">Create Your Video</a></nav>
 <h1>AI-Generated UGC Videos</h1>
 <p class="subtitle">{len(videos)} videos generated · Low Cost & Premium modes</p>
 <div class="grid">{cards_html}</div>
@@ -2622,7 +3080,7 @@ async def video_html_page(video_id: str):
 <html lang="{language}">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} - AI UGC Video | Vidora</title>
+<title>{title} - AI UGC Video | Vireel</title>
 <meta name="description" content="{caption} {hashtags}">
 <meta property="og:type" content="video.other">
 <meta property="og:title" content="{title}">
@@ -2654,7 +3112,7 @@ h1{{font-size:22px;font-weight:700;margin-bottom:8px}}
 </style>
 </head>
 <body>
-<nav><strong>Vidora</strong><a href="/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
+<nav><strong>Vireel</strong><a href="/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
 <div class="container">
 <div><video src="{video_url}" poster="{actor_url}" controls autoplay playsinline style="aspect-ratio:9/16;object-fit:cover"></video></div>
 <div>
@@ -2920,13 +3378,31 @@ def _reel_share_payload(final_title: str, final_description: str, user_id: str, 
         data_payload["linkedin_title"] = final_description or final_title
     return data_payload
 
+@app.get("/api/abonnements")
+async def list_abonnements():
+    """List available subscription plans from Supabase."""
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+    plans = await supabase_list_abonnements()
+    return {"plans": plans}
+
+
+@app.get("/api/souscription")
+async def get_current_souscription(request: Request) -> Optional[Dict[str, Any]]:
+    """Get the current active subscription for a user."""
+    user_id = request.headers.get("X-User-Id")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+    subscription = await get_user_abonnement(user_id)
+    return subscription
+
 
 @app.get("/api/reels")
 async def list_reels(request: Request, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
     user_id = request.headers.get("X-User-Id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-    if not is_supabase_reels_configured():
+    if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase reels is not configured")
 
     rows, total = await supabase_list_reels(user_id=user_id, page=page, page_size=page_size, status=status, query=q)
@@ -2978,7 +3454,7 @@ async def share_reel(request: Request, reel_id: str, payload: ReelShareRequest):
     if not media_url:
         raise HTTPException(status_code=400, detail="No media URL available")
 
-    final_title = payload.title or row.get("reel_title") or "Vidora"
+    final_title = payload.title or row.get("reel_title") or "Vireel"
     final_description = payload.description or row.get("reel_description") or ""
     api_key, user_id = _resolve_social_credentials(payload.api_key, payload.user_id)
     selected_platforms = _resolve_social_platforms(payload.platforms)

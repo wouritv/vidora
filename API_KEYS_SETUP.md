@@ -1,7 +1,7 @@
 # API Keys Configuration Guide
 
 ## Overview
-All API keys in Vidora are configured via environment variables in the `.env` file located at the project root. This approach ensures that sensitive credentials are never exposed in the UI and follow industry security best practices.
+All API keys in Vireel are configured via environment variables in the `.env` file located at the project root. This approach ensures that sensitive credentials are never exposed in the UI and follow industry security best practices.
 
 ## Configuration Steps
 

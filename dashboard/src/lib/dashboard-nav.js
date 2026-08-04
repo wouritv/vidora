@@ -14,7 +14,7 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         icon: Home,
         activeClassName: "bg-primary/10 text-primary",
         inactiveClassName: "text-zinc-400 hover:text-white hover:bg-white/5",
-        description: "Hub principal pour acceder a tous les outils Vidora et a ton espace de production.",
+        description: "Hub principal pour acceder a tous les outils Vireel et a ton espace de production.",
         badge: "Hub",
         category: "hub",
         path: "/dashboard",

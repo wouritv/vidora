@@ -1,4 +1,4 @@
-import React from "react";
+import * as React from "react";
 import {
   AbsoluteFill,
   Sequence,
@@ -10,10 +10,19 @@ import {
 import type { SubtitleConfig } from "../lib/types";
 import { groupCaptionsIntoBlocks, getActiveWordIndex } from "../lib/captions";
 import { getFontStack } from "../lib/fonts";
+import { getEmojiForWord } from "../lib/emojiMatcher";
 
 interface SubtitlesProps {
   config: SubtitleConfig;
 }
+
+const ACTIVE_WORD_COLORS = [
+  "#FFD93D",
+  "#FF6B6B",
+  "#6BCB77",
+  "#4D96FF",
+  "#C77DFF",
+];
 
 const POSITION_MAP: Record<string, React.CSSProperties> = {
   top: { top: "12%", bottom: "auto" },
@@ -153,6 +162,17 @@ const WordSpan: React.FC<WordSpanProps> = ({
   const wordStartFrame = Math.round(
     ((wordStartMs - blockStartMs) / 1000) * fps
   );
+  const matchedEmoji =
+    isActive && animation === "emoticon" ? getEmojiForWord(word) : null;
+  const emojiSpring = spring({
+    frame: frame - wordStartFrame,
+    fps,
+    config: { mass: 0.45, stiffness: 260, damping: 14 },
+    durationInFrames: 40,
+  });
+  const emojiScale = interpolate(emojiSpring, [0, 1], [0.75, 1.12]);
+  const emojiOpacity = interpolate(emojiSpring, [0, 1], [0, 1]);
+  const emojiRise = interpolate(emojiSpring, [0, 1], [10, -6]);
 
   let transform = "";
   let color = style.fontColor;
@@ -188,6 +208,34 @@ const WordSpan: React.FC<WordSpanProps> = ({
         };
         break;
       }
+      case "active-color": {
+        const elapsed = Math.max(0, frame - wordStartFrame);
+        const colorIndex = Math.floor(elapsed / 2) % ACTIVE_WORD_COLORS.length;
+        color = ACTIVE_WORD_COLORS[colorIndex];
+        extraStyle = {
+          textShadow: `0 0 10px ${color}AA`,
+        };
+        const scale = spring({
+          frame: frame - wordStartFrame,
+          fps,
+          config: { mass: 0.55, stiffness: 280, damping: 13 },
+          durationInFrames: 9,
+        });
+        const scaleValue = interpolate(scale, [0, 1], [1, 1.16]);
+        transform = `scale(${scaleValue})`;
+        break;
+      }
+      case "emoticon": {
+        const scale = spring({
+          frame: frame - wordStartFrame,
+          fps,
+          config: { mass: 0.5, stiffness: 300, damping: 14 },
+          durationInFrames: 20,
+        });
+        const scaleValue = interpolate(scale, [0, 1], [1, 1.12]);
+        transform = `scale(${scaleValue})`;
+        break;
+      }
       default:
         break;
     }
@@ -207,21 +255,45 @@ const WordSpan: React.FC<WordSpanProps> = ({
   return (
     <span
       style={{
-        fontFamily: fontStack,
-        fontSize: style.fontSize,
-        fontWeight: 700,
-        color: animation === "karaoke" && isActive ? undefined : color,
-        textShadow:
-          animation !== "karaoke"
-            ? [strokeShadow, extraStyle.textShadow].filter(Boolean).join(", ")
-            : strokeShadow,
-        transform,
+        position: "relative",
         display: "inline-block",
-        transition: "none",
-        ...extraStyle,
       }}
     >
-      {word}
+      {matchedEmoji ? (
+        <span
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: -style.fontSize * 1.15,
+            transform: `translateX(-50%) translateY(${emojiRise}px) scale(${emojiScale})`,
+            opacity: emojiOpacity,
+            fontSize: Math.max(70, style.fontSize * 1.6),
+            lineHeight: 1,
+            filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.5))",
+            pointerEvents: "none",
+          }}
+        >
+          {matchedEmoji}
+        </span>
+      ) : null}
+      <span
+        style={{
+          fontFamily: fontStack,
+          fontSize: style.fontSize,
+          fontWeight: 700,
+          color: animation === "karaoke" && isActive ? undefined : color,
+          textShadow:
+            animation !== "karaoke"
+              ? [strokeShadow, extraStyle.textShadow].filter(Boolean).join(", ")
+              : strokeShadow,
+          transform,
+          display: "inline-block",
+          transition: "none",
+          ...extraStyle,
+        }}
+      >
+        {word}
+      </span>
     </span>
   );
 };

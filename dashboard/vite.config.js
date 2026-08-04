@@ -16,8 +16,8 @@ export default defineConfig({
   },
   server: {
     allowedHosts: [
-      'Vidora.app',
-      'www.Vidora.app'
+      'Vireel.app',
+      'www.Vireel.app'
     ],
     proxy: {
       '/api': {

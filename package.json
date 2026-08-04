@@ -1,1 +1,8 @@
-{}
+{
+  "dependencies": {
+    "remotion": "^4.0.505"
+  },
+  "devDependencies": {
+    "zod": "^4.4.3"
+  }
+}

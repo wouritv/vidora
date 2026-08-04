@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { Player } from '@remotion/player';
 import { ShortVideo } from '../remotion/compositions/ShortVideo';
+import { toBrowserSafeMediaUrl } from '../lib/clips';
 
 /**
  * Wraps Remotion's Player component for real-time preview in modals.
@@ -24,10 +25,11 @@ export default function RemotionPreview({
 }) {
     const fps = 30;
     const durationInFrames = Math.max(1, Math.round(durationInSeconds * fps));
+    const browserSafeVideoUrl = toBrowserSafeMediaUrl(videoUrl);
 
     const inputProps = useMemo(
         () => ({
-            videoUrl,
+            videoUrl: browserSafeVideoUrl,
             durationInFrames,
             fps,
             width: 1080,
@@ -36,7 +38,7 @@ export default function RemotionPreview({
             hook,
             effects,
         }),
-        [videoUrl, durationInFrames, subtitles, hook, effects]
+        [browserSafeVideoUrl, durationInFrames, subtitles, hook, effects]
     );
 
     return (

@@ -18,7 +18,7 @@ Three theme options:
 - **Dark**: Dark interface for reduced eye strain
 - **System**: Automatically matches your OS preference
 
-Theme preference is saved to localStorage under `Vidora-theme`.
+Theme preference is saved to localStorage under `Vireel-theme`.
 
 ### 3. Connected Networks
 Connect your social media accounts to enable direct sharing of generated clips:
@@ -28,7 +28,7 @@ Connect your social media accounts to enable direct sharing of generated clips:
 - Facebook
 - Instagram
 
-Network connections are stored locally in localStorage under `Vidora-connected-networks`.
+Network connections are stored locally in localStorage under `Vireel-connected-networks`.
 
 ## API Keys Configuration
 
@@ -94,9 +94,9 @@ Response example:
 ### Storage Keys
 | Key | Purpose |
 |-----|---------|
-| `Vidora-theme` | User's theme preference (dark/light/system) |
-| `Vidora-display-name` | User's display name (cached locally) |
-| `Vidora-connected-networks` | JSON object of connected social networks |
+| `Vireel-theme` | User's theme preference (dark/light/system) |
+| `Vireel-display-name` | User's display name (cached locally) |
+| `Vireel-connected-networks` | JSON object of connected social networks |
 
 ### Theme Implementation
 - Uses Tailwind's `class` darkMode strategy

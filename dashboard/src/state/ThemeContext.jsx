@@ -5,7 +5,7 @@ const ThemeContext = createContext(null);
 export function ThemeProvider({ children }) {
   const [theme, setTheme] = useState(() => {
     // Read from localStorage on mount
-    const stored = localStorage.getItem('Vidora-theme');
+    const stored = localStorage.getItem('Vireel-theme');
     if (stored === 'dark' || stored === 'light' || stored === 'system') {
       return stored;
     }
@@ -15,7 +15,7 @@ export function ThemeProvider({ children }) {
 
   useEffect(() => {
     // Save to localStorage whenever theme changes
-    localStorage.setItem('Vidora-theme', theme);
+    localStorage.setItem('Vireel-theme', theme);
 
     // Apply theme to DOM
     const root = document.documentElement;

@@ -9,7 +9,7 @@ export interface CaptionBlock {
 
 /**
  * Groups word-level captions into display blocks.
- * Same logic as Vidora' generate_srt: max chars per block, max duration per block.
+ * Same logic as Vireel' generate_srt: max chars per block, max duration per block.
  */
 export function groupCaptionsIntoBlocks(
   captions: CaptionWord[],

@@ -8,7 +8,7 @@ on:
 
 env:
   NEXUS_REGISTRY: 82.112.253.226:8082
-  IMAGE_PREFIX: vidora
+  IMAGE_PREFIX: vireel
 
 jobs:
   # ---------------------------------------------------------
@@ -200,7 +200,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "docker-compose.prod.yml"
-          target: "/var/apps/vidora"
+          target: "/var/apps/vireel"
 
       - name: Déployer via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -210,7 +210,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: NEXUS_REGISTRY,IMAGE_PREFIX,GITHUB_SHA
           script: |
-            cd /var/apps/vidora
+            cd /var/apps/vireel
             export IMAGE_TAG=${{ github.sha }}
             echo "${{ secrets.NEXUS_PASSWORD }}" | docker login ${{ env.NEXUS_REGISTRY }} -u ${{ secrets.NEXUS_USERNAME }} --password-stdin
             docker compose -f docker-compose.prod.yml pull

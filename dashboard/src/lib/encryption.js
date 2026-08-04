@@ -1,4 +1,4 @@
-const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || 'Vidora-Static-Salt-Change-Me';
+const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || 'Vireel-Static-Salt-Change-Me';
 const ENCRYPTION_PREFIX = 'ENC:';
 
 function xorBytes(bytes) {

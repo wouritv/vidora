@@ -1,4 +1,4 @@
-import React from "react";
+import * as React from "react";
 import {
   AbsoluteFill,
   Sequence,
@@ -10,6 +10,7 @@ import {
 import type { SubtitleConfig } from "../lib/types";
 import { groupCaptionsIntoBlocks, getActiveWordIndex } from "../lib/captions";
 import { getFontStack } from "../lib/fonts";
+import { getEmojiForWord } from "../lib/emojiMatcher";
 
 interface SubtitlesProps {
   config: SubtitleConfig;
@@ -27,7 +28,7 @@ export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
 
   return (
     <AbsoluteFill>
-      {blocks.map((block, i) => {
+      {blocks.map((block) => {
         const startFrame = Math.round((block.startMs / 1000) * fps);
         const durationFrames = Math.max(
           1,
@@ -36,7 +37,7 @@ export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
 
         return (
           <Sequence
-            key={i}
+            key={`${block.startMs}-${block.endMs}-${block.words.length}`}
             from={startFrame}
             durationInFrames={durationFrames}
             layout="none"
@@ -86,7 +87,7 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
         padding: "8px 16px",
       }
     : {};
-
+  
   return (
     <div
       style={{
@@ -110,7 +111,7 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
       >
         {block.words.map((word, i) => (
           <WordSpan
-            key={i}
+            key={`${word.startMs}-${word.endMs}-${word.text}`}
             word={word.text}
             isActive={i === activeIndex}
             style={style}
@@ -153,6 +154,17 @@ const WordSpan: React.FC<WordSpanProps> = ({
   const wordStartFrame = Math.round(
     ((wordStartMs - blockStartMs) / 1000) * fps
   );
+  const matchedEmoji =
+    isActive && animation === "emoticon" ? getEmojiForWord(word) : null;
+  const emojiSpring = spring({
+    frame: frame - wordStartFrame,
+    fps,
+    config: { mass: 0.45, stiffness: 260, damping: 14 },
+    durationInFrames: 40,
+  });
+  const emojiScale = interpolate(emojiSpring, [0, 1], [0.75, 1.12]);
+  const emojiOpacity = interpolate(emojiSpring, [0, 1], [0, 1]);
+  const emojiRise = interpolate(emojiSpring, [0, 1], [10, -6]);
 
   let transform = "";
   let color = style.fontColor;
@@ -188,6 +200,17 @@ const WordSpan: React.FC<WordSpanProps> = ({
         };
         break;
       }
+      case "emoticon": {
+        const scale = spring({
+          frame: frame - wordStartFrame,
+          fps,
+          config: { mass: 0.5, stiffness: 300, damping: 14 },
+          durationInFrames: 8,
+        });
+        const scaleValue = interpolate(scale, [0, 1], [1, 1.12]);
+        transform = `scale(${scaleValue})`;
+        break;
+      }
       default:
         break;
     }
@@ -207,21 +230,45 @@ const WordSpan: React.FC<WordSpanProps> = ({
   return (
     <span
       style={{
-        fontFamily: fontStack,
-        fontSize: style.fontSize,
-        fontWeight: 700,
-        color: animation === "karaoke" && isActive ? undefined : color,
-        textShadow:
-          animation !== "karaoke"
-            ? [strokeShadow, extraStyle.textShadow].filter(Boolean).join(", ")
-            : strokeShadow,
-        transform,
+        position: "relative",
         display: "inline-block",
-        transition: "none",
-        ...extraStyle,
       }}
     >
-      {word}
+      {matchedEmoji ? (
+        <span
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: -style.fontSize * 1.15,
+            transform: `translateX(-50%) translateY(${emojiRise}px) scale(${emojiScale})`,
+            opacity: emojiOpacity,
+            fontSize: Math.max(70, style.fontSize * 1.6),
+            lineHeight: 1,
+            filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.5))",
+            pointerEvents: "none",
+          }}
+        >
+          {matchedEmoji}
+        </span>
+      ) : null}
+      <span
+        style={{
+          fontFamily: fontStack,
+          fontSize: style.fontSize,
+          fontWeight: 700,
+          color: animation === "karaoke" && isActive ? undefined : color,
+          textShadow:
+            animation === "karaoke"
+              ? strokeShadow
+              : [strokeShadow, extraStyle.textShadow].filter(Boolean).join(", "),
+          transform,
+          display: "inline-block",
+          transition: "none",
+          ...extraStyle,
+        }}
+      >
+        {word}
+      </span>
     </span>
   );
 };

@@ -40,7 +40,7 @@ const DEFAULT_PROPS: ShortVideoProps = {
     },
   },
   hook: {
-    text: "POV: You just discovered Vidora",
+    text: "POV: You just discovered Vireel",
     position: "top",
     size: "M",
     entranceAnimation: "spring",

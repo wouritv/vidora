@@ -1,50 +1,7 @@
-import React from "react";
-import { Check, CreditCardIcon, Star, Crown, Sparkles } from "lucide-react";
-
-const plans = [
-    {
-        name: "Silver",
-        icon: Star,
-        price: "9",
-        color: "zinc",
-        features: [
-            "100 tokens / mois",
-            "1 projet actif",
-            "Support par email",
-            "Historique 7 jours",
-        ],
-        highlighted: false,
-    },
-    {
-        name: "Gold",
-        icon: Sparkles,
-        price: "29",
-        color: "blue",
-        features: [
-            "500 tokens / mois",
-            "5 projets actifs",
-            "Support prioritaire",
-            "Historique 30 jours",
-            "Accès aux modèles avancés",
-        ],
-        highlighted: true,
-    },
-    {
-        name: "Ultimate",
-        icon: Crown,
-        price: "79",
-        color: "purple",
-        features: [
-            "Tokens illimités",
-            "Projets illimités",
-            "Support dédié 24/7",
-            "Historique illimité",
-            "Accès aux modèles avancés",
-            "API personnalisée",
-        ],
-        highlighted: false,
-    },
-];
+import React, {useEffect, useState} from "react";
+import {Check, CreditCardIcon, Star, Crown, Sparkles, Loader2} from "lucide-react";
+import {getApiUrl} from "../config.js";
+import { useAuth } from "../state/AuthContext";
 
 const colorStyles = {
     zinc: {
@@ -70,20 +27,113 @@ const colorStyles = {
     },
 };
 
+const iconMap = {
+    Crown: Crown,
+    star: Star,
+    Sparkles: Sparkles,
+};
+
 export default function AbonnementPage() {
+    const { user } = useAuth();
+    const [items, setItems] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState("");
+    const [souscription, setSouscription] = useState(null);
+
+    useEffect(() => {
+        if (!user?.id) return;
+        async function fetchSouscription() {
+            try {
+                const response = await fetch(getApiUrl(`/api/souscription`), {
+                    headers: {
+                        "X-User-Id": user.id,
+                    },
+                });
+
+                if (!response.ok) {
+                    return;
+                }
+
+                const data = await response.json();
+                setSouscription(data);
+            } catch (err) {
+                console.error("Error fetching souscription:", err);
+            }
+        }
+
+        fetchSouscription();
+
+    }, [user?.id])
+
+    useEffect(() => {
+        async function getItems() {
+
+            setLoading(true);
+            setError("");
+
+            try {
+
+                const response = await fetch(getApiUrl(`/api/abonnements`),  null);
+
+                if (!response.ok) {
+                    const detail = await response.text();
+                    setError(detail || "Unable to load plans");
+                    setItems([]);
+                    return;
+                }
+
+                const data = await response.json();
+                setItems(Array.isArray(data.plans) ? data.plans : []);
+
+            } catch (err) {
+                setError(err.message || "Unable to load reels");
+                setItems([]);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        getItems();
+
+    },[])
+
     return (
         <div className="h-full overflow-y-auto p-8 max-w-5xl mx-auto animate-[fadeIn_0.3s_ease-out]">
             {/* Header */}
             <div className="mb-8">
                 <h1 className="text-3xl font-bold mb-2">Abonnements</h1>
-                <p className="text-zinc-400 text-sm">Manage your account, appearance, and connected networks</p>
+                <p className="text-zinc-400 text-sm">Découvrez nos formules d'abonnements et choisissez celle qui vous convient</p>
             </div>
 
             {/* Plans */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
-                {plans.map((plan) => {
+
+                {loading && (
+                    <span className="inline-flex items-center gap-2">
+                        <Loader2 size={14} className="animate-spin" /> Chargement...
+                    </span>
+                )}
+
+                {!loading && error && (
+                    <span className="inline-flex items-center gap-2 text-red-300">
+                        {error}
+                    </span>
+                )}
+
+                {!loading && !error && items.length === 0 && (
+                    <span className="inline-flex items-center gap-2 text-zinc-400">
+                        Aucun abonnement trouve.
+                    </span>
+                )}
+
+                {items.map((plan) => {
                     const styles = colorStyles[plan.color];
-                    const Icon = plan.icon;
+                    const Icon = iconMap[plan.icon] || Star; // Default to Star if icon is not found
+                    let buttonLabel = "Choisir";
+
+                    if (souscription && plan.id === souscription.abonnement && plan.ordre < 3) {
+                        buttonLabel = "Upgrade";
+                    }
 
                     return (
                         <div
@@ -130,7 +180,7 @@ export default function AbonnementPage() {
                                 className={`mt-auto flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition ${styles.button}`}
                             >
                                 <CreditCardIcon size={18} />
-                                {plan.highlighted ? "Upgrade" : "Choisir"}
+                                        {buttonLabel}
                             </button>
                         </div>
                     );

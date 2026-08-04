@@ -1,5 +1,5 @@
 {
-  "name": "Vidora-remotion",
+  "name": "Vireel-remotion",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -14,9 +14,11 @@
     "@remotion/layout-utils": "^4.0.0",
     "@remotion/media": "^4.0.447",
     "@remotion/player": "^4.0.0",
+    "emojilib": "^4.0.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "remotion": "^4.0.0",
+    "unicode-emoji-json": "^0.9.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

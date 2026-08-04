@@ -551,7 +551,7 @@ async def share_ia_caption(request: Request, item_id: str, payload: MediaShareRe
     if not media_url:
         raise HTTPException(status_code=400, detail="No media URL available")
 
-    final_title = payload.title or row.get("caption_title") or "Vidora"
+    final_title = payload.title or row.get("caption_title") or "Vireel"
     final_description = payload.description or row.get("caption_description") or ""
 
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:

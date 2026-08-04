@@ -13,14 +13,14 @@ The Settings page has been completely redesigned to provide a cleaner, more user
 
 ### 2. **Appearance / Theme Management**
 - ✅ Three theme options: Light, Dark, System
-- ✅ Persistent theme preference (localStorage: `Vidora-theme`)
+- ✅ Persistent theme preference (localStorage: `Vireel-theme`)
 - ✅ Smooth theme transitions with CSS variables
 - ✅ Respects system preference when "System" is selected
 - ✅ Full Tailwind dark mode integration
 
 ### 3. **Connected Networks**
 - ✅ Visual cards for LinkedIn, TikTok, YouTube, Facebook, Instagram
-- ✅ Toggle connection status (stored in localStorage: `Vidora-connected-networks`)
+- ✅ Toggle connection status (stored in localStorage: `Vireel-connected-networks`)
 - ✅ Shows connection indicators
 - ✅ UI-only for now (OAuth integration would be a future enhancement)
 
@@ -105,9 +105,9 @@ SUPABASE_SERVICE_ROLE_KEY=your_key
 
 | Key | Purpose | Type |
 |-----|---------|------|
-| `Vidora-theme` | User's theme preference | String: "dark" \| "light" \| "system" |
-| `Vidora-display-name` | Cached display name | String |
-| `Vidora-connected-networks` | Connected social networks | JSON object |
+| `Vireel-theme` | User's theme preference | String: "dark" \| "light" \| "system" |
+| `Vireel-display-name` | Cached display name | String |
+| `Vireel-connected-networks` | Connected social networks | JSON object |
 
 ## Styling & Theme System
 

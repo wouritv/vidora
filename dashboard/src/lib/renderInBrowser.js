@@ -1,5 +1,6 @@
 import { renderMediaOnWeb } from '@remotion/web-renderer';
 import { ShortVideo } from '../remotion/compositions/ShortVideo';
+import { toBrowserSafeMediaUrl } from './clips';
 
 /**
  * Renders a Remotion composition directly in the browser using WebCodecs.
@@ -26,6 +27,7 @@ export async function renderInBrowser({
 }) {
     const fps = 30;
     const durationInFrames = Math.max(1, Math.round(durationInSeconds * fps));
+    const browserSafeVideoUrl = toBrowserSafeMediaUrl(videoUrl);
 
     const { getBlob } = await renderMediaOnWeb({
         composition: {
@@ -38,7 +40,7 @@ export async function renderInBrowser({
             calculateMetadata: null,
         },
         inputProps: {
-            videoUrl,
+            videoUrl: browserSafeVideoUrl,
             durationInFrames,
             fps,
             width: 1080,
@@ -61,14 +63,3 @@ export async function renderInBrowser({
     return URL.createObjectURL(blob);
 }
 
-/**
- * Triggers a download of a blob URL as an MP4 file.
- */
-export function downloadBlobUrl(blobUrl, filename = 'output.mp4') {
-    const link = document.createElement('a');
-    link.href = blobUrl;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-}

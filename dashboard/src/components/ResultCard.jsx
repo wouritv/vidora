@@ -1,30 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Wand2, Type, Calendar, Clock, Languages, Facebook, Linkedin } from 'lucide-react';
+import { Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Wand2, Type } from 'lucide-react';
 import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
-import TranslateModal from './TranslateModal';
+import SharePostModal from './SharePostModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 import { decrypt } from '../lib/encryption';
 import { getConnectedPlatforms } from '../lib/platforms';
 import { inputFilenameFromVideoUrl } from '../lib/clips';
-const SUPPORTED_SOCIAL_PLATFORMS = ['tiktok', 'instagram', 'youtube', 'facebook', 'linkedin'];
-
-const PLATFORM_LABELS = {
-    tiktok: 'TikTok',
-    instagram: 'Instagram',
-    youtube: 'YouTube Shorts',
-    facebook: 'Facebook',
-    linkedin: 'LinkedIn',
-};
-
-
 function readConnectedPlatformsFromSettings() {
     return getConnectedPlatforms();
 }
 
 export default function ResultCard({ clip, index, jobId, onPlay, onPause, compactActions = false }) {
     const safeClip = clip && typeof clip === 'object' ? clip : {};
+    const clipIndexForApi = Number.isFinite(Number(safeClip.reel_clip_index))
+        ? Number(safeClip.reel_clip_index)
+        : index;
     const clipStart = Number.isFinite(Number(safeClip.start)) ? Number(safeClip.start) : 0;
     const clipEnd = Number.isFinite(Number(safeClip.end)) ? Number(safeClip.end) : clipStart + 30;
     const rawVideoUrl = typeof safeClip.video_url === 'string' ? safeClip.video_url : '';
@@ -32,11 +24,10 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     const uploadUserId = globalThis.localStorage.getItem('uploadUserId') || '';
     const connectedPlatforms = readConnectedPlatformsFromSettings();
     const defaultPlatforms = connectedPlatforms.length > 0 ? connectedPlatforms : ['tiktok', 'instagram', 'youtube'];
-    const hasClipContext = Boolean(jobId) && Number.isFinite(Number(index));
+    const hasClipContext = Boolean(jobId) && Number.isFinite(Number(clipIndexForApi));
 
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
-    const [showTranslateModal, setShowTranslateModal] = useState(false);
     const videoRef = React.useRef(null);
     const originalVideoUrl = rawVideoUrl ? getApiUrl(rawVideoUrl) : '';
     const [currentVideoUrl, setCurrentVideoUrl] = useState(originalVideoUrl);
@@ -58,7 +49,6 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
-    const [isTranslating, setIsTranslating] = useState(false);
     const [isHooking, setIsHooking] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [editError, setEditError] = useState(null);
@@ -70,14 +60,14 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
-        if (!jobId || index === undefined) return;
-        fetch(getApiUrl(`/api/clip/${jobId}/${index}/transcript`))
+        if (!jobId || !Number.isFinite(Number(clipIndexForApi))) return;
+        fetch(getApiUrl(`/api/clip/${jobId}/${clipIndexForApi}/transcript`))
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data && data.durationSec) setClipDuration(data.durationSec);
             })
             .catch(() => {});
-    }, [jobId, index]);
+    }, [jobId, clipIndexForApi]);
 
     // Keep player source in sync when preview URL updates (fixes stale/empty playback in modal previews).
     useEffect(() => {
@@ -131,6 +121,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         setIsEditing(true);
         setEditError(null);
         try {
+            const effectiveInputUrl = currentVideoUrl?.startsWith('blob:') ? originalVideoUrl : currentVideoUrl;
             // Gemini API Key is now configured server-side via .env
             // No need to send header from frontend
 
@@ -142,8 +133,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    clip_index: clipIndexForApi,
+                    input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
+                    input_url: effectiveInputUrl,
                 })
             });
 
@@ -173,8 +165,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    clip_index: clipIndexForApi,
+                    input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
+                    input_url: effectiveInputUrl,
                 })
             });
 
@@ -213,13 +206,50 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         setIsSubtitling(true);
         setEditError(null);
         try {
+            const effectiveInputUrl = currentVideoUrl?.startsWith('blob:') ? originalVideoUrl : currentVideoUrl;
             if (options.remotion) {
+                let nextCaptions = Array.isArray(options.translatedCaptions) && options.translatedCaptions.length > 0
+                    ? options.translatedCaptions
+                    : (Array.isArray(options.remotion.captions) ? options.remotion.captions : []);
+                let nextDurationSec = Number.isFinite(Number(options.previewDurationSec)) && Number(options.previewDurationSec) > 0
+                    ? Number(options.previewDurationSec)
+                    : clipDuration;
+
+                if (options.targetLanguage && nextCaptions.length === 0) {
+                    const captionsRes = await fetch(getApiUrl('/api/translate/captions'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            job_id: jobId,
+                                clip_index: clipIndexForApi,
+                            target_language: options.targetLanguage,
+                            input_url: effectiveInputUrl,
+                        }),
+                    });
+
+                    if (!captionsRes.ok) {
+                        const errText = await captionsRes.text();
+                        throw new Error(errText || 'Subtitle translation failed');
+                    }
+
+                    const translatedData = await captionsRes.json();
+                    nextCaptions = Array.isArray(translatedData.captions) ? translatedData.captions : [];
+                    if (translatedData.durationSec) {
+                        nextDurationSec = translatedData.durationSec;
+                    }
+                }
+
                 // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, subtitles: options.remotion };
+                const subtitleLayer = {
+                    ...options.remotion,
+                    captions: nextCaptions,
+                };
+                const newLayers = { ...activeLayers, subtitles: subtitleLayer };
                 setActiveLayers(newLayers);
+                setClipDuration(nextDurationSec);
                 const blobUrl = await renderInBrowser({
                     videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
+                    durationInSeconds: nextDurationSec,
                     subtitles: newLayers.subtitles,
                     hook: newLayers.hook,
                     effects: newLayers.effects,
@@ -236,7 +266,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
+                    clip_index: clipIndexForApi,
                     position: options.position,
                     font_size: options.fontSize,
                     font_name: options.fontName,
@@ -245,7 +275,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     border_width: options.borderWidth,
                     bg_color: options.bgColor,
                     bg_opacity: options.bgOpacity,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
+                    input_url: effectiveInputUrl
                 })
             });
 
@@ -273,6 +304,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         setIsHooking(true);
         setEditError(null);
         try {
+            const effectiveInputUrl = currentVideoUrl?.startsWith('blob:') ? originalVideoUrl : currentVideoUrl;
             if (hookData.remotion) {
                 // Accumulate layer and render all layers together
                 const newLayers = { ...activeLayers, hook: hookData.remotion };
@@ -300,11 +332,12 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
+                    clip_index: clipIndexForApi,
                     text: payload.text,
                     position: payload.position,
                     size: payload.size,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
+                    input_url: effectiveInputUrl
                 })
             });
 
@@ -320,47 +353,6 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             setTimeout(() => setEditError(null), 5000);
         } finally {
             setIsHooking(false);
-        }
-    };
-
-    const handleTranslate = async ({ targetLanguage }) => {
-        if (!hasClipContext) {
-            setEditError('Actions indisponibles: ce reel est detache de son job original.');
-            setTimeout(() => setEditError(null), 5000);
-            return;
-        }
-        setIsTranslating(true);
-        setEditError(null);
-        try {
-            const payload = {
-                job_id: jobId,
-                clip_index: index,
-                target_language: targetLanguage,
-            };
-            const inferredFilename = inputFilenameFromVideoUrl(currentVideoUrl) || inputFilenameFromVideoUrl(originalVideoUrl);
-            if (inferredFilename) payload.input_filename = inferredFilename;
-
-            const res = await fetch(getApiUrl('/api/translate'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
-            if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(errText || 'Translate failed');
-            }
-
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) videoRef.current.load();
-            }
-            setShowTranslateModal(false);
-        } catch (e) {
-            setEditError(e.message || 'Translate failed');
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsTranslating(false);
         }
     };
 
@@ -386,7 +378,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         try {
             const payload = {
                 job_id: jobId,
-                clip_index: index,
+                    clip_index: clipIndexForApi,
                 platforms: selectedPlatforms,
                 title: postTitle,
                 description: postDescription
@@ -542,16 +534,6 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     </button>
 
                     <button
-                        onClick={() => setShowTranslateModal(true)}
-                        disabled={isTranslating || !hasClipContext}
-                        title="Translate"
-                        className={`col-span-1 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
-                    >
-                        {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
-                        {!compactActions ? (isTranslating ? 'Translating...' : 'Translate') : null}
-                    </button>
-
-                    <button
                         onClick={() => setShowHookModal(true)}
                         disabled={isHooking || !hasClipContext}
                         title="Viral Hook"
@@ -573,125 +555,25 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 </div>
             </div>
 
-            {/* Post Modal */}
-            {showModal && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-                    <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
-                        <button
-                            onClick={() => setShowModal(false)}
-                            className="absolute top-4 right-4 text-zinc-500 hover:text-white"
-                        >
-                            <X size={20} />
-                        </button>
-
-                        <h3 className="text-lg font-bold text-white mb-4">Post / Schedule</h3>
-
-                        {!uploadPostKey || !uploadUserId ? (
-                            <div className="mb-4 p-3 bg-blue-500/10 border border-blue-500/20 text-blue-200 text-xs rounded-lg">
-                                API key/profile not found locally. The backend will use server-side social credentials if configured.
-                            </div>
-                        ) : null}
-
-                        <div className="space-y-4 mb-6">
-                            {/* Title & Description */}
-                            <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-1">Video Title</label>
-                                <input
-                                    type="text"
-                                    value={postTitle}
-                                    onChange={(e) => setPostTitle(e.target.value)}
-                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
-                                    placeholder="Enter a catchy title..."
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-1">Caption / Description</label>
-                                <textarea
-                                    value={postDescription}
-                                    onChange={(e) => setPostDescription(e.target.value)}
-                                    rows={4}
-                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
-                                    placeholder="Write a caption for your post..."
-                                />
-                            </div>
-
-                            {/* Scheduling */}
-                            <div className="p-3 bg-white/5 rounded-lg border border-white/5">
-                                <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2 text-sm text-white font-medium">
-                                        <Calendar size={16} className="text-purple-400" /> Schedule Post
-                                    </div>
-                                    <label className="relative inline-flex items-center cursor-pointer">
-                                        <input type="checkbox" checked={isScheduling} onChange={(e) => setIsScheduling(e.target.checked)} className="sr-only peer" />
-                                        <div className="w-9 h-5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
-                                    </label>
-                                </div>
-
-                                {isScheduling && (
-                                    <div className="mt-3 animate-[fadeIn_0.2s_ease-out]">
-                                        <label className="block text-xs text-zinc-400 mb-1">Select Date & Time</label>
-                                        <div className="relative">
-                                            <input
-                                                type="datetime-local"
-                                                value={scheduleDate}
-                                                onChange={(e) => setScheduleDate(e.target.value)}
-                                                className="w-full bg-black/40 border border-white/10 rounded-lg p-2 pl-9 text-sm text-white focus:outline-none focus:border-purple-500/50 [color-scheme:dark]"
-                                            />
-                                            <Clock size={14} className="absolute left-3 top-2.5 text-zinc-500" />
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Platforms */}
-                            <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-2">Select Platforms</label>
-                                <div className="grid grid-cols-1 gap-2">
-                                    {SUPPORTED_SOCIAL_PLATFORMS.filter((platform) => connectedPlatforms.length === 0 || connectedPlatforms.includes(platform)).map((platform) => {
-                                        const Icon = platform === 'instagram' ? Instagram
-                                            : platform === 'youtube' ? Youtube
-                                                : platform === 'facebook' ? Facebook
-                                                    : platform === 'linkedin' ? Linkedin
-                                                        : Video;
-                                        return (
-                                            <label key={platform} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-white/5">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={Boolean(platforms[platform])}
-                                                    onChange={e => setPlatforms({ ...platforms, [platform]: e.target.checked })}
-                                                    className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
-                                                />
-                                                <div className="flex items-center gap-2 text-sm text-white">
-                                                    <Icon size={16} className="text-zinc-300" /> {PLATFORM_LABELS[platform]}
-                                                </div>
-                                            </label>
-                                        );
-                                    })}
-                                </div>
-                                {connectedPlatforms.length === 0 ? (
-                                    <p className="mt-2 text-xs text-zinc-500">No platform is marked as connected in Settings, so defaults are shown.</p>
-                                ) : null}
-                            </div>
-                        </div>
-
-                        {postResult && (
-                            <div className={`mb-4 p-3 rounded-lg text-xs flex items-start gap-2 ${postResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
-                                {postResult.success ? <CheckCircle size={14} className="mt-0.5 shrink-0" /> : <AlertCircle size={14} className="mt-0.5 shrink-0" />}
-                                <div>{postResult.msg}</div>
-                            </div>
-                        )}
-
-                        <button
-                            onClick={handlePost}
-                            disabled={posting}
-                            className="w-full py-3 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-bold transition-all flex items-center justify-center gap-2"
-                        >
-                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Scheduling...' : 'Publishing...'}</> : <><Share2 size={16} /> {isScheduling ? 'Schedule Post' : 'Publish Now'}</>}
-                        </button>
-                    </div>
-                </div>
-            )}
+            <SharePostModal
+                isOpen={showModal}
+                onClose={() => setShowModal(false)}
+                title={postTitle}
+                onTitleChange={setPostTitle}
+                description={postDescription}
+                onDescriptionChange={setPostDescription}
+                isScheduling={isScheduling}
+                onSchedulingChange={setIsScheduling}
+                scheduleDate={scheduleDate}
+                onScheduleDateChange={setScheduleDate}
+                platforms={platforms}
+                onPlatformChange={(platform, checked) => setPlatforms((prev) => ({ ...prev, [platform]: checked }))}
+                connectedPlatforms={connectedPlatforms}
+                isSubmitting={posting}
+                result={postResult}
+                onSubmit={handlePost}
+                hasLocalCredentials={Boolean(uploadPostKey && uploadUserId)}
+            />
 
             <SubtitleModal
                 isOpen={showSubtitleModal}
@@ -700,8 +582,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 isProcessing={isSubtitling}
                 videoUrl={originalVideoUrl}
                 jobId={jobId}
-                clipIndex={index}
+                clipIndex={clipIndexForApi}
                 existingHook={activeLayers.hook}
+                existingEffects={activeLayers.effects}
             />
 
             <HookModal
@@ -713,14 +596,6 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 initialText={safeClip.viral_hook_text}
                 durationInSeconds={Math.max(1, clipEnd - clipStart)}
                 existingSubtitles={activeLayers.subtitles}
-            />
-
-            <TranslateModal
-                isOpen={showTranslateModal}
-                onClose={() => setShowTranslateModal(false)}
-                onTranslate={handleTranslate}
-                isProcessing={isTranslating}
-                videoUrl={currentVideoUrl || originalVideoUrl}
             />
 
 

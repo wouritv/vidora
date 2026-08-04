@@ -4,6 +4,7 @@ import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
 import ResultCard from "../components/ResultCard";
+import SharePostModal from "../components/SharePostModal";
 import { decrypt } from "../lib/encryption";
 import { getConnectedPlatforms } from "../lib/platforms";
 import { toResultCardClip } from "../lib/clips";
@@ -11,6 +12,7 @@ import { statusLabel, statusClass } from "../lib/status";
 
 export default function ReelsPage() {
     const { user } = useAuth();
+    const connectedPlatforms = getConnectedPlatforms();
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -21,6 +23,19 @@ export default function ReelsPage() {
     const [query, setQuery] = useState("");
     const [status, setStatus] = useState("");
     const [sharingId, setSharingId] = useState("");
+    const [shareResult, setShareResult] = useState(null);
+    const [shareModalItem, setShareModalItem] = useState(null);
+    const [shareTitle, setShareTitle] = useState("");
+    const [shareDescription, setShareDescription] = useState("");
+    const [sharePlatforms, setSharePlatforms] = useState({
+        tiktok: true,
+        instagram: true,
+        youtube: true,
+        facebook: false,
+        linkedin: false,
+    });
+    const [shareScheduling, setShareScheduling] = useState(false);
+    const [shareScheduleDate, setShareScheduleDate] = useState("");
     const [deletingId, setDeletingId] = useState("");
     const [previewItem, setPreviewItem] = useState(null);
     const [previewUrl, setPreviewUrl] = useState("");
@@ -165,23 +180,58 @@ export default function ReelsPage() {
         globalThis.open(mediaUrl, "_blank", "noopener,noreferrer");
     };
 
-    const handleShare = async (reelId) => {
+    const handleShare = (item) => {
+        const fallbackPlatforms = ['tiktok', 'instagram', 'youtube'];
+        const nextDefaultPlatforms = connectedPlatforms.length > 0 ? connectedPlatforms : fallbackPlatforms;
+        setSharePlatforms({
+            tiktok: nextDefaultPlatforms.includes('tiktok'),
+            instagram: nextDefaultPlatforms.includes('instagram'),
+            youtube: nextDefaultPlatforms.includes('youtube'),
+            facebook: nextDefaultPlatforms.includes('facebook'),
+            linkedin: nextDefaultPlatforms.includes('linkedin'),
+        });
+        setShareTitle(item?.reel_title || "Viral Short");
+        setShareDescription(item?.reel_description || "");
+        setShareScheduling(false);
+        setShareScheduleDate("");
+        setShareResult(null);
+        setShareModalItem(item);
+    };
+
+    const submitShare = async () => {
         if (!user?.id) return;
+        if (!shareModalItem?.id) return;
+
+        const selectedPlatforms = Object.keys(sharePlatforms).filter((k) => Boolean(sharePlatforms[k]));
+        if (selectedPlatforms.length === 0) {
+            setShareResult({ success: false, msg: "Select at least one platform." });
+            return;
+        }
+        if (shareScheduling && !shareScheduleDate) {
+            setShareResult({ success: false, msg: "Please select a date and time." });
+            return;
+        }
 
         const encryptedUploadPostKey = localStorage.getItem("uploadPostKey_v3") || "";
         const apiKey = decrypt(encryptedUploadPostKey);
         const uploadPostUser = globalThis.localStorage.getItem("uploadUserId") || "";
-        const selectedPlatforms = getConnectedPlatforms(['tiktok', 'instagram', 'youtube']);
 
-        setSharingId(reelId);
+        setSharingId(shareModalItem.id);
+        setShareResult(null);
         try {
             const payload = {
                 platforms: selectedPlatforms,
+                title: shareTitle || undefined,
+                description: shareDescription || undefined,
             };
             if (apiKey) payload.api_key = apiKey;
             if (uploadPostUser) payload.user_id = uploadPostUser;
+            if (shareScheduling && shareScheduleDate) {
+                payload.scheduled_date = new Date(shareScheduleDate).toISOString();
+                payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            }
 
-            const response = await fetch(getApiUrl(`/api/reels/${reelId}/share`), {
+            const response = await fetch(getApiUrl(`/api/reels/${shareModalItem.id}/share`), {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -191,18 +241,31 @@ export default function ReelsPage() {
             });
 
             if (!response.ok) {
-                const detail = await response.text();
-                setError(detail || "Share failed");
+                const errText = await response.text();
+                let msg = "Share failed";
+                try {
+                    const parsed = JSON.parse(errText);
+                    msg = parsed?.detail || errText || msg;
+                } catch {
+                    msg = errText || msg;
+                }
+                setShareResult({ success: false, msg: `Failed: ${msg}` });
                 return;
             }
 
-            globalThis.alert("Share request sent.");
+            setShareResult({ success: true, msg: "Share request sent." });
+            setTimeout(() => {
+                setShareResult(null);
+                setShareModalItem(null);
+            }, 1500);
         } catch (err) {
-            globalThis.alert(err.message || "Share failed");
+            setShareResult({ success: false, msg: `Failed: ${err.message || "Share failed"}` });
         } finally {
             setSharingId("");
         }
     };
+
+
 
     const handlePreview = async (item) => {
         setPreviewItem(item);
@@ -242,6 +305,11 @@ export default function ReelsPage() {
             </div>
 
             <section className="rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
+                {shareResult ? (
+                    <div className={`rounded-lg border px-3 py-2 text-xs ${shareResult.success ? 'border-green-500/30 bg-green-500/10 text-green-300' : 'border-red-500/30 bg-red-500/10 text-red-300'}`}>
+                        {shareResult.msg}
+                    </div>
+                ) : null}
                 <div className="grid gap-3 md:grid-cols-[1fr_220px_auto]">
                     <label className="relative">
                         <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
@@ -363,7 +431,7 @@ export default function ReelsPage() {
 
                                                 <button
                                                     type="button"
-                                                    onClick={() => handleShare(item.id)}
+                                                    onClick={() => handleShare(item)}
                                                     disabled={sharingId === item.id}
                                                     className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50"
                                                     title="Partager"
@@ -413,6 +481,26 @@ export default function ReelsPage() {
                     </div>
                 </div>
             </section>
+
+            <SharePostModal
+                isOpen={Boolean(shareModalItem)}
+                onClose={() => setShareModalItem(null)}
+                title={shareTitle}
+                onTitleChange={setShareTitle}
+                description={shareDescription}
+                onDescriptionChange={setShareDescription}
+                isScheduling={shareScheduling}
+                onSchedulingChange={setShareScheduling}
+                scheduleDate={shareScheduleDate}
+                onScheduleDateChange={setShareScheduleDate}
+                platforms={sharePlatforms}
+                onPlatformChange={(platform, checked) => setSharePlatforms((prev) => ({ ...prev, [platform]: checked }))}
+                connectedPlatforms={connectedPlatforms}
+                isSubmitting={Boolean(shareModalItem && sharingId === shareModalItem.id)}
+                result={shareResult}
+                onSubmit={submitShare}
+                hasLocalCredentials={Boolean(decrypt(globalThis.localStorage.getItem("uploadPostKey_v3") || "") && globalThis.localStorage.getItem("uploadUserId"))}
+            />
 
             {previewItem && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">
