@@ -2,9 +2,10 @@
 Tests unitaires pour la classe VideoEditor.
 
 Lancer avec :
-    pytest test_video_editor.py -v
+    pytest test_editor.py -v
 
 Les appels externes (API Gemini, ffmpeg, ffprobe, système de fichiers)
+sont mockés afin que les tests soient rapides, déterministes et ne
 sont mockés afin que les tests soient rapides, déterministes et ne
 nécessitent ni clé API réelle, ni binaire ffmpeg installé.
 """
@@ -28,7 +29,7 @@ def editor():
     Instancie VideoEditor avec un client Gemini mocké (on patche
     genai.Client pour éviter tout appel réseau réel à la construction).
     """
-    with patch("video_editor.genai.Client") as mock_client_cls:
+    with patch("editor.genai.Client") as mock_client_cls:
         mock_client_cls.return_value = MagicMock()
         ve = VideoEditor(api_key="fake-key")
         yield ve
@@ -51,20 +52,20 @@ def _make_genai_response(payload: dict, wrap_in_markdown: bool = False):
 class TestInit:
     def test_uses_env_model_if_set(self, monkeypatch):
         monkeypatch.setenv("GEMINI_MODEL", "gemini-custom-model")
-        with patch("video_editor.genai.Client") as mock_client_cls:
+        with patch("editor.genai.Client") as mock_client_cls:
             mock_client_cls.return_value = MagicMock()
             ve = VideoEditor(api_key="fake-key")
         assert ve.model_name == "gemini-custom-model"
 
     def test_defaults_to_flash_model_if_env_missing(self, monkeypatch):
         monkeypatch.delenv("GEMINI_MODEL", raising=False)
-        with patch("video_editor.genai.Client") as mock_client_cls:
+        with patch("editor.genai.Client") as mock_client_cls:
             mock_client_cls.return_value = MagicMock()
             ve = VideoEditor(api_key="fake-key")
         assert ve.model_name == "gemini-3.5-flash"
 
     def test_client_constructed_with_api_key(self):
-        with patch("video_editor.genai.Client") as mock_client_cls:
+        with patch("editor.genai.Client") as mock_client_cls:
             VideoEditor(api_key="my-secret-key")
         mock_client_cls.assert_called_once_with(api_key="my-secret-key")
 
@@ -75,7 +76,7 @@ class TestInit:
 
 class TestUploadVideo:
     def test_raises_if_file_does_not_exist(self, editor):
-        with patch("video_editor.os.path.exists", return_value=False):
+        with patch("editor.os.path.exists", return_value=False):
             with pytest.raises(FileNotFoundError):
                 editor.upload_video("does_not_exist.mp4")
 
@@ -88,7 +89,7 @@ class TestUploadVideo:
         fake_file_info.state = "ACTIVE"
         editor.client.files.get.return_value = fake_file_info
 
-        with patch("video_editor.os.path.exists", return_value=True):
+        with patch("editor.os.path.exists", return_value=True):
             result = editor.upload_video("video.mp4")
 
         editor.client.files.upload.assert_called_once_with(file="video.mp4")
@@ -106,8 +107,8 @@ class TestUploadVideo:
 
         editor.client.files.get.side_effect = [processing_info, processing_info, active_info]
 
-        with patch("video_editor.os.path.exists", return_value=True), \
-             patch("video_editor.time.sleep") as mock_sleep:
+        with patch("editor.os.path.exists", return_value=True), \
+             patch("editor.time.sleep") as mock_sleep:
             result = editor.upload_video("video.mp4")
 
         assert result is fake_upload
@@ -123,14 +124,14 @@ class TestUploadVideo:
         failed_info.state = "FAILED"
         editor.client.files.get.return_value = failed_info
 
-        with patch("video_editor.os.path.exists", return_value=True):
+        with patch("editor.os.path.exists", return_value=True):
             with pytest.raises(Exception, match="Video processing failed"):
                 editor.upload_video("video.mp4")
 
     def test_reraises_upload_api_error(self, editor):
         editor.client.files.upload.side_effect = RuntimeError("network down")
 
-        with patch("video_editor.os.path.exists", return_value=True):
+        with patch("editor.os.path.exists", return_value=True):
             with pytest.raises(RuntimeError, match="network down"):
                 editor.upload_video("video.mp4")
 
@@ -395,7 +396,7 @@ class TestSanitizeFilterString:
 
 class TestApplyEdits:
     def test_copies_original_when_no_filter_data(self, editor):
-        with patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data=None)
 
         mock_run.assert_called_once_with(
@@ -403,7 +404,7 @@ class TestApplyEdits:
         )
 
     def test_copies_original_when_filter_string_key_missing(self, editor):
-        with patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data={"something_else": "x"})
 
         mock_run.assert_called_once_with(
@@ -413,8 +414,8 @@ class TestApplyEdits:
     def test_runs_ffmpeg_with_filter_when_probe_succeeds(self, editor):
         filter_data = {"filter_string": "eq=contrast=1.2"}
 
-        with patch("video_editor.subprocess.check_output", return_value=b"1080x1920\n"), \
-             patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.check_output", return_value=b"1080x1920\n"), \
+             patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data)
 
         assert mock_run.called
@@ -432,8 +433,8 @@ class TestApplyEdits:
     def test_falls_back_to_no_geometry_enforcement_when_probe_fails(self, editor):
         filter_data = {"filter_string": "eq=contrast=1.2"}
 
-        with patch("video_editor.subprocess.check_output", side_effect=Exception("ffprobe missing")), \
-             patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.check_output", side_effect=Exception("ffprobe missing")), \
+             patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data)
 
         args, _ = mock_run.call_args
@@ -446,8 +447,8 @@ class TestApplyEdits:
     def test_sanitizes_comparison_operators_before_running(self, editor):
         filter_data = {"filter_string": "enable='t<3'"}
 
-        with patch("video_editor.subprocess.check_output", side_effect=Exception("no ffprobe")), \
-             patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.check_output", side_effect=Exception("no ffprobe")), \
+             patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data)
 
         args, _ = mock_run.call_args
@@ -459,8 +460,8 @@ class TestApplyEdits:
     def test_enforces_zoompan_size_using_probed_resolution(self, editor):
         filter_data = {"filter_string": "zoompan=z='1.1':fps=30:d=1"}
 
-        with patch("video_editor.subprocess.check_output", return_value=b"720x1280\n"), \
-             patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.check_output", return_value=b"720x1280\n"), \
+             patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data)
 
         args, _ = mock_run.call_args
@@ -471,8 +472,8 @@ class TestApplyEdits:
     def test_does_not_duplicate_setsar_if_already_present(self, editor):
         filter_data = {"filter_string": "eq=contrast=1.2,setsar=1"}
 
-        with patch("video_editor.subprocess.check_output", return_value=b"1080x1920\n"), \
-             patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.check_output", return_value=b"1080x1920\n"), \
+             patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data)
 
         args, _ = mock_run.call_args
@@ -483,9 +484,9 @@ class TestApplyEdits:
     def test_raises_when_ffmpeg_execution_fails(self, editor):
         filter_data = {"filter_string": "eq=contrast=1.2"}
 
-        with patch("video_editor.subprocess.check_output", return_value=b"1080x1920\n"), \
+        with patch("editor.subprocess.check_output", return_value=b"1080x1920\n"), \
              patch(
-                 "video_editor.subprocess.run",
+                 "editor.subprocess.run",
                  side_effect=subprocess.CalledProcessError(1, "ffmpeg"),
              ):
             with pytest.raises(subprocess.CalledProcessError):
@@ -494,8 +495,8 @@ class TestApplyEdits:
     def test_output_command_includes_expected_codec_flags(self, editor):
         filter_data = {"filter_string": "eq=contrast=1.2"}
 
-        with patch("video_editor.subprocess.check_output", return_value=b"1080x1920\n"), \
-             patch("video_editor.subprocess.run") as mock_run:
+        with patch("editor.subprocess.check_output", return_value=b"1080x1920\n"), \
+             patch("editor.subprocess.run") as mock_run:
             editor.apply_edits("in.mp4", "out.mp4", filter_data)
 
         args, _ = mock_run.call_args
