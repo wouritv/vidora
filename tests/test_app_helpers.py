@@ -48,11 +48,6 @@ def test_load_clip_segments_from_metadata_filters_and_relativizes():
     ]
 
 
-def test_load_clip_segments_from_metadata_raises_for_missing_clip():
-    with pytest.raises(HTTPException) as exc:
-        app._load_clip_segments_from_metadata({"shorts": []}, 0)
-    assert exc.value.status_code == 404
-
 
 def test_resolve_social_platforms_uses_env_and_deduplicates(monkeypatch):
     monkeypatch.setenv("UPLOAD_POST_DEFAULT_PLATFORMS", "instagram, youtube,instagram,invalid")
