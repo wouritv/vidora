@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from video_editor import VideoEditor
+from editor import VideoEditor
 
 
 # ============================================================
