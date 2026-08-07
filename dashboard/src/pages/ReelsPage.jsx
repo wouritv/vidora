@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Play, Plus, Download, Loader2, Search, Share2, Trash2, X } from "lucide-react";
+import { Play, Plus, Download, Loader2, Search, Share2, Trash2, X, LayoutGrid, List } from "lucide-react";
 import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
@@ -17,11 +17,12 @@ export default function ReelsPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [page, setPage] = useState(1);
-    const [pageSize] = useState(10);
+    const [pageSize] = useState(15);
     const [total, setTotal] = useState(0);
     const [queryInput, setQueryInput] = useState("");
     const [query, setQuery] = useState("");
     const [status, setStatus] = useState("");
+    const [viewMode, setViewMode] = useState("table");
     const [sharingId, setSharingId] = useState("");
     const [shareResult, setShareResult] = useState(null);
     const [shareModalItem, setShareModalItem] = useState(null);
@@ -39,9 +40,23 @@ export default function ReelsPage() {
     const [deletingId, setDeletingId] = useState("");
     const [previewItem, setPreviewItem] = useState(null);
     const [previewUrl, setPreviewUrl] = useState("");
+    const [failedGridPreviewKeys, setFailedGridPreviewKeys] = useState(() => new Set());
     const navigate = useNavigate();
 
     const totalPages = useMemo(() => Math.max(1, Math.ceil(total / pageSize)), [total, pageSize]);
+
+    const resolveReelPreview = (item) => item.reel_preview_url || item.reel_thumbnail_url || item.reel_playback_url || item.reel_url || "";
+    const getGridPreviewKey = (item) => `${item.id || "unknown"}:${resolveReelPreview(item) || "none"}`;
+
+    const handleGridPreviewError = (item) => {
+        const key = getGridPreviewKey(item);
+        setFailedGridPreviewKeys((prev) => {
+            if (prev.has(key)) return prev;
+            const next = new Set(prev);
+            next.add(key);
+            return next;
+        });
+    };
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -99,6 +114,11 @@ export default function ReelsPage() {
             cancelled = true;
         };
     }, [user?.id, page, pageSize, query, status]);
+
+    useEffect(() => {
+        // Reset failed previews when list data changes so newly signed URLs can retry.
+        setFailedGridPreviewKeys(new Set());
+    }, [items]);
 
     const refresh = async () => {
         if (!user?.id) return;
@@ -310,7 +330,7 @@ export default function ReelsPage() {
                         {shareResult.msg}
                     </div>
                 ) : null}
-                <div className="grid gap-3 md:grid-cols-[1fr_220px_auto]">
+                <div className="grid gap-3 md:grid-cols-[1fr_220px_auto_auto]">
                     <label className="relative">
                         <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
                         <input
@@ -342,119 +362,219 @@ export default function ReelsPage() {
                     >
                         Rafraichir
                     </button>
+
+                    <div className="inline-flex rounded-xl border border-white/10 bg-black/30 p-1">
+                        <button
+                            type="button"
+                            onClick={() => setViewMode("table")}
+                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "table" ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
+                            title="Vue tableau"
+                        >
+                            <List size={14} /> Tableau
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setViewMode("grid")}
+                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "grid" ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
+                            title="Vue grille"
+                        >
+                            <LayoutGrid size={14} /> Grille
+                        </button>
+                    </div>
                 </div>
 
-                <div className="overflow-x-auto">
-                    <table className="min-w-full text-sm">
-                        <thead>
-                            <tr className="border-b border-white/10 text-left text-zinc-400">
-                                <th className="px-3 py-3 font-medium">Reel</th>
-                                <th className="px-3 py-3 font-medium">Description</th>
-                                <th className="px-3 py-3 font-medium">Duree</th>
-                                <th className="px-3 py-3 font-medium">Statut</th>
-                                <th className="px-3 py-3 font-medium">Cree le</th>
-                                <th className="px-3 py-3 font-medium text-right">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {loading && (
-                                <tr>
-                                    <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">
-                                        <span className="inline-flex items-center gap-2">
-                                            <Loader2 size={14} className="animate-spin" /> Chargement...
-                                        </span>
-                                    </td>
+                {viewMode === "table" ? (
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                            <thead>
+                                <tr className="border-b border-white/10 text-left text-zinc-400">
+                                    <th className="px-3 py-3 font-medium">Reel</th>
+                                    <th className="px-3 py-3 font-medium">Description</th>
+                                    <th className="px-3 py-3 font-medium">Duree</th>
+                                    <th className="px-3 py-3 font-medium">Statut</th>
+                                    <th className="px-3 py-3 font-medium">Cree le</th>
+                                    <th className="px-3 py-3 font-medium text-right">Actions</th>
                                 </tr>
-                            )}
-
-                            {!loading && error && (
-                                <tr>
-                                    <td colSpan={6} className="px-3 py-10 text-center text-red-300">
-                                        {error}
-                                    </td>
-                                </tr>
-                            )}
-
-                            {!loading && !error && items.length === 0 && (
-                                <tr>
-                                    <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">
-                                        Aucun reel trouve.
-                                    </td>
-                                </tr>
-                            )}
-
-                            {!loading && !error &&
-                                items.map((item) => (
-                                    <tr key={item.id} className="border-b border-white/5 align-top">
-                                        <td className="px-3 py-3">
-                                            {item.reel_thumbnail_url ? (
-                                                <img
-                                                    src={item.reel_thumbnail_url}
-                                                    alt={item.reel_title || "thumbnail"}
-                                                    className="mb-2 h-16 w-10 rounded-md object-cover border border-white/10"
-                                                />
-                                            ) : null}
-                                            <p className="font-semibold text-white line-clamp-2">{item.reel_title || "Sans titre"}</p>
-                                            <p className="mt-1 text-xs text-zinc-500">ID: {item.id}</p>
-                                        </td>
-                                        <td className="px-3 py-3 text-zinc-300 max-w-md">
-                                            <p className="line-clamp-3">{item.reel_description || "-"}</p>
-                                        </td>
-                                        <td className="px-3 py-3 text-zinc-300">{item.reel_duration ? `${item.reel_duration}s` : "-"}</td>
-                                        <td className="px-3 py-3">
-                                            <span className={`inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.reel_status)}`}>
-                                                {statusLabel(item.reel_status)}
+                            </thead>
+                            <tbody>
+                                {loading && (
+                                    <tr>
+                                        <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">
+                                            <span className="inline-flex items-center gap-2">
+                                                <Loader2 size={14} className="animate-spin" /> Chargement...
                                             </span>
                                         </td>
-                                        <td className="px-3 py-3 text-zinc-400">
-                                            {item.reel_created_at ? new Date(item.reel_created_at).toLocaleString() : "-"}
+                                    </tr>
+                                )}
+
+                                {!loading && error && (
+                                    <tr>
+                                        <td colSpan={6} className="px-3 py-10 text-center text-red-300">
+                                            {error}
                                         </td>
-                                        <td className="px-3 py-3">
-                                            <div className="flex items-center justify-end gap-2">
+                                    </tr>
+                                )}
+
+                                {!loading && !error && items.length === 0 && (
+                                    <tr>
+                                        <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">
+                                            Aucun reel trouve.
+                                        </td>
+                                    </tr>
+                                )}
+
+                                {!loading && !error &&
+                                    items.map((item) => (
+                                        <tr key={item.id} className="border-b border-white/5 align-top">
+                                            <td className="px-3 py-3">
+                                                <p className="font-semibold text-white line-clamp-2">{item.reel_title || "Sans titre"}</p>
+                                                <p className="mt-1 text-xs text-zinc-500">ID: {item.id}</p>
+                                            </td>
+                                            <td className="px-3 py-3 text-zinc-300 max-w-md">
+                                                <p className="line-clamp-3">{item.reel_description || "-"}</p>
+                                            </td>
+                                            <td className="px-3 py-3 text-zinc-300">{item.reel_duration ? `${item.reel_duration}s` : "-"}</td>
+                                            <td className="px-3 py-3">
+                                                <span className={`inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.reel_status)}`}>
+                                                    {statusLabel(item.reel_status)}
+                                                </span>
+                                            </td>
+                                            <td className="px-3 py-3 text-zinc-400">
+                                                {item.reel_created_at ? new Date(item.reel_created_at).toLocaleString() : "-"}
+                                            </td>
+                                            <td className="px-3 py-3">
+                                                <div className="flex items-center justify-end gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handlePreview(item)}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                                        title="Visualiser"
+                                                    >
+                                                        <Play size={14} />
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleDownload(item.id)}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                                        title="Telecharger"
+                                                    >
+                                                        <Download size={14} />
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleShare(item)}
+                                                        disabled={sharingId === item.id}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50"
+                                                        title="Partager"
+                                                    >
+                                                        {sharingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleDelete(item.id)}
+                                                        disabled={deletingId === item.id}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                                                        title="Supprimer"
+                                                    >
+                                                        {deletingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                            </tbody>
+                        </table>
+                    </div>
+                ) : (
+                    <div>
+                        {loading ? (
+                            <div className="px-3 py-10 text-center text-zinc-400">
+                                <span className="inline-flex items-center gap-2">
+                                    <Loader2 size={14} className="animate-spin" /> Chargement...
+                                </span>
+                            </div>
+                        ) : null}
+
+                        {!loading && error ? <div className="px-3 py-10 text-center text-red-300">{error}</div> : null}
+
+                        {!loading && !error && items.length === 0 ? (
+                            <div className="px-3 py-10 text-center text-zinc-400">Aucun reel trouve.</div>
+                        ) : null}
+
+                        {!loading && !error && items.length > 0 ? (
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                                {items.map((item) => (
+                                    <article key={item.id} className="group overflow-hidden rounded-2xl border border-white/10 bg-white/5">
+                                        <div className="relative aspect-video bg-black/40">
+                                            {resolveReelPreview(item) && !failedGridPreviewKeys.has(getGridPreviewKey(item)) ? (
+                                                <img
+                                                    src={resolveReelPreview(item)}
+                                                    alt={item.reel_title || "thumbnail"}
+                                                    className="h-full w-full object-cover"
+                                                    onError={() => handleGridPreviewError(item)}
+                                                />
+                                            ) : (
+                                                <div className="flex h-full w-full items-center justify-center text-zinc-500">Apercu indisponible</div>
+                                            )}
+
+                                            <span className={`absolute right-2 top-2 inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.reel_status)}`}>
+                                                {statusLabel(item.reel_status)}
+                                            </span>
+
+                                            <div className="absolute inset-x-2 bottom-2 flex translate-y-2 items-center justify-center gap-2 opacity-0 transition group-hover:translate-y-0 group-hover:opacity-100">
                                                 <button
                                                     type="button"
                                                     onClick={() => handlePreview(item)}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
                                                     title="Visualiser"
                                                 >
                                                     <Play size={14} />
                                                 </button>
-
                                                 <button
                                                     type="button"
                                                     onClick={() => handleDownload(item.id)}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
                                                     title="Telecharger"
                                                 >
                                                     <Download size={14} />
                                                 </button>
-
                                                 <button
                                                     type="button"
                                                     onClick={() => handleShare(item)}
                                                     disabled={sharingId === item.id}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50"
+                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/40 bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50"
                                                     title="Partager"
                                                 >
                                                     {sharingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
                                                 </button>
-
                                                 <button
                                                     type="button"
                                                     onClick={() => handleDelete(item.id)}
                                                     disabled={deletingId === item.id}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/40 bg-red-500/20 text-red-300 hover:bg-red-500/30 disabled:opacity-50"
                                                     title="Supprimer"
                                                 >
                                                     {deletingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
                                                 </button>
                                             </div>
-                                        </td>
-                                    </tr>
+                                        </div>
+
+                                        <div className="space-y-2 p-3">
+                                            <p className="line-clamp-2 text-sm font-semibold text-white">{item.reel_title || "Sans titre"}</p>
+                                            <p className="line-clamp-2 text-xs text-zinc-400">{item.reel_description || "-"}</p>
+                                            <p className="text-xs text-zinc-500">
+                                                {item.reel_duration ? `${item.reel_duration}s` : "-"} • {item.reel_created_at ? new Date(item.reel_created_at).toLocaleString() : "-"}
+                                            </p>
+                                        </div>
+                                    </article>
                                 ))}
-                        </tbody>
-                    </table>
-                </div>
+                            </div>
+                        ) : null}
+                    </div>
+                )}
 
                 <div className="flex items-center justify-between border-t border-white/10 pt-4 text-sm">
                     <p className="text-zinc-400">{total} reel(s)</p>

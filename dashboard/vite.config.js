@@ -16,8 +16,9 @@ export default defineConfig({
   },
   server: {
     allowedHosts: [
-      'Vireel.app',
-      'www.Vireel.app'
+      'vireel.co',
+      'www.vireel.co',
+      'demo.vireel.co',
     ],
     proxy: {
       '/api': {

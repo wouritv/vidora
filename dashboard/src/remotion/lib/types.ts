@@ -14,24 +14,36 @@ export type SubtitleAnimation =
   | "word-highlight"
   | "pop"
   | "karaoke"
+  | "fade-in-out"
+  | "zoom-in-out"
+  | "slide-in-out"
+  | "rotate-in-out"
   | "emoticon";
-export type SubtitlePosition = "top" | "middle" | "bottom";
 
 export interface SubtitleStyle {
+  positionX: number;
+  positionY: number;
   fontFamily: string;
   fontSize: number;
   fontColor: string;
   highlightColor: string;
   borderColor: string;
   borderWidth: number;
+  textShadowColor: string;
+  shadowBlur: number;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
   bgColor: string;
   bgOpacity: number;
+  textCase: "none" | "uppercase" | "lowercase";
+  bold: boolean;
+  italic: boolean;
+  wordsPerLine: number;
   animation: SubtitleAnimation;
 }
 
 export interface SubtitleConfig {
   captions: CaptionWord[];
-  position: SubtitlePosition;
   style: SubtitleStyle;
 }
 
@@ -84,27 +96,40 @@ export const captionWordSchema = z.object({
 });
 
 export const subtitleStyleSchema = z.object({
+  positionX: z.number().min(0).max(100),
+  positionY: z.number().min(0).max(100),
   fontFamily: z.string(),
   fontSize: z.number(),
   fontColor: z.string(),
   highlightColor: z.string(),
   borderColor: z.string(),
   borderWidth: z.number(),
+  textShadowColor: z.string(),
+  shadowBlur: z.number(),
+  shadowOffsetX: z.number(),
+  shadowOffsetY: z.number(),
   bgColor: z.string(),
   bgOpacity: z.number().min(0).max(1),
+  textCase: z.enum(["none", "uppercase", "lowercase"]),
+  bold: z.boolean(),
+  italic: z.boolean(),
+  wordsPerLine: z.number().int().min(2).max(8),
   animation: z.enum([
     "none",
     "active-color",
     "word-highlight",
     "pop",
     "karaoke",
+    "fade-in-out",
+    "zoom-in-out",
+    "slide-in-out",
+    "rotate-in-out",
     "emoticon",
   ]),
 });
 
 export const subtitleConfigSchema = z.object({
   captions: z.array(captionWordSchema),
-  position: z.enum(["top", "middle", "bottom"]),
   style: subtitleStyleSchema,
 });
 

@@ -40,15 +40,24 @@ const LANGUAGES = {
 
 export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, jobId, clipIndex, existingHook, existingEffects }) {
     const previewCacheRef = useRef({});
-    const [position, setPosition] = useState(DEFAULT_SUBTITLE_FORM_STYLE.position);
+    const [positionX, setPositionX] = useState(DEFAULT_SUBTITLE_FORM_STYLE.positionX);
+    const [positionY, setPositionY] = useState(DEFAULT_SUBTITLE_FORM_STYLE.positionY);
     const [fontSize, setFontSize] = useState(DEFAULT_SUBTITLE_FORM_STYLE.fontSize);
     const [fontName, setFontName] = useState(DEFAULT_SUBTITLE_FORM_STYLE.fontName);
     const [fontColor, setFontColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.fontColor);
     const [highlightColor, setHighlightColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.highlightColor);
     const [borderColor, setBorderColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.borderColor);
     const [borderWidth, setBorderWidth] = useState(DEFAULT_SUBTITLE_FORM_STYLE.borderWidth);
+    const [textShadowColor, setTextShadowColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.textShadowColor);
+    const [shadowBlur, setShadowBlur] = useState(DEFAULT_SUBTITLE_FORM_STYLE.shadowBlur);
+    const [shadowOffsetX, setShadowOffsetX] = useState(DEFAULT_SUBTITLE_FORM_STYLE.shadowOffsetX);
+    const [shadowOffsetY, setShadowOffsetY] = useState(DEFAULT_SUBTITLE_FORM_STYLE.shadowOffsetY);
     const [bgColor, setBgColor] = useState(DEFAULT_SUBTITLE_FORM_STYLE.bgColor);
     const [bgOpacity, setBgOpacity] = useState(DEFAULT_SUBTITLE_FORM_STYLE.bgOpacity);
+    const [textCase, setTextCase] = useState(DEFAULT_SUBTITLE_FORM_STYLE.textCase);
+    const [bold, setBold] = useState(DEFAULT_SUBTITLE_FORM_STYLE.bold);
+    const [italic, setItalic] = useState(DEFAULT_SUBTITLE_FORM_STYLE.italic);
+    const [wordsPerLine, setWordsPerLine] = useState(DEFAULT_SUBTITLE_FORM_STYLE.wordsPerLine);
     const [animation, setAnimation] = useState(DEFAULT_SUBTITLE_FORM_STYLE.animation);
     const [showTextEditor, setShowTextEditor] = useState(false);
 
@@ -228,16 +237,25 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     // Build subtitle config for Remotion
     const subtitleConfig = {
         captions: effectiveCaptions,
-        position,
         style: {
+            positionX,
+            positionY,
             fontFamily: fontName,
             fontSize: fontSize * 2.2, // Scale up for 1080p (modal fontSize is for small preview)
             fontColor,
             highlightColor,
             borderColor,
             borderWidth: borderWidth * 1.5,
+            textShadowColor,
+            shadowBlur,
+            shadowOffsetX,
+            shadowOffsetY,
             bgColor,
             bgOpacity,
+            textCase,
+            bold,
+            italic,
+            wordsPerLine,
             animation,
         },
     };
@@ -256,12 +274,15 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
         fontFamily: fontName,
         color: fontColor,
         fontSize: `${fontSize}px`,
-        fontWeight: 'bold',
+        fontWeight: bold ? 700 : 500,
+        fontStyle: italic ? 'italic' : 'normal',
+        textTransform: textCase === 'uppercase' ? 'uppercase' : textCase === 'lowercase' ? 'lowercase' : 'none',
         maxWidth: '85%',
         padding: '6px 12px',
         borderRadius: '4px',
         textAlign: 'center',
         lineHeight: '1.3',
+        boxShadow: `0 0 ${shadowBlur}px ${textShadowColor}`,
         ...(bgOpacity > 0
             ? {
                 backgroundColor: `${bgColor}${Math.round(bgOpacity * 255).toString(16).padStart(2, '0')}`,
@@ -270,6 +291,15 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
             : { textShadow: outlineShadow }
         ),
     };
+
+    const previewWords = effectiveCaptions.length > 0
+        ? effectiveCaptions.map((caption) => caption.text)
+        : ['This', 'is', 'how', 'your', 'subtitles', 'will', 'appear', 'on', 'the', 'video'];
+    const previewWordsPerLine = Math.min(8, Math.max(2, Number(wordsPerLine) || 4));
+    const fallbackPreviewLines = [];
+    for (let i = 0; i < previewWords.length; i += previewWordsPerLine) {
+        fallbackPreviewLines.push(previewWords.slice(i, i + previewWordsPerLine).join(' '));
+    }
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
@@ -299,14 +329,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                     ) : (
                         <>
                             <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
-                            <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col items-center justify-center
-                                ${position === 'top' ? 'top-20' : ''}
-                                ${position === 'middle' ? 'top-0 bottom-0' : ''}
-                                ${position === 'bottom' ? 'bottom-20' : ''}
-                            `}>
-                                <span style={fallbackPreviewStyle}>
-                                    This is how your subtitles<br/>will appear on the video
-                                </span>
+                            <div className="absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col items-center justify-center" style={{ left: `${positionX}%`, top: `${positionY}%`, transform: 'translate(-50%, -50%)' }}>
+                                <div className="flex flex-col items-center gap-1.5" style={{ maxWidth: '85%' }}>
+                                    {fallbackPreviewLines.map((line, index) => (
+                                        <span key={`${line}-${index}`} style={fallbackPreviewStyle}>
+                                            {line}
+                                        </span>
+                                    ))}
+                                </div>
                             </div>
                         </>
                     )}
@@ -381,20 +411,80 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                             {previewError}
                                         </div>
                                     ) : null}
+                                    {!previewError && previewProviders.length > 0 ? (
+                                        <p className="text-[11px] text-zinc-500">
+                                            Provider: {previewProviders.join(', ')}
+                                        </p>
+                                    ) : null}
                                 </div>
                             ) : null}
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Position</label>
-                            <div className="grid grid-cols-3 gap-2">
-                                {['top', 'middle', 'bottom'].map((pos) => (
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Position libre (X/Y)</label>
+                            <div className="space-y-3 rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                                <div>
+                                    <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1">
+                                        <span>X</span>
+                                        <span>{positionX}%</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="5"
+                                        max="95"
+                                        value={positionX}
+                                        onChange={(e) => setPositionX(Number(e.target.value))}
+                                        className="w-full accent-primary"
+                                    />
+                                </div>
+                                <div>
+                                    <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1">
+                                        <span>Y</span>
+                                        <span>{positionY}%</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="5"
+                                        max="95"
+                                        value={positionY}
+                                        onChange={(e) => setPositionY(Number(e.target.value))}
+                                        className="w-full accent-primary"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Style du texte</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setBold((v) => !v)}
+                                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${bold ? 'border-primary bg-primary/20 text-white' : 'border-white/10 bg-white/5 text-zinc-400'}`}
+                                >
+                                    Gras
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setItalic((v) => !v)}
+                                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${italic ? 'border-primary bg-primary/20 text-white' : 'border-white/10 bg-white/5 text-zinc-400'}`}
+                                >
+                                    Italique
+                                </button>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 mt-2">
+                                {[
+                                    { value: 'none', label: 'Normal' },
+                                    { value: 'uppercase', label: 'MAJ' },
+                                    { value: 'lowercase', label: 'min' },
+                                ].map((opt) => (
                                     <button
-                                        key={pos}
-                                        onClick={() => setPosition(pos)}
-                                        className={`p-2 rounded-lg border text-center text-xs font-medium transition-all ${position === pos ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                        key={opt.value}
+                                        type="button"
+                                        onClick={() => setTextCase(opt.value)}
+                                        className={`rounded-lg border px-2 py-2 text-xs ${textCase === opt.value ? 'border-primary bg-primary/20 text-white' : 'border-white/10 bg-white/5 text-zinc-400'}`}
                                     >
-                                        {pos.charAt(0).toUpperCase() + pos.slice(1)}
+                                        {opt.label}
                                     </button>
                                 ))}
                             </div>
@@ -523,6 +613,30 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                             </div>
                         </div>
 
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Couleur de l'ombre</label>
+                            <div className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                                <label className="relative w-8 h-8 rounded-lg border border-white/10 cursor-pointer overflow-hidden shrink-0" title="Shadow color">
+                                    <div className="w-full h-full" style={{ backgroundColor: textShadowColor }} />
+                                    <input type="color" value={textShadowColor} onChange={(e) => setTextShadowColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
+                                </label>
+                                <div className="flex-1 grid grid-cols-3 gap-2 text-[10px] text-zinc-500">
+                                    <div>
+                                        <div className="mb-1 text-zinc-400">Blur {shadowBlur}px</div>
+                                        <input type="range" min="0" max="24" value={shadowBlur} onChange={(e) => setShadowBlur(Number(e.target.value))} className="w-full accent-primary" />
+                                    </div>
+                                    <div>
+                                        <div className="mb-1 text-zinc-400">Offset X {shadowOffsetX}px</div>
+                                        <input type="range" min="-20" max="20" value={shadowOffsetX} onChange={(e) => setShadowOffsetX(Number(e.target.value))} className="w-full accent-primary" />
+                                    </div>
+                                    <div>
+                                        <div className="mb-1 text-zinc-400">Offset Y {shadowOffsetY}px</div>
+                                        <input type="range" min="-20" max="20" value={shadowOffsetY} onChange={(e) => setShadowOffsetY(Number(e.target.value))} className="w-full accent-primary" />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         {/* Border / Outline */}
                         <div>
                             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Border</label>
@@ -545,6 +659,24 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         <span>Thick</span>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">
+                                Mots par ligne <span className="text-zinc-500 normal-case font-normal">({wordsPerLine})</span>
+                            </label>
+                            <input
+                                type="range"
+                                min="2"
+                                max="8"
+                                value={wordsPerLine}
+                                onChange={(e) => setWordsPerLine(Number(e.target.value))}
+                                className="w-full accent-primary"
+                            />
+                            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
+                                <span>2</span>
+                                <span>8</span>
                             </div>
                         </div>
 
@@ -586,7 +718,10 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                     <button
                         onClick={() => onGenerate({
-                            position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
+                            positionX, positionY, fontSize, fontName, fontColor, borderColor, borderWidth,
+                            textShadowColor, shadowBlur, shadowOffsetX, shadowOffsetY,
+                            bgColor, bgOpacity, textCase, bold, italic, wordsPerLine, animation,
+                            highlightColor,
                             targetLanguage: translationEnabled ? targetLanguage : null,
                             translatedCaptions: translationEnabled ? translatedPreviewCaptions : [],
                             previewDurationSec: translationEnabled ? durationSec : null,

@@ -16,15 +16,12 @@ interface SubtitlesProps {
   config: SubtitleConfig;
 }
 
-const POSITION_MAP: Record<string, React.CSSProperties> = {
-  top: { top: "12%", bottom: "auto" },
-  middle: { top: "45%", bottom: "auto" },
-  bottom: { bottom: "10%", top: "auto" },
-};
-
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
   const { fps } = useVideoConfig();
-  const blocks = groupCaptionsIntoBlocks(config.captions);
+  const blocks = groupCaptionsIntoBlocks(config.captions, {
+    maxChars: Math.max(10, config.style.wordsPerLine * 7),
+    maxWords: config.style.wordsPerLine,
+  });
 
   return (
     <AbsoluteFill>
@@ -67,13 +64,12 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const { style, position } = config;
+  const { style } = config;
 
   // Current time relative to composition start (sequence-relative frame)
   const currentTimeMs = blockStartMs + (frame / fps) * 1000;
   const activeIndex = getActiveWordIndex(block.words, currentTimeMs);
 
-  const positionStyle = POSITION_MAP[position] ?? POSITION_MAP.bottom;
   const fontStack = getFontStack(style.fontFamily);
 
   // Background box style
@@ -92,11 +88,11 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
     <div
       style={{
         position: "absolute",
-        left: 0,
-        right: 0,
+        left: `${style.positionX}%`,
+        top: `${style.positionY}%`,
+        transform: "translate(-50%, -50%)",
         display: "flex",
         justifyContent: "center",
-        ...positionStyle,
       }}
     >
       <div
@@ -165,10 +161,23 @@ const WordSpan: React.FC<WordSpanProps> = ({
   const emojiScale = interpolate(emojiSpring, [0, 1], [0.75, 1.12]);
   const emojiOpacity = interpolate(emojiSpring, [0, 1], [0, 1]);
   const emojiRise = interpolate(emojiSpring, [0, 1], [10, -6]);
+  const wordLife = spring({
+    frame: frame - wordStartFrame,
+    fps,
+    config: { mass: 0.6, stiffness: 220, damping: 18 },
+    durationInFrames: 18,
+  });
 
   let transform = "";
   let color = style.fontColor;
   let extraStyle: React.CSSProperties = {};
+  let opacity = 1;
+  let displayWord = word;
+  if (style.textCase === "uppercase") {
+    displayWord = word.toUpperCase();
+  } else if (style.textCase === "lowercase") {
+    displayWord = word.toLowerCase();
+  }
 
   if (isActive) {
     color = style.highlightColor;
@@ -209,6 +218,27 @@ const WordSpan: React.FC<WordSpanProps> = ({
         });
         const scaleValue = interpolate(scale, [0, 1], [1, 1.12]);
         transform = `scale(${scaleValue})`;
+        break;
+      }
+      case "fade-in-out": {
+        opacity = interpolate(wordLife, [0, 1], [0.3, 1]);
+        break;
+      }
+      case "zoom-in-out": {
+        const scaleValue = interpolate(wordLife, [0, 1], [0.88, 1.12]);
+        transform = `scale(${scaleValue})`;
+        break;
+      }
+      case "slide-in-out": {
+        const slide = interpolate(wordLife, [0, 1], [12, 0]);
+        transform = `translateY(${slide}px)`;
+        opacity = interpolate(wordLife, [0, 1], [0.4, 1]);
+        break;
+      }
+      case "rotate-in-out": {
+        const rot = interpolate(wordLife, [0, 1], [-8, 0]);
+        transform = `rotate(${rot}deg)`;
+        opacity = interpolate(wordLife, [0, 1], [0.4, 1]);
         break;
       }
       default:
@@ -255,19 +285,27 @@ const WordSpan: React.FC<WordSpanProps> = ({
         style={{
           fontFamily: fontStack,
           fontSize: style.fontSize,
-          fontWeight: 700,
+          fontWeight: style.bold ? 700 : 500,
+          fontStyle: style.italic ? "italic" : "normal",
           color: animation === "karaoke" && isActive ? undefined : color,
           textShadow:
             animation === "karaoke"
               ? strokeShadow
-              : [strokeShadow, extraStyle.textShadow].filter(Boolean).join(", "),
+              : [
+                  strokeShadow,
+                  `${style.shadowOffsetX}px ${style.shadowOffsetY}px ${style.shadowBlur}px ${style.textShadowColor}`,
+                  extraStyle.textShadow,
+                ]
+                  .filter(Boolean)
+                  .join(", "),
           transform,
+          opacity,
           display: "inline-block",
           transition: "none",
           ...extraStyle,
         }}
       >
-        {word}
+        {displayWord}
       </span>
     </span>
   );

@@ -8,6 +8,7 @@ import shutil
 import glob
 import time
 import asyncio
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any
 from contextlib import asynccontextmanager
@@ -19,6 +20,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
+try:
+    import stripe
+except ImportError:  # pragma: no cover - optional at import time
+    stripe = None
 from s3_uploader import (
     list_all_clips,
     upload_actor_to_s3,
@@ -38,6 +43,9 @@ from supabase_request import (
     is_supabase_configured,
     list_abonnements as supabase_list_abonnements,
     get_user_abonnement,
+    get_abonnement as supabase_get_abonnement,
+    insert_souscription as supabase_insert_souscription,
+    get_souscription_by_reference as supabase_get_souscription_by_reference,
 )
 
 load_dotenv()
@@ -56,6 +64,14 @@ JOB_RETENTION_SECONDS = 3600  # 1 hour retention
 OUTPUT_SWEEP_INTERVAL_SECONDS = int(os.environ.get("OUTPUT_SWEEP_INTERVAL_SECONDS", str(6 * 3600)))
 OUTPUT_SWEEP_MIN_AGE_SECONDS = int(os.environ.get("OUTPUT_SWEEP_MIN_AGE_SECONDS", "1800"))
 DISABLE_YOUTUBE_URL = os.environ.get("DISABLE_YOUTUBE_URL", "false").lower() in ("1", "true", "yes")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_CURRENCY = os.environ.get("STRIPE_CURRENCY", "eur").lower()
+STRIPE_SUCCESS_URL = os.environ.get("STRIPE_SUCCESS_URL", "")
+STRIPE_CANCEL_URL = os.environ.get("STRIPE_CANCEL_URL", "")
+
+if stripe and STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
 # Application State
 job_queue = asyncio.Queue()
@@ -352,11 +368,142 @@ def _reel_media_url_from_s3_key(s3_key: str) -> str:
     return generate_presigned_url(bucket, s3_key, expiration=7200) or ""
 
 
+def _reel_thumbnail_url_from_s3_key(s3_key: str) -> str:
+    if not s3_key:
+        return ""
+    bucket = os.environ.get("AWS_S3_BUCKET", "")
+    if not bucket:
+        return ""
+    return generate_presigned_url(bucket, s3_key, expiration=7200) or ""
+
+
+def _extract_s3_key_from_thumbnail_ref(thumbnail_ref: str) -> str:
+    """Accept raw S3 keys or s3://bucket/key refs and return object key only."""
+    ref = (thumbnail_ref or "").strip()
+    if not ref:
+        return ""
+    if ref.startswith("s3://"):
+        without_scheme = ref[5:]
+        parts = without_scheme.split("/", 1)
+        if len(parts) == 2:
+            return parts[1]
+        return ""
+    if ref.startswith("reels/"):
+        return ref
+    return ""
+
+
+""" def _upload_thumbnail_for_reel(
+    thumbnail_ref: str,
+    output_dir: str,
+    bucket: str,
+    user_id: str,
+    job_id: str,
+    clip_index: int,
+) -> str:
+     """"""Best-effort thumbnail upload to S3. Returns S3 key when upload succeeds. """"""
+    existing_key = _extract_s3_key_from_thumbnail_ref(thumbnail_ref)
+    if existing_key:
+        return existing_key
+
+    ref = (thumbnail_ref or "").strip()
+    if not ref:
+        return ""
+
+    local_path = ""
+    cleanup_temp = ""
+    try:
+        if ref.startswith("http://") or ref.startswith("https://"):
+            parsed = urlparse(ref)
+            ext = os.path.splitext(unquote(parsed.path or ""))[1] or ".jpg"
+            temp_name = f"thumb_{clip_index + 1}{ext}"
+            temp_path = os.path.join(output_dir, temp_name)
+            req = UrlRequest(ref, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req, timeout=20) as resp, open(temp_path, "wb") as out:
+                out.write(resp.read())
+            local_path = temp_path
+            cleanup_temp = temp_path
+        elif os.path.isabs(ref) and os.path.exists(ref):
+            local_path = ref
+        elif os.path.exists(os.path.join(output_dir, ref)):
+            local_path = os.path.join(output_dir, ref)
+        else:
+            return ""
+
+        ext = os.path.splitext(local_path)[1] or ".jpg"
+        s3_key = f"reels/{user_id}/{job_id}/thumb_{clip_index + 1}{ext}"
+        uploaded = upload_file_to_s3(local_path, bucket, s3_key)
+        return s3_key if uploaded else ""
+    except Exception:
+        return ""
+    finally:
+        if cleanup_temp and os.path.exists(cleanup_temp):
+            try:
+                os.remove(cleanup_temp)
+            except Exception:
+                pass """
+
+
+def _generate_reel_thumbnail_from_video(
+    video_path: str,
+    output_dir: str,
+    job_id: str,
+    clip_index: int,
+) -> str:
+    """Extract a representative frame from a clip and save it as a JPEG thumbnail."""
+    if not video_path or not os.path.exists(video_path):
+        return ""
+
+    thumb_dir = os.path.join(output_dir, "thumbnails", job_id)
+    os.makedirs(thumb_dir, exist_ok=True)
+    thumb_path = os.path.join(thumb_dir, f"thumb_{clip_index + 1}.jpg")
+
+    cap = None
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return ""
+
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if frame_count > 0:
+            target_frame = max(0, min(frame_count - 1, frame_count // 5))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = cap.read()
+
+        if not ok or frame is None:
+            return ""
+
+        if cv2.imwrite(thumb_path, frame):
+            return thumb_path
+        return ""
+    except Exception:
+        return ""
+    finally:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+
 def _normalize_reel_row(row: Dict[str, Any]) -> Dict[str, Any]:
     media_url = _reel_media_url_from_s3_key(row.get("reel_s3_key") or "") or row.get("reel_url") or ""
+    thumbnail_ref = row.get("reel_thumbnail_url") or row.get("reel_thumbnail_s3_key") or ""
+    thumbnail_s3_key = _extract_s3_key_from_thumbnail_ref(thumbnail_ref)
+    thumbnail_url = _reel_thumbnail_url_from_s3_key(thumbnail_s3_key) or thumbnail_ref or ""
+    preview_url = thumbnail_url or media_url
+
     return {
         **row,
         "reel_url": media_url or row.get("reel_url") or "",
+        "reel_thumbnail_url": thumbnail_url,
+        "reel_preview_url": preview_url,
         "reel_playback_url": media_url,
         "reel_download_url": media_url,
         "media_url": media_url,
@@ -395,6 +542,22 @@ async def _persist_reels_for_job(
             raise RuntimeError(f"Failed to upload clip to S3: {clip_filename}")
 
         media_url = _reel_media_url_from_s3_key(s3_key)
+        source_thumbnail = clip.get("thumbnail_url") or ""
+        if not source_thumbnail:
+            source_thumbnail = _generate_reel_thumbnail_from_video(
+                clip_path,
+                output_dir,
+                job_id,
+                i - 1,
+            )
+
+        print("🖼️ Uploading thumbnail for clip", i, "from source:", source_thumbnail)
+
+        thumbnail_s3_key = f"reels/{user_id}/{job_id}/thumbnail.jpg"
+        uploaded_thumb = upload_file_to_s3(source_thumbnail, bucket, thumbnail_s3_key)
+        if not uploaded_thumb:
+                    raise RuntimeError(f"Failed to upload thumbnail to S3: {thumbnail_s3_key}")
+
         duration = clip.get("duration")
         if duration is None:
             try:
@@ -407,7 +570,7 @@ async def _persist_reels_for_job(
         rows.append(
             {
                 "reel_url": media_url,
-                "reel_thumbnail_url": clip.get("thumbnail_url") or "",
+                "reel_thumbnail_url": _reel_media_url_from_s3_key(thumbnail_s3_key),
                 "reel_title": clip.get("title") or clip.get("video_title_for_youtube_short") or f"Clip {i}",
                 "reel_description": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or "",
                 "reel_duration": max(30, int(duration or 0)),
@@ -914,7 +1077,7 @@ async def get_status(job_id: str):
     return response
 
 from editor import VideoEditor
-from subtitles import generate_srt, burn_subtitles, generate_srt_from_video
+from subtitles import generate_srt, burn_subtitles, generate_srt_from_video, SubtitleStyleOptions
 from hooks import add_hook_to_video
 #from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
@@ -1104,15 +1267,26 @@ class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int
     position: str = "bottom" # top, middle, bottom
+    position_x: float = 50.0
+    position_y: float = 82.0
     font_size: int = 16
     font_name: str = "Verdana"
     font_color: str = "#FFFFFF"
+    highlight_color: str = "#FFDD00"
     border_color: str = "#000000"
     border_width: int = 2
+    text_shadow_color: str = "#000000"
+    shadow_blur: int = 6
+    shadow_offset_x: int = 0
+    shadow_offset_y: int = 2
     bg_color: str = "#000000"
     bg_opacity: float = 0.0
+    text_case: str = "none"
+    bold: bool = True
+    italic: bool = False
+    words_per_line: int = 4
+    animation: str = "pop"
     input_filename: Optional[str] = None
-    input_url: Optional[str] = None
     input_url: Optional[str] = None
 
 
@@ -1364,15 +1538,23 @@ async def add_subtitles(req: SubtitleRequest):
         # Check if this is a dubbed video - if so, transcribe it fresh
         is_dubbed = filename.startswith("translated_")
 
+        words_per_line = max(2, min(8, int(req.words_per_line or 4)))
+
         if is_dubbed:
             print(f"🎙️ Dubbed video detected, transcribing audio for subtitles...")
             def run_transcribe_srt():
-                return generate_srt_from_video(input_path, srt_path)
+                return generate_srt_from_video(input_path, srt_path, max_words_per_line=words_per_line)
 
             loop = asyncio.get_event_loop()
             success = await loop.run_in_executor(None, run_transcribe_srt)
         else:
-            success = generate_srt(transcript, clip_data['start'], clip_data['end'], srt_path)
+            success = generate_srt(
+                transcript,
+                clip_data['start'],
+                clip_data['end'],
+                srt_path,
+                max_words_per_line=words_per_line,
+            )
 
         if not success:
              raise HTTPException(status_code=400, detail="No words found for this clip range.")
@@ -1380,12 +1562,30 @@ async def add_subtitles(req: SubtitleRequest):
         # 2. Burn Subtitles
         # Run in thread pool
         def run_burn():
-             burn_subtitles(input_path, srt_path, output_path,
-                           alignment=req.position, fontsize=req.font_size,
-                           font_name=req.font_name, font_color=req.font_color,
-                           border_color=req.border_color, border_width=req.border_width,
-                           bg_color=req.bg_color, bg_opacity=req.bg_opacity)
-        
+             style_options = SubtitleStyleOptions(
+                 font_name=req.font_name,
+                 font_color=req.font_color,
+                 border_color=req.border_color,
+                 border_width=req.border_width,
+                 bg_color=req.bg_color,
+                 bg_opacity=req.bg_opacity,
+                 text_shadow_color=req.text_shadow_color,
+                 shadow_blur=req.shadow_blur,
+                 shadow_offset_x=req.shadow_offset_x,
+                 shadow_offset_y=req.shadow_offset_y,
+                 bold=req.bold,
+                 italic=req.italic,
+                 text_case=req.text_case,
+             )
+             burn_subtitles(
+                 input_path,
+                 srt_path,
+                 output_path,
+                 alignment=req.position,
+                 fontsize=req.font_size,
+                 style_options=style_options,
+             )
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_burn)
         
@@ -1988,99 +2188,6 @@ async def translate_clip(req: TranslateRequest):
         "cache": cache_stats,
     }
 
-""" @app.get("/api/translate/languages")
-async def get_languages():
-     """"""Return supported languages for translation. """"""
-    return {"languages": get_supported_languages()}
-
-@app.post("/api/translate")
-async def translate_clip(
-    req: TranslateRequest,
-    x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key")
-):
-     """"""Translate a video clip to a different language using ElevenLabs dubbing. """"""
-    if not x_elevenlabs_key:
-        raise HTTPException(status_code=400, detail="Missing X-ElevenLabs-Key header")
-
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[req.job_id]
-    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-
-    if not json_files:
-        raise HTTPException(status_code=404, detail="Metadata not found")
-
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
-
-    clips = data.get('shorts', [])
-    if req.clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
-
-    clip_data = clips[req.clip_index]
-
-    # Video Path
-    if req.input_filename:
-        filename = _sanitize_input_filename(req.input_filename)
-        if not filename:
-            raise HTTPException(status_code=400, detail="Invalid input filename")
-    else:
-        filename = clip_data.get('video_url', '').split('/')[-1]
-        if not filename:
-             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
-             filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
-
-    input_path = os.path.join(output_dir, filename)
-    if not os.path.exists(input_path) and getattr(req, "input_url", None):
-        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
-
-    if not os.path.exists(input_path):
-        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
-
-    # Output video with language suffix
-    base, ext = os.path.splitext(filename)
-    output_filename = f"translated_{req.target_language}_{base}{ext}"
-    output_path = os.path.join(output_dir, output_filename)
-
-    try:
-        # Run translation in thread pool (blocking API calls)
-        def run_translate():
-            return translate_video(
-                video_path=input_path,
-                output_path=output_path,
-                target_language=req.target_language,
-                api_key=x_elevenlabs_key,
-                source_language=req.source_language,
-            )
-
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, run_translate)
-
-    except Exception as e:
-        print(f"❌ Translation Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # Update InMemory Jobs
-    if job and req.clip_index < len(job.get('result', {}).get('clips', [])):
-         job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-
-    # Update Metadata on Disk
-    try:
-        if req.clip_index < len(clips):
-            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-            data['shorts'] = clips
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Metadata updated with translated video for clip {req.clip_index}")
-    except Exception as e:
-        print(f"⚠️ Failed to update metadata.json: {e}")
-
-    return {
-        "success": True,
-        "new_video_url": f"/videos/{req.job_id}/{output_filename}"
-    } """
 
 class SocialPostRequest(BaseModel):
     job_id: str
@@ -3378,6 +3485,144 @@ def _reel_share_payload(final_title: str, final_description: str, user_id: str, 
         data_payload["linkedin_title"] = final_description or final_title
     return data_payload
 
+
+class StripeCheckoutRequest(BaseModel):
+    plan_id: str
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
+
+def _require_stripe_ready() -> None:
+    if stripe is None:
+        raise HTTPException(status_code=503, detail="Stripe SDK not installed on server")
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+
+
+def _frontend_base_url(request: Request) -> str:
+    configured = os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    origin = request.headers.get("origin", "").strip().rstrip("/")
+    if origin:
+        return origin
+    return "http://localhost:5175"
+
+
+@app.post("/api/stripe/checkout-session")
+async def create_stripe_checkout_session(request: Request, payload: StripeCheckoutRequest):
+    """Create a hosted Stripe Checkout session for a subscription plan."""
+    _require_stripe_ready()
+
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    plan = await supabase_get_abonnement(payload.plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Subscription plan not found")
+
+    try:
+        unit_amount = int(round(float(plan.get("price") or 0) * 100))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid plan price")
+
+    if unit_amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid plan price")
+
+    default_base_url = _frontend_base_url(request)
+    success_url = (payload.success_url or STRIPE_SUCCESS_URL or f"{default_base_url}/dashboard/abonnement?payment=success").strip()
+    cancel_url = (payload.cancel_url or STRIPE_CANCEL_URL or f"{default_base_url}/dashboard/abonnement?payment=cancel").strip()
+
+    metadata = {
+        "userid": user_id,
+        "abonnement": str(plan.get("id")),
+        "plan_name": str(plan.get("name") or ""),
+        "payment_mode": "stripe",
+    }
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            payment_method_types=["card"],
+            customer_email=request.headers.get("X-User-Email") or None,
+            line_items=[
+                {
+                    "quantity": 1,
+                    "price_data": {
+                        "currency": STRIPE_CURRENCY,
+                        "unit_amount": unit_amount,
+                        "product_data": {
+                            "name": str(plan.get("name") or "Abonnement"),
+                            "description": "Abonnement mensuel (1 mois)",
+                        },
+                    },
+                }
+            ],
+            metadata=metadata,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe checkout error: {exc}")
+
+    return {"checkout_url": session.url, "session_id": session.id}
+
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe events and persist subscriptions after successful payment."""
+    _require_stripe_ready()
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Stripe webhook secret is not configured")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
+
+    event_type = event.get("type")
+    if event_type != "checkout.session.completed":
+        return {"received": True, "ignored": event_type}
+
+    session = event.get("data", {}).get("object", {})
+    metadata = session.get("metadata") or {}
+    user_id = metadata.get("userid")
+    abonnement = metadata.get("abonnement")
+
+    if not user_id or not abonnement:
+        raise HTTPException(status_code=400, detail="Missing subscription metadata")
+
+    amount_total = (session.get("amount_total") or 0) / 100
+    payment_reference = session.get("payment_intent") or session.get("id") or ""
+    comment = f"Stripe checkout session {session.get('id', '')}".strip()
+    created_ts = session.get("created")
+    payment_date = datetime.fromtimestamp(int(created_ts), tz=timezone.utc) if created_ts else datetime.now(timezone.utc)
+
+    existing_subscription = await supabase_get_souscription_by_reference(payment_reference)
+    if existing_subscription:
+        return {"received": True, "duplicate": True}
+
+    await supabase_insert_souscription(
+        user_id=user_id,
+        abonnement=abonnement,
+        payment_mode="stripe",
+        payment_amount=amount_total,
+        payment_reference=payment_reference,
+        payment_status="confirmed",
+        payment_comment=comment,
+        payment_date=payment_date,
+    )
+
+    return {"received": True}
+
 @app.get("/api/abonnements")
 async def list_abonnements():
     """List available subscription plans from Supabase."""
@@ -3425,6 +3670,32 @@ async def reel_media_url(request: Request, reel_id: str):
         raise HTTPException(status_code=404, detail="Reel not found")
     item = _normalize_reel_row(row)
     return {"media_url": item.get("media_url")}
+
+
+@app.get("/api/reels/{reel_id}/thumbnail-url")
+async def reel_thumbnail_url(request: Request, reel_id: str):
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    row = await supabase_get_reel(reel_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Reel not found")
+    item = _normalize_reel_row(row)
+    return {"thumbnail_url": item.get("reel_thumbnail_url")}
+
+
+@app.get("/api/reels/{reel_id}/preview-url")
+async def reel_preview_url(request: Request, reel_id: str):
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    row = await supabase_get_reel(reel_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Reel not found")
+    item = _normalize_reel_row(row)
+    return {"preview_url": item.get("reel_preview_url")}
 
 
 @app.delete("/api/reels/{reel_id}")

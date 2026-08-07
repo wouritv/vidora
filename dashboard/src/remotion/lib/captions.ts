@@ -7,15 +7,23 @@ export interface CaptionBlock {
   text: string;
 }
 
+export interface CaptionGroupingOptions {
+  maxChars?: number;
+  maxDurationMs?: number;
+  maxWords?: number;
+}
+
 /**
  * Groups word-level captions into display blocks.
  * Same logic as Vireel' generate_srt: max chars per block, max duration per block.
  */
 export function groupCaptionsIntoBlocks(
   captions: CaptionWord[],
-  maxChars = 20,
-  maxDurationMs = 2000
+  options: CaptionGroupingOptions = {}
 ): CaptionBlock[] {
+  const maxChars = options.maxChars ?? 20;
+  const maxDurationMs = options.maxDurationMs ?? 2000;
+  const maxWords = options.maxWords ?? 4;
   const blocks: CaptionBlock[] = [];
   let currentWords: CaptionWord[] = [];
   let blockStartMs = 0;
@@ -34,6 +42,7 @@ export function groupCaptionsIntoBlocks(
     const duration = word.endMs - blockStartMs;
 
     if (
+      currentWords.length >= maxWords ||
       currentTextLen + word.text.length > maxChars ||
       duration > maxDurationMs
     ) {

@@ -261,20 +261,33 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             }
 
             // Fallback: legacy FFmpeg
+            const fallbackPosition = options.positionY <= 33 ? 'top' : options.positionY >= 66 ? 'bottom' : 'middle';
             const res = await fetch(getApiUrl('/api/subtitle'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: clipIndexForApi,
-                    position: options.position,
+                    position: fallbackPosition,
+                    position_x: options.positionX,
+                    position_y: options.positionY,
                     font_size: options.fontSize,
                     font_name: options.fontName,
                     font_color: options.fontColor,
+                    highlight_color: options.highlightColor,
                     border_color: options.borderColor,
                     border_width: options.borderWidth,
+                    text_shadow_color: options.textShadowColor,
+                    shadow_blur: options.shadowBlur,
+                    shadow_offset_x: options.shadowOffsetX,
+                    shadow_offset_y: options.shadowOffsetY,
                     bg_color: options.bgColor,
                     bg_opacity: options.bgOpacity,
+                    text_case: options.textCase,
+                    bold: options.bold,
+                    italic: options.italic,
+                    words_per_line: options.wordsPerLine,
+                    animation: options.animation,
                     input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
                     input_url: effectiveInputUrl
                 })

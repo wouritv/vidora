@@ -26,16 +26,25 @@ const DEFAULT_PROPS: ShortVideoProps = {
       { text: "level", startMs: 4700, endMs: 5100 },
       { text: "highlighting", startMs: 5100, endMs: 6000 },
     ],
-    position: "bottom",
     style: {
+      positionX: 50,
+      positionY: 82,
       fontFamily: "Arial",
       fontSize: 52,
       fontColor: "#FFFFFF",
       highlightColor: "#FFDD00",
       borderColor: "#000000",
       borderWidth: 3,
+      textShadowColor: "#000000",
+      shadowBlur: 8,
+      shadowOffsetX: 0,
+      shadowOffsetY: 2,
       bgColor: "#000000",
       bgOpacity: 0,
+      textCase: "none",
+      bold: true,
+      italic: false,
+      wordsPerLine: 4,
       animation: "pop",
     },
   },
@@ -74,17 +83,15 @@ const DEFAULT_PROPS: ShortVideoProps = {
 
 export const RemotionRoot: React.FC = () => {
   return (
-    <>
-      <Composition
-        id="ShortVideo"
-        schema={shortVideoPropsSchema}
-        component={ShortVideo}
-        durationInFrames={DEFAULT_PROPS.durationInFrames}
-        fps={DEFAULT_PROPS.fps}
-        width={DEFAULT_PROPS.width}
-        height={DEFAULT_PROPS.height}
-        defaultProps={DEFAULT_PROPS}
-      />
-    </>
+    <Composition
+      id="ShortVideo"
+      schema={shortVideoPropsSchema}
+      component={ShortVideo}
+      durationInFrames={DEFAULT_PROPS.durationInFrames}
+      fps={DEFAULT_PROPS.fps}
+      width={DEFAULT_PROPS.width}
+      height={DEFAULT_PROPS.height}
+      defaultProps={DEFAULT_PROPS}
+    />
   );
 };

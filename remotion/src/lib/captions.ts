@@ -7,15 +7,34 @@ export interface CaptionBlock {
   text: string;
 }
 
+export interface CaptionGroupingOptions {
+  maxChars?: number;
+  maxDurationMs?: number;
+  maxWords?: number;
+}
+
 /**
  * Groups word-level captions into display blocks.
  * Same logic as Vireel' generate_srt: max chars per block, max duration per block.
  */
 export function groupCaptionsIntoBlocks(
   captions: CaptionWord[],
-  maxChars = 20,
-  maxDurationMs = 2000
+  optionsOrMaxChars: CaptionGroupingOptions | number = {},
+  legacyMaxDurationMs = 2000,
+  legacyMaxWords = 4
 ): CaptionBlock[] {
+  const options =
+    typeof optionsOrMaxChars === "number"
+      ? {
+          maxChars: optionsOrMaxChars,
+          maxDurationMs: legacyMaxDurationMs,
+          maxWords: legacyMaxWords,
+        }
+      : optionsOrMaxChars;
+
+  const maxChars = options.maxChars ?? 20;
+  const maxDurationMs = options.maxDurationMs ?? 2000;
+  const maxWords = options.maxWords ?? 4;
   const blocks: CaptionBlock[] = [];
   let currentWords: CaptionWord[] = [];
   let blockStartMs = 0;
@@ -34,11 +53,15 @@ export function groupCaptionsIntoBlocks(
     const duration = word.endMs - blockStartMs;
 
     if (
+      currentWords.length >= maxWords ||
       currentTextLen + word.text.length > maxChars ||
       duration > maxDurationMs
     ) {
       // Finalize current block
-      const lastWord = currentWords[currentWords.length - 1];
+      const lastWord = currentWords.at(-1);
+      if (!lastWord) {
+        continue;
+      }
       blocks.push({
         words: [...currentWords],
         startMs: blockStartMs,
@@ -55,7 +78,10 @@ export function groupCaptionsIntoBlocks(
 
   // Final block
   if (currentWords.length > 0) {
-    const lastWord = currentWords[currentWords.length - 1];
+    const lastWord = currentWords.at(-1);
+    if (!lastWord) {
+      return blocks;
+    }
     blocks.push({
       words: [...currentWords],
       startMs: blockStartMs,

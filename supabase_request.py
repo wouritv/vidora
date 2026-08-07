@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone
+import calendar
 from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import acreate_client, AsyncClient
@@ -163,7 +164,70 @@ async def get_abonnement(abonnement_uuid: str) -> Optional[Dict[str, Any]]:
 	response = (
 		await client.table(SUPABASE_ABONNEMENTS_TABLE)
 		.select(ABONNEMENT_COLUMNS)
-		.eq("uuid", abonnement_uuid)
+		.eq("id", abonnement_uuid)
+		.limit(1)
+		.execute()
+	)
+
+	rows = response.data
+	if not rows:
+		return None
+	return rows[0]
+
+
+def _add_one_month(dt: datetime) -> datetime:
+	"""Add one calendar month while keeping day within target month bounds."""
+	year = dt.year + (1 if dt.month == 12 else 0)
+	month = 1 if dt.month == 12 else dt.month + 1
+	day = min(dt.day, calendar.monthrange(year, month)[1])
+	return dt.replace(year=year, month=month, day=day)
+
+
+async def insert_souscription(
+	user_id: str,
+	abonnement: str,
+	payment_mode: str,
+	payment_amount: float,
+	payment_reference: str,
+	payment_status: str = "confirmed",
+	payment_comment: str = "",
+	payment_date: Optional[datetime] = None,
+) -> Dict[str, Any]:
+	"""Create a subscription row after a confirmed payment."""
+	client = await get_client()
+	start_date = payment_date or datetime.now(timezone.utc)
+	if start_date.tzinfo is None:
+		start_date = start_date.replace(tzinfo=timezone.utc)
+	end_date = _add_one_month(start_date)
+
+	payload = {
+		"userid": user_id,
+		"abonnement": abonnement,
+		"payment_mode": payment_mode,
+		"payment_amount": float(payment_amount),
+		"payment_reference": payment_reference,
+		"payment_start_date": start_date.isoformat(),
+		"payment_end_date": end_date.isoformat(),
+		"payment_status": payment_status,
+		"payment_comment": payment_comment,
+	}
+
+	response = await client.table(SUPABASE_SOUSCRIPTION_TABLE).insert(payload).execute()
+	rows = response.data or []
+	if not rows:
+		return payload
+	return rows[0]
+
+
+async def get_souscription_by_reference(payment_reference: str) -> Optional[Dict[str, Any]]:
+	"""Fetch a subscription row by payment reference for webhook idempotency."""
+	if not payment_reference:
+		return None
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_SOUSCRIPTION_TABLE)
+		.select(SOUSCRIPTION_COLUMNS)
+		.eq("payment_reference", payment_reference)
 		.limit(1)
 		.execute()
 	)

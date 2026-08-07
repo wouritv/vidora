@@ -39,6 +39,54 @@ export default function AbonnementPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [souscription, setSouscription] = useState(null);
+    const [loadingPlanId, setLoadingPlanId] = useState("");
+    const [paymentMessage, setPaymentMessage] = useState("");
+
+    useEffect(() => {
+        const params = new URLSearchParams(globalThis.location.search || "");
+        const payment = params.get("payment");
+        if (payment === "success") {
+            setPaymentMessage("Paiement confirme. Votre abonnement sera active sous peu.");
+        } else if (payment === "cancel") {
+            setPaymentMessage("Paiement annule.");
+        }
+    }, []);
+
+    const handleCheckout = async (plan) => {
+        if (!user?.id || !plan?.id) return;
+        setLoadingPlanId(plan.id);
+        setError("");
+        try {
+            const response = await fetch(getApiUrl(`/api/stripe/checkout-session`), {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-User-Id": user.id,
+                    ...(user?.email ? { "X-User-Email": user.email } : {}),
+                },
+                body: JSON.stringify({
+                    plan_id: plan.id,
+                }),
+            });
+
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                setError(data?.detail || "Impossible de demarrer le paiement Stripe.");
+                return;
+            }
+
+            if (!data?.checkout_url) {
+                setError("Aucune URL de paiement n'a ete retournee.");
+                return;
+            }
+
+            globalThis.location.href = data.checkout_url;
+        } catch (err) {
+            setError(err.message || "Impossible de demarrer le paiement Stripe.");
+        } finally {
+            setLoadingPlanId("");
+        }
+    };
 
     useEffect(() => {
         if (!user?.id) return;
@@ -103,6 +151,7 @@ export default function AbonnementPage() {
             <div className="mb-8">
                 <h1 className="text-3xl font-bold mb-2">Abonnements</h1>
                 <p className="text-zinc-400 text-sm">Découvrez nos formules d'abonnements et choisissez celle qui vous convient</p>
+                {paymentMessage ? <p className="mt-3 text-sm text-green-300">{paymentMessage}</p> : null}
             </div>
 
             {/* Plans */}
@@ -174,13 +223,12 @@ export default function AbonnementPage() {
 
                             {/* Bouton */}
                             <button
-                                onClick={() => {
-                                    // Handle plan upgrade logic here
-                                }}
+                                onClick={() => handleCheckout(plan)}
+                                disabled={!user?.id || loadingPlanId === plan.id}
                                 className={`mt-auto flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition ${styles.button}`}
                             >
-                                <CreditCardIcon size={18} />
-                                        {buttonLabel}
+                                {loadingPlanId === plan.id ? <Loader2 size={18} className="animate-spin" /> : <CreditCardIcon size={18} />}
+                                {loadingPlanId === plan.id ? "Redirection..." : buttonLabel}
                             </button>
                         </div>
                     );
