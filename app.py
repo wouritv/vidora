@@ -3548,7 +3548,6 @@ async def create_stripe_checkout_session(request: Request, payload: StripeChecko
             mode="payment",
             success_url=success_url,
             cancel_url=cancel_url,
-            payment_method_types=["card"],
             customer_email=request.headers.get("X-User-Email") or None,
             line_items=[
                 {
@@ -3559,6 +3558,7 @@ async def create_stripe_checkout_session(request: Request, payload: StripeChecko
                         "product_data": {
                             "name": str(plan.get("name") or "Abonnement"),
                             "description": "Abonnement mensuel (1 mois)",
+                            "tax_code": "txcd_10103001",
                         },
                     },
                 }
