@@ -13,7 +13,7 @@ import DashboardTabPage from "./pages/DashboardTabPage";
 import ReelsPage from "./pages/ReelsPage";
 import ResetPassword from "./pages/ResetPassword";
 import UpdatePassword from "./pages/UpdatePassword";
-import YouTubeResumePage from "./pages/YouTubeResumePage";
+import CaptionsPage from "./pages/CaptionsPage.jsx";
 import AbonnementPage from "./pages/AbonnementPage";
 
 function RootRedirect() {
@@ -50,10 +50,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                             }
                         >
                             <Route index element={<Dashboard />} />
-                            <Route path="clip-generator" element={<DashboardTabPage tabKey="clip-generator" />} />
+                            <Route path="reel-generator" element={<DashboardTabPage tabKey="reel-generator" />} />
                             <Route path="reels" element={<ReelsPage />} />
-                            <Route path="youtube-resumes" element={<YouTubeResumePage />} />
-                            <Route path="youtube-studio" element={<DashboardTabPage tabKey="youtube-studio" />} />
+                            <Route path="captions" element={<CaptionsPage />} />
+                            <Route path="caption-generator" element={<DashboardTabPage tabKey="caption-generator" />} />
                             <Route path="settings" element={<DashboardTabPage tabKey="settings" />} />
                             <Route path="abonnements" element={<AbonnementPage />} />
                         </Route>

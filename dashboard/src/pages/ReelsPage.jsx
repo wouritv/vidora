@@ -311,7 +311,7 @@ export default function ReelsPage() {
                 <button
                     type="button"
                     onClick={() => {
-                        navigate("/dashboard/clip-generator?new=1");
+                        navigate("/dashboard/reel-generator?new=1");
                     }}
                     className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
                 >

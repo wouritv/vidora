@@ -327,7 +327,7 @@ const pollJob = async (jobId) => {
   }
 };
 
-function App({ activeTab = "clip-generator", embedded = false } = {}) {
+function App({ activeTab = "reel-generator", embedded = false } = {}) {
 
   const { user } = useAuth();
 
@@ -364,7 +364,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
   // Session Recovery: Restore on mount unless user explicitly requests a fresh start.
   useEffect(() => {
-    if (currentTab !== 'clip-generator') return;
+    if (currentTab !== 'reel-generator') return;
     if (forceNewOperation) {
       localStorage.removeItem(SESSION_KEY);
       setStatus('idle');
@@ -545,7 +545,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
         {/* Top Header */}
         <header>
 
-          {currentTab === 'clip-generator' && (
+          {currentTab === 'reel-generator' && (
              <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
               <div className="flex items-center gap-4">
                 <div>
@@ -571,7 +571,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
              </div>
           )}
 
-          {currentTab === 'youtube-studio' && (
+          {currentTab === 'caption-generator' && (
               <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
                 <div className="flex items-center gap-4">
                   <div>
@@ -582,7 +582,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
                 <button
                     type="button"
                     onClick={() => {
-                      navigate("/dashboard/youtube-resumes");
+                      navigate("/dashboard/captions");
                     }}
                     className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
                 >
@@ -610,12 +610,12 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
 
 
            {/* View: Thumbnails */}
-           {currentTab === 'youtube-studio' && (
+           {currentTab === 'caption-generator' && (
                <ThumbnailStudio appUserId={user?.id} />
            )}
 
           {/* View: Dashboard (Idle) */}
-          {currentTab === 'clip-generator' && uiStatus === 'idle' && (
+          {currentTab === 'reel-generator' && uiStatus === 'idle' && (
               <div className="h-full flex flex-col items-center justify-center p-6 animate-[fadeIn_0.3s_ease-out]">
                 <div className="max-w-xl w-full text-center space-y-8">
                   <div className="space-y-4">
@@ -637,7 +637,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {currentTab === 'clip-generator' && (
+          {currentTab === 'reel-generator' && (
             uiStatus === 'processing' || uiStatus === 'complete' || uiStatus === 'error'
           ) && (
               <div className="h-full flex flex-col animate-[fadeIn_0.3s_ease-out]">
@@ -762,7 +762,7 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
                         </button>
                         <button
                           type="button"
-                          onClick={() => navigate('/dashboard/clip-generator?new=1')}
+                          onClick={() => navigate('/dashboard/reel-generator?new=1')}
                           className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
                         >
                           Nouvelle operation
@@ -774,13 +774,13 @@ function App({ activeTab = "clip-generator", embedded = false } = {}) {
               </div>
           )}
 
-          {currentTab === 'clip-generator' && uiStatus !== 'idle' && uiStatus !== 'processing' && uiStatus !== 'complete' && uiStatus !== 'error' && (
+          {currentTab === 'reel-generator' && uiStatus !== 'idle' && uiStatus !== 'processing' && uiStatus !== 'complete' && uiStatus !== 'error' && (
             <div className="h-full flex items-center justify-center p-6">
               <div className="max-w-lg w-full rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-center">
                 <p className="text-sm text-zinc-300">Etat de generation non reconnu: <span className="font-mono text-white">{String(status)}</span></p>
                 <button
                   type="button"
-                  onClick={() => navigate('/dashboard/clip-generator?new=1')}
+                  onClick={() => navigate('/dashboard/reel-generator?new=1')}
                   className="mt-4 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
                 >
                   Reinitialiser la vue

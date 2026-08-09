@@ -110,7 +110,7 @@ export default function Dashboard() {
 
                         <div className="flex flex-wrap gap-3">
                             <button
-                                onClick={() => navigate("/dashboard/clip-generator")}
+                                onClick={() => navigate("/dashboard/reel-generator")}
                                 className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white transition hover:bg-white/10"
                             >
                                 <ArrowRight size={16} />
@@ -135,7 +135,7 @@ export default function Dashboard() {
 
                 <div className="grid gap-4 md:grid-cols-2">
                     <button
-                        onClick={() => navigate("/dashboard/clip-generator")}
+                        onClick={() => navigate("/dashboard/reel-generator")}
                         className="group rounded-2xl border border-white/10 bg-white/5 p-5 text-left hover:bg-white/10 transition"
                     >
                         <div className="flex items-center justify-between">
@@ -145,11 +145,11 @@ export default function Dashboard() {
                             <ArrowRight size={16} className="text-zinc-500 group-hover:text-white" />
                         </div>
                         <h4 className="mt-5 text-lg font-semibold text-white">Generer des reels</h4>
-                        <p className="mt-2 text-sm leading-6 text-zinc-400">Upload une video longue et laisse le systeme extraire les moments reels.</p>
+                        <p className="mt-2 text-sm leading-6 text-zinc-400">Upload une video et laisse le systeme boosté à l'IA extraire les moments réels.</p>
                     </button>
 
                     <button
-                        onClick={() => navigate("/dashboard/youtube-studio")}
+                        onClick={() => navigate("/dashboard/caption-generator")}
                         className="group rounded-2xl border border-white/10 bg-white/5 p-5 text-left hover:bg-white/10 transition"
                     >
                         <div className="flex items-center justify-between">
