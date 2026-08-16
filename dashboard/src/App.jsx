@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Sparkles, Activity, Globe, Calendar, Instagram, Youtube, ArrowLeft,
-  CheckCircle2, Clock3, Download, Film, Loader2, AlertCircle, X
+  CheckCircle2, Clock3, Download, Film, Loader2, AlertCircle, X, Linkedin, Facebook,
 } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -12,8 +12,10 @@ import { getApiUrl } from './config';
 import { useLocation, useNavigate } from "react-router-dom";
 import { DASHBOARD_SIDEBAR_ITEMS } from "./lib/dashboard-nav";
 import { useAuth } from "./state/AuthContext";
+import { useTranslation } from "./state/LanguageContext";
 import { SESSION_KEY, SESSION_MAX_AGE } from "./lib/session";
 import SettingsPage from "./pages/Settings.jsx";
+import { useUserCredits } from "./state/UserCreditsContext";
 
 const TikTokIcon = ({ size = 16, className = "" }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className}>
@@ -74,49 +76,49 @@ const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) =
   return [
     {
       key: 'started',
-      label: 'Processus demarre',
-      description: processStarted ? 'Le workflow a bien ete lance.' : 'En attente de lancement.',
-      state: processStarted ? 'done' : 'pending',
+      label: t('common.processStarted','Processus demarré'),
+      description: processStarted ? t('common.workflowStarted','Le workflow a bien ete lance.') : t('common.processWait','En attente de lancement.'),
+      state: processStarted ? t('common.processOk','done') : t('common.processQueued','pending'),
     },
     {
       key: 'source',
-      label: processingMedia?.type === 'file' ? 'Reception de la video' : 'Telechargement de la video',
+      label: processingMedia?.type === 'file' ? t('common.fileReceived','Reception de la video') : t('common.fileDownloaded','Telechargement de la video'),
       description: sourceReady
-        ? 'La source est prete pour le traitement.'
-        : 'Preparation de la source en cours.',
-      state: sourceReady ? 'done' : processStarted ? 'active' : 'pending',
+        ? t('common.processReady','La source est prete pour le traitement.')
+        : t('common.processGo','Preparation de la source en cours.'),
+      state: sourceReady ? t('common.processOk','done') : processStarted ? t('common.processActive','active') : t('common.processQueued','pending'),
     },
     {
       key: 'transcript',
-      label: 'Generation de la transcription',
+      label: t('common.processTranscript','Generation de la transcription'),
       description: transcriptReady
-        ? 'La transcription est disponible pour l’analyse.'
-        : 'Transcription audio en cours.',
-      state: transcriptReady ? 'done' : sourceReady && status === 'processing' ? 'active' : 'pending',
+        ? t('common.processTranscriptOk','La transcription est disponible pour l’analyse.')
+        : t('common.processTranscriptPending','Transcription audio en cours.'),
+      state: transcriptReady ? t('common.processOk','done') : sourceReady && status === 'processing' ? t('common.processActive','active') : t('common.processQueued','pending'),
     },
     {
       key: 'detect',
-      label: 'Detection du nombre de reels a creer',
+      label: t('common.processReel','Detection du nombre de reels a creer'),
       description: reelsDetected
-        ? `${detectedCount || generatedCount} reel(s) identifies pour la generation.`
-        : 'L’IA determine encore les meilleurs moments.',
-      state: reelsDetected ? 'done' : transcriptReady && status === 'processing' ? 'active' : 'pending',
+        ? `${detectedCount || generatedCount} ${t('common.processReelCreate','reel(s) identifies pour la generation.')}`
+        : t('common.processReelText','L’IA determine encore les meilleurs moments.'),
+      state: reelsDetected ? t('common.processOk','done') : transcriptReady && status === 'processing' ? t('common.processActive','active') : t('common.processQueued','pending'),
     },
     {
       key: 'create',
-      label: 'Creation des reels',
+      label: t('common.processReelTextOk','Creation des reels'),
       description: status === 'complete'
-        ? `${generatedCount} reel(s) finalises et prets au telechargement.`
+        ? `${generatedCount} ${t('common.processReelTextFinished','reel(s) finalises et prets au telechargement.')}`
         : generatedCount > 0
-          ? `${generatedCount} reel(s) deja generes.`
-          : 'Generation des reels en cours.',
+          ? `${generatedCount} ${t('common.processReelCurrent','reel(s) deja generes.')}`
+          : t('common.processReelPending','Generation des reels en cours.'),
       state: status === 'complete'
-        ? 'done'
+        ? t('common.processOk','done')
         : status === 'error'
-          ? 'error'
+          ? t('common.processError','error')
           : reelsDetected && status === 'processing'
-            ? 'active'
-            : 'pending',
+            ? t('common.processActive','active')
+            : t('common.processQueued','pending'),
     },
   ];
 };
@@ -125,7 +127,7 @@ const StepStatusIcon = ({ state }) => {
   if (state === 'done') return <CheckCircle2 size={16} className="text-green-400" />;
   if (state === 'active') return <Loader2 size={16} className="text-primary animate-spin" />;
   if (state === 'error') return <AlertCircle size={16} className="text-red-400" />;
-  return <Clock3 size={16} className="text-zinc-500" />;
+  return <Clock3 size={16} className="text-slate-400 dark:text-zinc-500" />;
 };
 
 const ProcessingChecklist = ({ status, logs, visibleClips, processingMedia }) => {
@@ -135,22 +137,22 @@ const ProcessingChecklist = ({ status, logs, visibleClips, processingMedia }) =>
   const progressPercent = Math.round((doneCount / totalCount) * 100);
 
   return (
-    <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+    <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/[0.03] p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Suivi du process</p>
-          <h3 className="mt-1 text-lg font-bold text-white">Generation des reels</h3>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-zinc-500">{t("reels.processFollowup","Suivi du processus")}</p>
+          <h3 className="title-contrast mt-1 text-lg font-bold">{t("reels.reelGeneration","Generation des reels")}</h3>
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-zinc-300">
-          <Activity size={14} className={status === 'processing' ? 'text-primary animate-pulse' : 'text-zinc-400'} />
+        <div className="flex items-center gap-2 rounded-full border border-slate-300 dark:border-white/10 bg-black/20 px-3 py-1.5 text-xs text-slate-700 dark:text-zinc-300">
+          <Activity size={14} className={status === 'processing' ? 'text-primary animate-pulse' : 'text-slate-500 dark:text-zinc-400'} />
           <span>{getProcessLabel(status)}</span>
         </div>
       </div>
 
-      <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+      <div className="mt-4 rounded-xl border border-slate-300 dark:border-white/10 bg-black/20 p-3">
         <div className="mb-2 flex items-center justify-between text-xs">
-          <span className="text-zinc-400">Progression</span>
-          <span className="font-medium text-zinc-200">{doneCount}/{totalCount} etapes ({progressPercent}%)</span>
+          <span className="text-slate-500 dark:text-zinc-400">Progression</span>
+          <span className="font-medium text-zinc-200">{doneCount}/{totalCount} {t("reel.step","étapes")} ({progressPercent}%)</span>
         </div>
         <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
           <div
@@ -162,13 +164,13 @@ const ProcessingChecklist = ({ status, logs, visibleClips, processingMedia }) =>
 
       <div className="mt-5 space-y-3">
         {steps.map((step) => (
-          <div key={step.key} className="flex items-start gap-3 rounded-xl border border-white/5 bg-black/20 px-4 py-3">
+          <div key={step.key} className="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-white/5 bg-black/20 px-4 py-3">
             <div className="mt-0.5 shrink-0">
               <StepStatusIcon state={step.state} />
             </div>
             <div className="min-w-0">
               <p className="text-sm font-semibold text-white">{step.label}</p>
-              <p className="mt-1 text-xs leading-5 text-zinc-400">{step.description}</p>
+              <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-zinc-400">{step.description}</p>
             </div>
           </div>
         ))}
@@ -191,7 +193,7 @@ const GeneratedClipsList = ({ clips, status }) => {
           : null;
 
         return (
-          <div key={`${clip?.reel_id || clip?.video_url || 'clip'}-${index}`} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+          <div key={`${clip?.reel_id || clip?.video_url || 'clip'}-${index}`} className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/[0.03] p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
@@ -202,9 +204,9 @@ const GeneratedClipsList = ({ clips, status }) => {
                     {clip?.video_title_for_youtube_short || clip?.title || `Reel ${index + 1}`}
                   </p>
                 </div>
-                <p className="mt-2 text-xs leading-5 text-zinc-400">
+                <p className="mt-2 text-xs leading-5 text-slate-500 dark:text-zinc-400">
                   {duration ? `${duration}s • ` : ''}
-                  {status === 'complete' ? 'Pret pour telechargement et edition.' : 'Reel genere pendant le traitement.'}
+                  {status === 'complete' ? t('reels.readyToDownload','Pret pour telechargement et edition') : t('reels.generateReel','Reel genere pendant le traitement.')}
                 </p>
               </div>
 
@@ -213,10 +215,10 @@ const GeneratedClipsList = ({ clips, status }) => {
                   href={getApiUrl(clip.video_url)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-200 transition hover:bg-white/10"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-200 transition hover:bg-white/10"
                 >
                   <Download size={14} />
-                  Telecharger
+                  {t('reels.download','Télécharger')}
                 </a>
               )}
             </div>
@@ -230,31 +232,31 @@ const GeneratedClipsList = ({ clips, status }) => {
 const EmptyResultsState = ({ status }) => {
   if (status === 'processing') {
     return (
-        <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/20 px-6 py-10 text-zinc-500 space-y-4">
+        <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 dark:border-white/10 bg-black/20 px-6 py-10 text-slate-400 dark:text-zinc-500 space-y-4">
           <div className="w-12 h-12 rounded-full border-2 border-zinc-800 border-t-primary animate-spin" />
-          <p className="text-sm text-center">Les reels apparaitront ici au fur et a mesure de la generation.</p>
+          <p className="text-sm text-center">{t("reels.reelShowed","Les reels apparaitront ici au fur et a mesure de la generation.")}</p>
         </div>
     );
   }
   if (status === 'error') {
     return (
         <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-red-500/20 bg-red-500/5 px-6 py-10 text-red-400 space-y-2">
-          <p>La generation a rencontre une erreur.</p>
+          <p>{t("reels.processError","La generation a rencontre une erreur.")}</p>
         </div>
     );
   }
   return (
-    <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/20 px-6 py-10 text-zinc-500 space-y-2">
+    <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 dark:border-white/10 bg-black/20 px-6 py-10 text-slate-400 dark:text-zinc-500 space-y-2">
       <Film size={22} className="text-zinc-600" />
-      <p className="text-sm">Aucun reel genere pour le moment.</p>
+      <p className="text-sm">{t("reels.noReelsGenerated","Aucun reel genere pour le moment.")}</p>
     </div>
   );
 };
 
 const Sidebar = ({ currentTab, onNavigate }) => (
-    <div className="w-20 lg:w-64 bg-surface border-r border-white/5 flex flex-col h-full shrink-0 transition-all duration-300">
+    <div className="w-20 lg:w-64 bg-surface border-r border-slate-200 dark:border-white/5 flex flex-col h-full shrink-0 transition-all duration-300">
       <div className="p-6 flex items-center gap-3">
-        <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center shrink-0 overflow-hidden border border-white/5">
+        <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center shrink-0 overflow-hidden border border-slate-200 dark:border-white/5">
           <img src="/logo-vireel.png" alt="Logo" className="w-full h-full object-cover" />
         </div>
         <span className="font-bold text-lg text-white hidden lg:block tracking-tight">Vireel</span>
@@ -276,41 +278,6 @@ const Sidebar = ({ currentTab, onNavigate }) => (
         })}
       </nav>
 
-      <div className="p-4 border-t border-white/5 space-y-2">
-        <button
-            type="button"
-            onClick={() => {
-              localStorage.removeItem('Vireel_skip_landing');
-              globalThis.location.hash = '';
-              globalThis.location.reload();
-            }}
-            className="w-full flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group text-left"
-        >
-          <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
-            <Globe size={16} />
-          </div>
-          <div className="hidden lg:block overflow-hidden">
-            <p className="text-sm font-bold text-white leading-none mb-0.5">Landing Page</p>
-            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">View website</p>
-          </div>
-        </button>
-        <a
-            href="https://github.com/mutonby/Vireel"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
-        >
-          <div className="w-8 h-8 rounded-full bg-white text-black flex items-center justify-center shrink-0">
-            <svg height="20" viewBox="0 0 16 16" version="1.1" width="20" aria-hidden="true">
-              <path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-            </svg>
-          </div>
-          <div className="hidden lg:block overflow-hidden">
-            <p className="text-sm font-bold text-white leading-none mb-0.5">Open Source</p>
-            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">Free & Community Driven</p>
-          </div>
-        </a>
-      </div>
     </div>
 );
 
@@ -330,6 +297,8 @@ const pollJob = async (jobId) => {
 function App({ activeTab = "reel-generator", embedded = false } = {}) {
 
   const { user } = useAuth();
+  const { credits, defaultCosts } = useUserCredits();
+  const { t } = useTranslation();
 
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle');
@@ -348,6 +317,9 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
   const visibleClips = getVisibleClips(status, results, partialClips);
   const actionReadyClips = visibleClips.filter((clip) => typeof clip?.video_url === 'string' && clip.video_url.length > 0);
   const pendingClips = visibleClips.filter((clip) => !clip?.video_url);
+
+  const reelEstimatedCost = Number(defaultCosts?.reel || 0);
+  const hasEnoughForReel = reelEstimatedCost <= 0 ? true : credits >= reelEstimatedCost;
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -485,6 +457,11 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       setLogs(["Authentication required. Please reconnect your session."]);
       return;
     }
+    if (!hasEnoughForReel) {
+      setStatus('idle');
+      setLogs([`Credits insuffisants. Requis: ${reelEstimatedCost.toFixed(0)} cr, disponible: ${Number(credits || 0).toFixed(0)} cr.`]);
+      return;
+    }
 
     setHasNotifiedCompletion(false);
     setShowCompletionPanel(false);
@@ -513,7 +490,17 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       });
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(errText);
+        let errDetail = errText;
+        try {
+          const parsed = JSON.parse(errText);
+          errDetail = parsed?.detail || errText;
+        } catch {
+          // Keep raw text when response is not JSON.
+        }
+        if (res.status === 402) {
+          throw new Error("Crédits insuffisants pour lancer cette opération.");
+        }
+        throw new Error(errDetail);
       }
       const resData = await res.json();
       setJobId(resData.job_id);
@@ -531,6 +518,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
         onClose={() => setShowScheduleWeek(false)}
         clips={results?.clips || []}
         jobId={jobId}
+        userId={user?.id || ""}
     />
   );
 
@@ -546,10 +534,10 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
         <header>
 
           {currentTab === 'reel-generator' && (
-             <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
+             <div className="h-16 border-b border-slate-200 dark:border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
               <div className="flex items-center gap-4">
                 <div>
-                  <h1 className="text-3xl font-black tracking-tight">Génération de réels</h1>
+                  <h1 className="text-3xl font-black tracking-tight">{t('app.reelGenerator', 'Reel generation')}</h1>
                 </div>
               </div>
 
@@ -564,7 +552,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                    <ArrowLeft size={16} />
                  </div>
                  <div className="hidden lg:block overflow-hidden">
-                   <p className="text-sm font-bold text-white leading-none mb-0.5">Retour à la liste</p>
+                    <p className="text-sm font-bold text-white leading-none mb-0.5">{t('app.backToList', 'Back to list')}</p>
                  </div>
                </button>
 
@@ -572,10 +560,10 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
           )}
 
           {currentTab === 'caption-generator' && (
-              <div className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
+              <div className="h-16 border-b border-slate-200 dark:border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
                 <div className="flex items-center gap-4">
                   <div>
-                    <h1 className="text-3xl font-black tracking-tight">IA Captions</h1>
+                    <h1 className="text-3xl font-black tracking-tight">{t('app.captions', 'Captions')}</h1>
                   </div>
                 </div>
 
@@ -590,7 +578,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                     <ArrowLeft size={16} />
                   </div>
                   <div className="hidden lg:block overflow-hidden">
-                    <p className="text-sm font-bold text-white leading-none mb-0.5">Retour à la liste</p>
+                    <p className="text-sm font-bold text-white leading-none mb-0.5">{t('app.backToList', 'Back to list')}</p>
                   </div>
                 </button>
 
@@ -619,18 +607,20 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
               <div className="h-full flex flex-col items-center justify-center p-6 animate-[fadeIn_0.3s_ease-out]">
                 <div className="max-w-xl w-full text-center space-y-8">
                   <div className="space-y-4">
-                    <h1 className="text-4xl md:text-5xl font-black bg-gradient-to-b from-white to-white/60 bg-clip-text text-transparent">
-                      Create Viral Shorts
-                    </h1>
-                    <p className="text-zinc-400 text-lg">
-                      Drop your long-form video below to instantly generate viral clips with AI.
-                    </p>
+                    <p className="text-slate-500 dark:text-zinc-400 text-lg">{t('app.dropVideo', 'Drop your long-form video below to instantly generate viral clips with AI.')}</p>
                   </div>
-                  <MediaInput onProcess={handleProcess} isProcessing={uiStatus === 'processing'} />
-                  <div className="flex items-center justify-center gap-8 text-zinc-500 text-sm">
+                  <MediaInput
+                    onProcess={handleProcess}
+                    isProcessing={uiStatus === 'processing'}
+                    isCreditBlocked={!hasEnoughForReel}
+                    creditWarning={!hasEnoughForReel ? t("reels.insufficentCredit","Crédit insuffisant pour initier l'opération") : ""}
+                  />
+                  <div className="flex items-center justify-center gap-8 text-slate-400 dark:text-zinc-500 text-sm">
                     <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
                     <span className="flex items-center gap-2"><Instagram size={16} /> Instagram</span>
                     <span className="flex items-center gap-2"><TikTokIcon size={16} /> TikTok</span>
+                    <span className="flex items-center gap-2"><Facebook size={16} /> Facebook</span>
+                    <span className="flex items-center gap-2"><Linkedin size={16} /> LinkedIn</span>
                   </div>
                 </div>
               </div>
@@ -644,11 +634,11 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                 <div className="flex-1 flex flex-col md:flex-row min-h-0">
 
                   {/* Left Panel */}
-                  <div className={`${uiStatus === 'complete' ? 'w-full md:w-[32%] lg:w-[28%]' : 'w-full md:w-[48%] lg:w-[44%]'} h-full flex flex-col border-r border-white/5 bg-black/20 p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
+                  <div className={`${uiStatus === 'complete' ? 'w-full md:w-[32%] lg:w-[28%]' : 'w-full md:w-[48%] lg:w-[44%]'} h-full flex flex-col border-r border-slate-200 dark:border-white/5 bg-black/20 p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
                     <div className="mb-6 flex items-center justify-between">
                       <h2 className="text-lg font-semibold flex items-center gap-2">
                         <Activity className={`text-primary ${uiStatus === 'processing' ? 'animate-pulse' : ''}`} size={20} />
-                        Scan de la video
+                        {t('reel.videoScan', 'Scan de la vidéo')}
                       </h2>
                       <span className={`text-xs px-2 py-1 rounded-full border ${getStatusBadgeClass(uiStatus)}`}>
                         {uiStatus.toUpperCase()}
@@ -664,10 +654,10 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                         syncTrigger={syncTrigger}
                       />
                     ) : (
-                      <div className="flex-1 flex items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/20 px-6 py-10 text-center text-zinc-400">
+                      <div className="flex-1 flex items-center justify-center rounded-2xl border border-dashed border-slate-300 dark:border-white/10 bg-black/20 px-6 py-10 text-center text-slate-500 dark:text-zinc-400">
                         {uiStatus === 'processing'
-                          ? 'Generation en cours. La vue source n’est plus disponible, mais le suivi du workflow continue a droite.'
-                          : 'Le rendu est termine. Consulte les reels generes dans le panneau de droite.'}
+                          ? t("reels.reelGenerationProgress","Generation en cours. La vue source n’est plus disponible, mais le suivi du workflow continue a droite.")
+                          : t("reels.reelGenerationComplete","Le rendu est termine. Consulte les reels generes dans le panneau de droite.")}
                       </div>
                     )}
                   </div>
@@ -684,7 +674,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                     <div className="mt-6 flex-1 min-h-0">
                       <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
                         <Sparkles className="text-yellow-400" size={20} />
-                        Reels generes
+                        {t('app.generatedReels', 'Generated reels')}
                         {visibleClips.length > 0 && (
                           <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto">
                             {visibleClips.length} Clips
@@ -701,7 +691,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                             className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-500/20 to-indigo-500/20 hover:from-purple-500/30 hover:to-indigo-500/30 border border-purple-500/30 text-purple-300 hover:text-purple-200 rounded-full text-xs font-bold transition-all"
                           >
                             <Calendar size={14} />
-                            Programar Semana
+                            {t('reels.scheduleWeek', 'Planifier la semaine')}
                           </button>
                         )}
                       </h2>
@@ -733,8 +723,8 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                 </div>
 
                 {showCompletionPanel && (uiStatus === 'complete' || uiStatus === 'error') && (
-                  <div className="border-t border-white/10 bg-background/95 px-6 py-4 backdrop-blur-md">
-                    <div className="mx-auto flex max-w-6xl flex-col gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4 md:flex-row md:items-center md:justify-between">
+                  <div className="border-t border-slate-300 dark:border-white/10 bg-background/95 px-6 py-4 backdrop-blur-md">
+                    <div className="mx-auto flex max-w-6xl flex-col gap-4 rounded-2xl border border-slate-300 dark:border-white/10 bg-white/[0.03] p-4 md:flex-row md:items-center md:justify-between">
                       <div className="flex items-start gap-3">
                         <div className={`mt-0.5 inline-flex h-10 w-10 items-center justify-center rounded-xl ${uiStatus === 'complete' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
                           {uiStatus === 'complete' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
@@ -743,10 +733,10 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                           <p className="text-sm font-semibold text-white">
                             {uiStatus === 'complete' ? 'Generation terminee' : 'Generation interrompue'}
                           </p>
-                          <p className="mt-1 text-xs leading-5 text-zinc-400">
+                          <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-zinc-400">
                             {uiStatus === 'complete'
-                              ? `${results?.clips?.length || visibleClips.length} reel(s) sont prets. Tu peux les telecharger, les modifier ou lancer une nouvelle operation.`
-                              : 'Une erreur a ete detectee pendant le workflow. Tu peux fermer ce panneau puis relancer une generation.'}
+                              ? `${results?.clips?.length || visibleClips.length} ${t('reels.readyReels', 'reel(s) sont prets. Tu peux les telecharger, les modifier ou lancer une nouvelle operation.')}`
+                              : t('reels.reelGenerationFailed', 'Une erreur a ete detectee pendant le workflow. Tu peux fermer ce panneau puis relancer une generation.')}
                           </p>
                         </div>
                       </div>
@@ -755,17 +745,17 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                         <button
                           type="button"
                           onClick={() => setShowCompletionPanel(false)}
-                          className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-200 transition hover:bg-white/10"
+                          className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-200 transition hover:bg-white/10"
                         >
                           <X size={14} />
-                          Fermer
+                          {t('app.close', 'Close')}
                         </button>
                         <button
                           type="button"
                           onClick={() => navigate('/dashboard/reel-generator?new=1')}
                           className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
                         >
-                          Nouvelle operation
+                          {t('app.newOperationAction', 'New operation')}
                         </button>
                       </div>
                     </div>
@@ -776,14 +766,14 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
 
           {currentTab === 'reel-generator' && uiStatus !== 'idle' && uiStatus !== 'processing' && uiStatus !== 'complete' && uiStatus !== 'error' && (
             <div className="h-full flex items-center justify-center p-6">
-              <div className="max-w-lg w-full rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-center">
-                <p className="text-sm text-zinc-300">Etat de generation non reconnu: <span className="font-mono text-white">{String(status)}</span></p>
+              <div className="max-w-lg w-full rounded-2xl border border-slate-300 dark:border-white/10 bg-white/[0.03] p-6 text-center">
+                <p className="text-sm text-slate-700 dark:text-zinc-300">{t('app.statusUnknown', 'Unknown generation status:')} <span className="font-mono text-white">{String(status)}</span></p>
                 <button
                   type="button"
                   onClick={() => navigate('/dashboard/reel-generator?new=1')}
                   className="mt-4 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
                 >
-                  Reinitialiser la vue
+                  {t('app.resetView', 'Reset view')}
                 </button>
               </div>
             </div>

@@ -53,8 +53,18 @@ OPENAI_MODEL=gpt-4.1-mini
 # ElevenLabs API (for video dubbing)
 ELEVENLABS_API_KEY=your_elevenlabs_key_here
 
-# Upload-Post API (social media publishing)
-UPLOAD_POST_API_KEY=your_uploadpost_key_here
+# Social OAuth apps (social media publishing)
+FACEBOOK_CLIENT_ID=your_meta_app_id
+FACEBOOK_CLIENT_SECRET=your_meta_app_secret
+INSTAGRAM_CLIENT_ID=your_instagram_app_id
+INSTAGRAM_CLIENT_SECRET=your_instagram_app_secret
+YOUTUBE_CLIENT_ID=your_google_oauth_client_id
+YOUTUBE_CLIENT_SECRET=your_google_oauth_client_secret
+TIKTOK_CLIENT_KEY=your_tiktok_client_key
+TIKTOK_CLIENT_SECRET=your_tiktok_client_secret
+LINKEDIN_CLIENT_ID=your_linkedin_client_id
+LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
+BASE_URL=https://your-backend-domain
 ```
 
 ### Accessing API Keys in Frontend
@@ -78,7 +88,7 @@ Response example:
   "gemini": true,
   "openai": true,
   "elevenlabs": true,
-  "uploadpost": true
+  "social_oauth": true
 }
 ```
 
@@ -105,7 +115,7 @@ Response example:
 - Smooth transitions between themes
 
 ## Future Enhancements
-1. OAuth integration for social networks (currently UI-only)
+1. OAuth health checks per platform with explicit UI diagnostics
 2. Direct profile updates to Supabase user metadata
 3. API key validation endpoint in backend
 4. Service status indicators on Settings page

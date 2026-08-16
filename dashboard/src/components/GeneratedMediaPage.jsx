@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Download, Loader2, Plus, Play, Search, Share2, Trash2, X } from "lucide-react";
 import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
+import { useUserCredits } from "../state/UserCreditsContext";
 import { useNavigate } from "react-router-dom";
-import { decrypt } from "../lib/encryption";
 import { statusLabel, statusClass } from "../lib/status";
 import { getConnectedPlatforms } from "../lib/platforms";
+import { useTranslation } from "../state/LanguageContext";
 
 export default function GeneratedMediaPage({
     title,
@@ -19,6 +20,8 @@ export default function GeneratedMediaPage({
     sharePlatforms = ["tiktok", "instagram", "youtube"],
 }) {
     const { user } = useAuth();
+    const { credits, defaultCosts } = useUserCredits();
+    const { t } = useTranslation();
     const navigate = useNavigate();
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -35,6 +38,10 @@ export default function GeneratedMediaPage({
     const [previewUrl, setPreviewUrl] = useState("");
 
     const totalPages = useMemo(() => Math.max(1, Math.ceil(total / pageSize)), [total, pageSize]);
+    const captionCostEstimate = Number(defaultCosts?.caption || 1);
+    const publicationCostEstimate = Number(defaultCosts?.publication || 1);
+    const canCreate = credits >= captionCostEstimate;
+    const canShare = credits >= publicationCostEstimate;
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -130,7 +137,7 @@ export default function GeneratedMediaPage({
 
     const handleDelete = async (itemId) => {
         if (!user?.id) return;
-        if (!globalThis.confirm(`Supprimer ce media ?`)) return;
+        if (!globalThis.confirm(t("generatedMedia.confirmDelete", "Delete this media?"))) return;
 
         setDeletingId(itemId);
         try {
@@ -140,12 +147,12 @@ export default function GeneratedMediaPage({
             });
             if (!response.ok) {
                 const detail = await response.text();
-                setError(detail || "Delete failed");
+                setError(detail || t("generatedMedia.deleteFailed", "Delete failed"));
                 return;
             }
             await refresh();
         } catch (err) {
-            globalThis.alert(err.message || "Delete failed");
+            globalThis.alert(err.message || t("generatedMedia.deleteFailed", "Delete failed"));
         } finally {
             setDeletingId("");
         }
@@ -161,7 +168,7 @@ export default function GeneratedMediaPage({
                 globalThis.open(fallbackUrl, "_blank", "noopener,noreferrer");
                 return;
             }
-            globalThis.alert("No download url available");
+            globalThis.alert(t("generatedMedia.noDownloadUrl", "No download URL available"));
             return;
         }
 
@@ -170,10 +177,11 @@ export default function GeneratedMediaPage({
 
     const handleShare = async (itemId) => {
         if (!user?.id) return;
+        if (!canShare) {
+            setError(t('generatedMedia.insufficientForShare', 'Insufficient credits. ~{{required}} cr required, {{available}} cr available.', { required: publicationCostEstimate.toFixed(0), available: Number(credits || 0).toFixed(0) }));
+            return;
+        }
 
-        const encryptedUploadPostKey = localStorage.getItem("uploadPostKey_v3") || "";
-        const apiKey = decrypt(encryptedUploadPostKey);
-        const uploadPostUser = globalThis.localStorage.getItem("uploadUserId") || "";
         const selectedPlatforms = getConnectedPlatforms(sharePlatforms);
 
         setSharingId(itemId);
@@ -181,8 +189,6 @@ export default function GeneratedMediaPage({
             const payload = {
                 platforms: selectedPlatforms,
             };
-            if (apiKey) payload.api_key = apiKey;
-            if (uploadPostUser) payload.user_id = uploadPostUser;
 
             const response = await fetch(getApiUrl(`${shareEndpoint}/${itemId}/share`), {
                 method: "POST",
@@ -192,13 +198,13 @@ export default function GeneratedMediaPage({
 
             if (!response.ok) {
                 const detail = await response.text();
-                setError(detail || "Share failed");
+                setError(detail || t("generatedMedia.shareFailed", "Share failed"));
                 return;
             }
 
-            globalThis.alert("Share request sent.");
+            globalThis.alert(t("generatedMedia.shareSent", "Share request sent."));
         } catch (err) {
-            globalThis.alert(err.message || "Share failed");
+            globalThis.alert(err.message || t("generatedMedia.shareFailed", "Share failed"));
         } finally {
             setSharingId("");
         }
@@ -216,32 +222,37 @@ export default function GeneratedMediaPage({
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
                     <h1 className="text-3xl font-black tracking-tight">{title}</h1>
-                    <p className="mt-2 text-sm text-zinc-400">{subtitle}</p>
+                    <p className="mt-2 text-sm text-slate-500 dark:text-zinc-400">{subtitle}</p>
                 </div>
 
                 <button
                     type="button"
                     onClick={() => navigate(createRoute)}
-                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
+                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                     <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
                         <Plus size={16} />
                     </div>
                     <div className="hidden lg:block overflow-hidden">
-                        <p className="text-sm font-bold text-white leading-none mb-0.5">Démarrer une action</p>
+                        <p className="text-sm font-bold text-white leading-none mb-0.5">{t('generatedMedia.startAction', 'Start action')}</p>
                     </div>
                 </button>
             </div>
 
-            <section className="rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
+            <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
+                {!canCreate ? (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                        {t('reels.insufficientForNew', 'Pas assez de crédits, vous pouvez juste consulter sans faire de nouvelles opérations')}
+                    </div>
+                ) : null}
                 <div className="grid gap-3 md:grid-cols-[1fr_220px_auto]">
                     <label className="relative">
-                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-zinc-500" />
                         <input
                             value={queryInput}
                             onChange={(e) => setQueryInput(e.target.value)}
-                            placeholder="Rechercher par titre ou description..."
-                            className="w-full rounded-xl border border-white/10 bg-black/30 py-2.5 pl-10 pr-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-primary/60"
+                            placeholder={t('reels.searchPlaceholder', 'Search by title or description...')}
+                            className="w-full rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 py-2.5 pl-10 pr-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-primary/60"
                         />
                     </label>
 
@@ -251,40 +262,40 @@ export default function GeneratedMediaPage({
                             setPage(1);
                             setStatus(e.target.value);
                         }}
-                        className="rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-primary/60"
+                        className="rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-primary/60"
                     >
-                        <option value="">Tous les statuts</option>
-                        <option value="en_cours">En cours</option>
-                        <option value="termine">Termine</option>
-                        <option value="echec">Echec</option>
+                        <option value="">{t('generatedMedia.allStatuses', 'All statuses')}</option>
+                        <option value="en_cours">{t("generatedMedia.statusInProgress", "In progress")}</option>
+                        <option value="termine">{t("generatedMedia.statusDone", "Done")}</option>
+                        <option value="echec">{t("generatedMedia.statusFailed", "Failed")}</option>
                     </select>
 
                     <button
                         type="button"
                         onClick={refresh}
-                        className="rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 hover:bg-white/10"
+                        className="rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 hover:bg-white/10"
                     >
-                        Rafraichir
+                        {t('settings.refresh', 'Refresh')}
                     </button>
                 </div>
 
                 <div className="overflow-x-auto">
                     <table className="min-w-full text-sm">
                         <thead>
-                            <tr className="border-b border-white/10 text-left text-zinc-400">
-                                <th className="px-3 py-3 font-medium">Titre</th>
-                                <th className="px-3 py-3 font-medium">Description</th>
-                                <th className="px-3 py-3 font-medium">Duree</th>
-                                <th className="px-3 py-3 font-medium">Statut</th>
-                                <th className="px-3 py-3 font-medium">Cree le</th>
-                                <th className="px-3 py-3 font-medium text-right">Actions</th>
+                            <tr className="border-b border-slate-300 dark:border-white/10 text-left text-slate-500 dark:text-zinc-400">
+                                <th className="px-3 py-3 font-medium">{t("generatedMedia.tableTitle", "Title")}</th>
+                                <th className="px-3 py-3 font-medium">{t("generatedMedia.tableDescription", "Description")}</th>
+                                <th className="px-3 py-3 font-medium">{t("generatedMedia.tableDuration", "Duration")}</th>
+                                <th className="px-3 py-3 font-medium">{t("generatedMedia.tableStatus", "Status")}</th>
+                                <th className="px-3 py-3 font-medium">{t("generatedMedia.tableCreatedAt", "Created at")}</th>
+                                <th className="px-3 py-3 font-medium text-right">{t("generatedMedia.tableActions", "Actions")}</th>
                             </tr>
                         </thead>
                         <tbody>
                             {loading && (
                                 <tr>
-                                    <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">
-                                        <span className="inline-flex items-center gap-2"><Loader2 size={14} className="animate-spin" /> Chargement...</span>
+                                    <td colSpan={6} className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">
+                                        <span className="inline-flex items-center gap-2"><Loader2 size={14} className="animate-spin" /> {t('reels.loading', 'Loading...')}</span>
                                     </td>
                                 </tr>
                             )}
@@ -297,58 +308,58 @@ export default function GeneratedMediaPage({
 
                             {!loading && !error && items.length === 0 && (
                                 <tr>
-                                    <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">{emptyLabel}</td>
+                                    <td colSpan={6} className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">{emptyLabel}</td>
                                 </tr>
                             )}
 
                             {!loading && !error &&
                                 items.map((item) => (
-                                    <tr key={item.id} className="border-b border-white/5 align-top">
+                                    <tr key={item.id} className="border-b border-slate-200 dark:border-white/5 align-top">
                                         <td className="px-3 py-3">
                                             {item.media_thumbnail_url ? (
                                                 <img
                                                     src={item.media_thumbnail_url}
                                                     alt={item.media_title || "thumbnail"}
-                                                    className="mb-2 h-16 w-10 rounded-md object-cover border border-white/10"
+                                                    className="mb-2 h-16 w-10 rounded-md object-cover border border-slate-300 dark:border-white/10"
                                                 />
                                             ) : null}
-                                            <p className="font-semibold text-white line-clamp-2">{item.media_title || "Sans titre"}</p>
-                                            <p className="mt-1 text-xs text-zinc-500">ID: {item.id}</p>
+                                            <p className="font-semibold text-white line-clamp-2">{item.media_title || t("generatedMedia.untitled", "Untitled")}</p>
+                                            <p className="mt-1 text-xs text-slate-400 dark:text-zinc-500">ID: {item.id}</p>
                                         </td>
-                                        <td className="px-3 py-3 text-zinc-300 max-w-md">
+                                        <td className="px-3 py-3 text-slate-700 dark:text-zinc-300 max-w-md">
                                             <p className="line-clamp-3">{item.media_description || "-"}</p>
                                         </td>
-                                        <td className="px-3 py-3 text-zinc-300">{item.media_duration ? `${item.media_duration}s` : "-"}</td>
+                                        <td className="px-3 py-3 text-slate-700 dark:text-zinc-300">{item.media_duration ? `${item.media_duration}s` : "-"}</td>
                                         <td className="px-3 py-3">
                                             <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClass(item.media_status)}`}>
                                                 {statusLabel(item.media_status)}
                                             </span>
                                         </td>
-                                        <td className="px-3 py-3 text-zinc-400">{item.media_created_at ? new Date(item.media_created_at).toLocaleString() : "-"}</td>
+                                        <td className="px-3 py-3 text-slate-500 dark:text-zinc-400">{item.media_created_at ? new Date(item.media_created_at).toLocaleString() : "-"}</td>
                                         <td className="px-3 py-3">
                                             <div className="flex justify-end gap-2">
                                                 <button
                                                     type="button"
                                                     onClick={() => handlePreview(item)}
-                                                    className="rounded-lg border border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10"
-                                                    title="Visualiser"
+                                                    className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10"
+                                                    title={t("reels.preview", "Preview")}
                                                 >
                                                     <Play size={14} />
                                                 </button>
                                                 <button
                                                     type="button"
                                                     onClick={() => handleDownload(item.id)}
-                                                    className="rounded-lg border border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10"
-                                                    title="Télécharger"
+                                                    className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10"
+                                                    title={t("reels.download", "Download")}
                                                 >
                                                     <Download size={14} />
                                                 </button>
                                                 <button
                                                     type="button"
                                                     onClick={() => handleShare(item.id)}
-                                                    disabled={sharingId === item.id}
-                                                    className="rounded-lg border border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10 disabled:opacity-60"
-                                                    title="Partager"
+                                                    disabled={sharingId === item.id || !canShare}
+                                                    className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10 disabled:opacity-60"
+                                                    title={t("reels.share", "Share")}
                                                 >
                                                     <Share2 size={14} />
                                                 </button>
@@ -357,7 +368,7 @@ export default function GeneratedMediaPage({
                                                     onClick={() => handleDelete(item.id)}
                                                     disabled={deletingId === item.id}
                                                     className="rounded-lg border border-red-500/20 bg-red-500/10 p-2 text-red-300 hover:bg-red-500/20 disabled:opacity-60"
-                                                    title="Supprimer"
+                                                    title={t("reels.delete", "Delete")}
                                                 >
                                                     <Trash2 size={14} />
                                                 </button>
@@ -369,26 +380,26 @@ export default function GeneratedMediaPage({
                     </table>
                 </div>
 
-                <div className="flex flex-col gap-3 border-t border-white/10 pt-4 md:flex-row md:items-center md:justify-between">
-                    <p className="text-xs text-zinc-500">
-                        Page {page} sur {totalPages} · {total} résultat{total > 1 ? "s" : ""}
+                <div className="flex flex-col gap-3 border-t border-slate-300 dark:border-white/10 pt-4 md:flex-row md:items-center md:justify-between">
+                    <p className="text-xs text-slate-400 dark:text-zinc-500">
+                        {t('reels.page', 'Page')} {page} / {totalPages} · {total}
                     </p>
                     <div className="flex flex-wrap gap-2">
                         <button
                             type="button"
                             disabled={page <= 1}
                             onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-                            className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 disabled:opacity-40"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 disabled:opacity-40"
                         >
-                            Précédent
+                            {t('reels.previous', 'Previous')}
                         </button>
                         <button
                             type="button"
                             disabled={page >= totalPages}
                             onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
-                            className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 disabled:opacity-40"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 disabled:opacity-40"
                         >
-                            Suivant
+                            {t('reels.next', 'Next')}
                         </button>
                     </div>
                 </div>
@@ -396,11 +407,11 @@ export default function GeneratedMediaPage({
 
             {previewItem && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">
-                    <div className="flex w-full max-w-[420px] flex-col overflow-hidden rounded-[2rem] border border-white/10 bg-zinc-950 shadow-2xl">
-                        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                    <div className="flex w-full max-w-[420px] flex-col overflow-hidden rounded-[2rem] border border-slate-300 dark:border-white/10 bg-zinc-950 shadow-2xl">
+                        <div className="flex items-center justify-between border-b border-slate-300 dark:border-white/10 px-4 py-3">
                             <div>
-                                <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Prévisualisation</p>
-                                <h3 className="text-sm font-semibold text-white">{previewItem.media_title || "Sans titre"}</h3>
+                                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 dark:text-zinc-500">{t("generatedMedia.previewLabel", "Preview")}</p>
+                                <h3 className="title-contrast text-sm font-semibold">{previewItem.media_title || t("generatedMedia.untitled", "Untitled")}</h3>
                             </div>
                             <button
                                 type="button"
@@ -408,7 +419,7 @@ export default function GeneratedMediaPage({
                                     setPreviewItem(null);
                                     setPreviewUrl("");
                                 }}
-                                className="rounded-full border border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10"
+                                className="rounded-full border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10"
                             >
                                 <X size={16} />
                             </button>
@@ -424,11 +435,11 @@ export default function GeneratedMediaPage({
                             />
                         </div>
 
-                        <div className="space-y-3 border-t border-white/10 px-4 py-4 text-sm text-zinc-300">
-                            <p className="line-clamp-4 text-zinc-400">{previewItem.media_description || "Aucune description."}</p>
-                            <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <div className="space-y-3 border-t border-slate-300 dark:border-white/10 px-4 py-4 text-sm text-slate-700 dark:text-zinc-300">
+                            <p className="line-clamp-4 text-slate-500 dark:text-zinc-400">{previewItem.media_description || t("generatedMedia.noDescription", "No description.")}</p>
+                            <div className="flex items-center gap-2 text-xs text-slate-400 dark:text-zinc-500">
                                 <span className={`rounded-full border px-2 py-1 ${statusClass(previewItem.media_status)}`}>{statusLabel(previewItem.media_status)}</span>
-                                <span>{previewItem.media_duration ? `${previewItem.media_duration}s` : "Durée inconnue"}</span>
+                                <span>{previewItem.media_duration ? `${previewItem.media_duration}s` : t("generatedMedia.unknownDuration", "Unknown duration")}</span>
                             </div>
                         </div>
                     </div>

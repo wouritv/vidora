@@ -4,21 +4,24 @@ import subprocess
 import threading
 import json
 import hashlib
+import base64
 import shutil
 import glob
 import time
 import asyncio
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urlencode
 from urllib.request import Request as UrlRequest, urlopen
 from starlette.background import BackgroundTask
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse
+from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from pydantic import BaseModel
 try:
     import stripe
@@ -41,7 +44,30 @@ from supabase_request import (
     get_abonnement as supabase_get_abonnement,
     insert_souscription as supabase_insert_souscription,
     get_souscription_by_reference as supabase_get_souscription_by_reference,
+    get_client as supabase_get_client,
+    get_user_data as supabase_get_user_data,
+    upsert_user_data_credits as supabase_upsert_user_data_credits,
+    set_user_data_balance as supabase_set_user_data_balance,
+    deduct_user_credits as supabase_deduct_user_credits,
+    insert_user_data_history as supabase_insert_user_data_history,
+    get_user_data_history as supabase_get_user_data_history,
+    get_latest_user_paid_subscription as supabase_get_latest_user_paid_subscription,
+    update_souscription_row as supabase_update_souscription_row,
 )
+from billing import (
+    usd_to_credits,
+    usd_to_final_credits,
+    calculate_credits_for_operation,
+    estimate_reel_cost_usd,
+    estimate_caption_cost_usd,
+    estimate_publication_cost_usd,
+    DEFAULT_REEL_CREDITS,
+    DEFAULT_CAPTION_CREDITS,
+    DEFAULT_PUBLICATION_CREDITS,
+    CREDIT_UNIT_PRICE_BY_DOLLAR,
+)
+from job_manager import JobManager, JobType, calc_elapsed_seconds
+from pipelines import ReelProcessingPipeline
 
 load_dotenv()
 
@@ -54,7 +80,13 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+QUEUE_WORKER_COUNT = int(os.environ.get("QUEUE_WORKER_COUNT", "1"))
+REEL_JOB_MAX_ATTEMPTS = int(os.environ.get("REEL_JOB_MAX_ATTEMPTS", "2"))
+REEL_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("REEL_JOB_RETRY_DELAY_SECONDS", "15"))
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
+REEL_MAX_DURATION_MINUTES = float(os.environ.get("REEL_MAX_DURATION", "180"))
+REEL_MAX_STORAGE_GB = float(os.environ.get("REEL_MAX_STORAGE", "15"))
+VIREEL_VIDEO_FORMAT = os.environ.get("VIREEL_VIDEO_FORMAT", "mp4,mov,avi")
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
 OUTPUT_SWEEP_INTERVAL_SECONDS = int(os.environ.get("OUTPUT_SWEEP_INTERVAL_SECONDS", str(6 * 3600)))
 OUTPUT_SWEEP_MIN_AGE_SECONDS = int(os.environ.get("OUTPUT_SWEEP_MIN_AGE_SECONDS", "1800"))
@@ -64,6 +96,48 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_CURRENCY = os.environ.get("STRIPE_CURRENCY", "eur").lower()
 STRIPE_SUCCESS_URL = os.environ.get("STRIPE_SUCCESS_URL", "")
 STRIPE_CANCEL_URL = os.environ.get("STRIPE_CANCEL_URL", "")
+STORAGE_RETENTION_PERIODE_DAYS = max(0, int(os.environ.get("STORAGE_RETENTION_PERIODE", "7") or "7"))
+PLATFORM_CONFIG = {
+    "linkedin": {
+        "auth_url": "https://www.linkedin.com/oauth/v2/authorization",
+        "token_url": "https://www.linkedin.com/oauth/v2/accessToken",
+        "client_id": os.getenv("LINKEDIN_CLIENT_ID"),
+        "client_secret": os.getenv("LINKEDIN_CLIENT_SECRET"),
+        "scopes": ["w_member_social", "openid", "profile","email"],
+    },
+    "facebook": {
+        "auth_url": "https://www.facebook.com/v19.0/dialog/oauth",
+        "token_url": "https://graph.facebook.com/v19.0/oauth/access_token",
+        "client_id": os.getenv("FACEBOOK_CLIENT_ID"),
+        "client_secret": os.getenv("FACEBOOK_CLIENT_SECRET"),
+        "scopes": ["pages_manage_posts", "pages_read_engagement"],
+    },
+    "instagram": {
+        "auth_url": "https://www.instagram.com/oauth/authorize",
+        "token_url": "https://api.instagram.com/oauth/access_token",
+        "long_lived_token_url": "https://graph.instagram.com/access_token",
+        "client_id": os.getenv("INSTAGRAM_APP_ID"),
+        "client_secret": os.getenv("INSTAGRAM_APP_SECRET"),
+        "scopes": [
+            "instagram_business_basic",
+            "instagram_business_content_publish",
+        ],
+    },
+    "youtube": {
+        "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "client_id": os.getenv("YOUTUBE_CLIENT_ID"),
+        "client_secret": os.getenv("YOUTUBE_CLIENT_SECRET"),
+        "scopes": ["https://www.googleapis.com/auth/youtube.upload","https://www.googleapis.com/auth/youtube.readonly"],
+    },
+    "tiktok": {
+        "auth_url": "https://www.tiktok.com/v2/auth/authorize",
+        "token_url": "https://open.tiktokapis.com/v2/oauth/token/",
+        "client_id": os.getenv("TIKTOK_CLIENT_KEY"),
+        "client_secret": os.getenv("TIKTOK_CLIENT_SECRET"),
+        "scopes": ["video.publish", "user.info.basic"],
+    },
+}
 
 if stripe and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -75,6 +149,13 @@ thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
 concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+reel_job_manager = JobManager(queue_name="reels")
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY manquant dans l'environnement")
+
+_oauth_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -167,6 +248,94 @@ def _estimate_transcript_duration_seconds(transcript: Dict[str, Any]) -> float:
         meta_seconds = 0.0
 
     return max(max_end, meta_seconds)
+
+
+async def get_user_id_header(request: Request) -> str:
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    return user_id
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # Accept both native ISO and trailing Z formats.
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _enforce_subscription_retention_policy(user_id: str) -> Dict[str, Any]:
+    """Apply subscription retention policy and zero balances after retention deadline."""
+    if not user_id or not is_supabase_configured():
+        return {"state": "skipped"}
+
+    active = await get_user_abonnement(user_id)
+    if active:
+        return {"state": "active", "subscription": active}
+
+    latest = await supabase_get_latest_user_paid_subscription(user_id)
+    if not latest:
+        return {"state": "no_subscription"}
+
+    end_date = _parse_iso_datetime(latest.get("payment_end_date"))
+    if not end_date:
+        return {"state": "no_subscription_end", "subscription": latest}
+
+    now_utc = datetime.now(timezone.utc)
+    retention_deadline = end_date + timedelta(days=STORAGE_RETENTION_PERIODE_DAYS)
+
+    if latest.get("id") and not latest.get("retention_deadline_at"):
+        await supabase_update_souscription_row(
+            str(latest.get("id")),
+            {"retention_deadline_at": retention_deadline.isoformat()},
+        )
+
+    if now_utc <= retention_deadline:
+        return {
+            "state": "retention_window",
+            "subscription": latest,
+            "retention_deadline_at": retention_deadline.isoformat(),
+        }
+
+    user_data = await supabase_get_user_data(user_id) or {}
+    current_credit = float(user_data.get("credit") or 0.0)
+    current_storage = float(user_data.get("stockage") or 0.0)
+
+    if current_credit > 0.0 or current_storage > 0.0:
+        await supabase_set_user_data_balance(user_id=user_id, credit=0.0, storage=0.0)
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=current_credit,
+            storage=current_storage,
+            operation="output",
+            operation_type="subscription_expiration",
+            operation_id=str(latest.get("id") or ""),
+        )
+
+    if latest.get("id") and not latest.get("account_disabled_at"):
+        await supabase_update_souscription_row(
+            str(latest.get("id")),
+            {
+                "account_disabled_at": now_utc.isoformat(),
+                "retention_deadline_at": retention_deadline.isoformat(),
+            },
+        )
+
+    return {
+        "state": "disabled",
+        "subscription": latest,
+        "retention_deadline_at": retention_deadline.isoformat(),
+    }
 
 
 async def _resolve_reel_input_url(job_id: str, clip_index: int) -> Optional[str]:
@@ -387,58 +556,6 @@ def _extract_s3_key_from_thumbnail_ref(thumbnail_ref: str) -> str:
         return ref
     return ""
 
-
-""" def _upload_thumbnail_for_reel(
-    thumbnail_ref: str,
-    output_dir: str,
-    bucket: str,
-    user_id: str,
-    job_id: str,
-    clip_index: int,
-) -> str:
-     """"""Best-effort thumbnail upload to S3. Returns S3 key when upload succeeds. """"""
-    existing_key = _extract_s3_key_from_thumbnail_ref(thumbnail_ref)
-    if existing_key:
-        return existing_key
-
-    ref = (thumbnail_ref or "").strip()
-    if not ref:
-        return ""
-
-    local_path = ""
-    cleanup_temp = ""
-    try:
-        if ref.startswith("http://") or ref.startswith("https://"):
-            parsed = urlparse(ref)
-            ext = os.path.splitext(unquote(parsed.path or ""))[1] or ".jpg"
-            temp_name = f"thumb_{clip_index + 1}{ext}"
-            temp_path = os.path.join(output_dir, temp_name)
-            req = UrlRequest(ref, headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(req, timeout=20) as resp, open(temp_path, "wb") as out:
-                out.write(resp.read())
-            local_path = temp_path
-            cleanup_temp = temp_path
-        elif os.path.isabs(ref) and os.path.exists(ref):
-            local_path = ref
-        elif os.path.exists(os.path.join(output_dir, ref)):
-            local_path = os.path.join(output_dir, ref)
-        else:
-            return ""
-
-        ext = os.path.splitext(local_path)[1] or ".jpg"
-        s3_key = f"reels/{user_id}/{job_id}/thumb_{clip_index + 1}{ext}"
-        uploaded = upload_file_to_s3(local_path, bucket, s3_key)
-        return s3_key if uploaded else ""
-    except Exception:
-        return ""
-    finally:
-        if cleanup_temp and os.path.exists(cleanup_temp):
-            try:
-                os.remove(cleanup_temp)
-            except Exception:
-                pass """
-
-
 def _generate_reel_thumbnail_from_video(
     video_path: str,
     output_dir: str,
@@ -636,9 +753,9 @@ async def cleanup_jobs():
         except Exception as e:
             print(f"⚠️ Cleanup error: {e}")
 
-async def process_queue():
+async def process_queue(worker_name: str):
     """Background worker to process jobs from the queue with concurrency limit."""
-    print(f"🚀 Job Queue Worker started with {MAX_CONCURRENT_JOBS} concurrent slots.")
+    print(f"🚀 Job Queue Worker {worker_name} started with {MAX_CONCURRENT_JOBS} concurrent slots.")
     while True:
         try:
             # Wait for a job
@@ -646,7 +763,7 @@ async def process_queue():
             
             # Acquire semaphore slot (waits if max jobs are running)
             await concurrency_semaphore.acquire()
-            print(f"🔄 Acquired slot for job: {job_id}")
+            print(f"🔄 [{worker_name}] Acquired slot for job: {job_id}")
 
             # Process in background task to not block the loop (allowing other slots to fill)
             asyncio.create_task(run_job_wrapper(job_id))
@@ -658,7 +775,7 @@ async def process_queue():
 async def run_job_wrapper(job_id):
     """Wrapper to run job and release semaphore"""
     try:
-        job = jobs.get(job_id)
+        job = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id)
         if job:
             await run_job(job_id, job)
     except Exception as e:
@@ -672,10 +789,16 @@ async def run_job_wrapper(job_id):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Start worker and cleanup
-    worker_task = asyncio.create_task(process_queue())
+    worker_tasks = [
+        asyncio.create_task(process_queue(f"worker-{idx + 1}"))
+        for idx in range(max(1, QUEUE_WORKER_COUNT))
+    ]
     cleanup_task = asyncio.create_task(cleanup_jobs())
     yield
     # Cleanup (optional: cancel worker)
+    for task in worker_tasks:
+        task.cancel()
+    cleanup_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(ia_captions_router)
@@ -768,9 +891,13 @@ async def run_job(job_id, job_data):
     output_dir = job_data['output_dir']
     user_id = job_data.get("user_id")
     input_path = job_data.get("input_path")
+    pipeline = ReelProcessingPipeline(reel_job_manager, job_id)
+    start_ts = time.time()
 
     jobs[job_id]['status'] = 'processing'
     jobs[job_id]['logs'].append("Job started by worker.")
+    await reel_job_manager.start_job(job_id)
+    await pipeline.starting()
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
     
     try:
@@ -822,6 +949,7 @@ async def run_job(job_id, job_data):
                         
                         if ready_clips:
                              jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
+                             await pipeline.cutting_clips()
             except Exception as e:
                 # Ignore read errors during processing
                 pass
@@ -848,6 +976,7 @@ async def run_job(job_id, job_data):
                 cost_analysis = data.get('cost_analysis')
 
                 try:
+                    await pipeline.uploading_reels(len(clips))
                     saved_rows = await _persist_reels_for_job(
                         job_id=job_id,
                         user_id=user_id,
@@ -874,16 +1003,57 @@ async def run_job(job_id, job_data):
                     'cost_analysis': cost_analysis,
                     'reels': saved_rows,
                 }
+                await pipeline.finalizing()
+                elapsed = round(calc_elapsed_seconds(start_ts), 3)
+                await reel_job_manager.complete_job(
+                    job_id,
+                    {
+                        'clips': enriched_clips,
+                        'cost_analysis': cost_analysis,
+                        'reels': saved_rows,
+                        'duration_seconds': elapsed,
+                    },
+                )
+                # Debit credits for the completed reel job (best-effort)
+                if is_supabase_configured():
+                    _runtime = reel_job_manager.runtime_jobs.get(job_id, {})
+                    _job_user_id = _runtime.get("user_id") or (jobs.get(job_id) or {}).get("user_id")
+                    if _job_user_id:
+                        _uses_yt = (jobs.get(job_id) or {}).get("url") is not None
+                        _reel_bd = estimate_reel_cost_usd(
+                            duration_minutes=max(elapsed / 60.0, 1.0),
+                            video_size_gb=0.5,
+                            uses_youtube_download=_uses_yt,
+                            youtube_download_gb=0.3 if _uses_yt else 0.0,
+                            uses_openai=True,
+                            uses_assembly=True,
+                        )
+                        _reel_cr = calculate_credits_for_operation(_reel_bd)["final_credits"]
+                        await reel_job_manager.debit_credits_for_job(
+                            job_id=job_id,
+                            user_id=_job_user_id,
+                            credits=_reel_cr,
+                            operation_type="reels",
+                        )
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
+                 result = await reel_job_manager.fail_job(job_id, "No metadata file generated", error_code="METADATA_NOT_FOUND", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
+                 if result.get("retry"):
+                     asyncio.create_task(reel_job_manager.schedule_retry_after(job_queue, job_id, REEL_JOB_RETRY_DELAY_SECONDS))
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
-            
+            result = await reel_job_manager.fail_job(job_id, f"Process failed with exit code {returncode}", error_code="PROCESS_EXIT", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
+            if result.get("retry"):
+                asyncio.create_task(reel_job_manager.schedule_retry_after(job_queue, job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
+        result = await reel_job_manager.fail_job(job_id, f"Execution error: {str(e)}", error_code="EXECUTION_ERROR", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
+        if result.get("retry"):
+            asyncio.create_task(reel_job_manager.schedule_retry_after(job_queue, job_id, REEL_JOB_RETRY_DELAY_SECONDS))
     finally:
         # Keep generated artifacts in output/ until the periodic output sweep runs.
         if input_path and os.path.exists(input_path):
@@ -915,10 +1085,16 @@ async def get_services_status():
             "name": "ElevenLabs",
             "description": "AI voice dubbing and translation"
         },
-        "uploadpost": {
-            "available": bool(os.getenv("UPLOAD_POST_API_KEY")),
-            "name": "Upload-Post",
-            "description": "Social media publishing"
+        "social_oauth": {
+            "available": bool(
+                os.getenv("FACEBOOK_CLIENT_ID")
+                or os.getenv("LINKEDIN_CLIENT_ID")
+                or os.getenv("YOUTUBE_CLIENT_ID")
+                or os.getenv("TIKTOK_CLIENT_KEY")
+                or os.getenv("INSTAGRAM_CLIENT_ID")
+            ),
+            "name": "Social OAuth",
+            "description": "Native social account publishing"
         },
         "aws_s3": {
             "available": bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")),
@@ -932,6 +1108,108 @@ async def get_services_status():
         }
     }
 
+
+def _bytes_to_gb(size_bytes: float) -> float:
+    return max(0.0, float(size_bytes) / (1024 ** 3))
+
+
+def _probe_local_video_duration_seconds(video_path: str) -> float:
+    """Best-effort local video duration probe using ffprobe, fallback to OpenCV."""
+    if not video_path or not os.path.exists(video_path):
+        return 0.0
+
+    try:
+        probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        out = subprocess.check_output(probe_cmd, stderr=subprocess.STDOUT).decode().strip()
+        duration = float(out or 0)
+        if duration > 0:
+            return duration
+    except Exception:
+        pass
+
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        duration = frame_count / fps if fps else 0.0
+        return max(0.0, float(duration))
+    except Exception:
+        return 0.0
+
+
+def _probe_remote_video_metadata(url_value: str) -> Dict[str, float]:
+    """Best-effort remote metadata probe via yt-dlp without downloading the file."""
+    if not url_value:
+        return {"duration_seconds": 0.0, "size_bytes": 0.0}
+
+    try:
+        cmd = ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", url_value]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().strip()
+        if not out:
+            return {"duration_seconds": 0.0, "size_bytes": 0.0}
+        payload = json.loads(out.splitlines()[-1])
+        duration = float(payload.get("duration") or 0)
+        size_bytes = float(payload.get("filesize") or payload.get("filesize_approx") or 0)
+        return {
+            "duration_seconds": max(0.0, duration),
+            "size_bytes": max(0.0, size_bytes),
+        }
+    except Exception:
+        return {"duration_seconds": 0.0, "size_bytes": 0.0}
+
+
+def _validate_reel_source_constraints(duration_seconds: float, size_bytes: float, source_label: str) -> None:
+    max_duration_seconds = max(0.0, REEL_MAX_DURATION_MINUTES) * 60.0
+    max_size_bytes = max(0.0, REEL_MAX_STORAGE_GB) * (1024 ** 3)
+
+    if max_size_bytes > 0 and size_bytes > max_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Source {source_label} trop volumineuse: {_bytes_to_gb(size_bytes):.2f} Go. "
+                f"Maximum autorise: {REEL_MAX_STORAGE_GB:.2f} Go."
+            ),
+        )
+
+    if max_duration_seconds > 0 and duration_seconds > max_duration_seconds:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Source {source_label} trop longue: {duration_seconds / 60.0:.2f} min. "
+                f"Maximum autorise: {REEL_MAX_DURATION_MINUTES:.2f} min."
+            ),
+        )
+
+
+def _allowed_video_formats() -> List[str]:
+    return [
+        fmt.strip().lower().lstrip(".")
+        for fmt in str(VIREEL_VIDEO_FORMAT or "").split(",")
+        if fmt and fmt.strip()
+    ]
+
+
+def _validate_video_extension(filename: str, context_label: str = "fichier") -> None:
+    allowed = _allowed_video_formats()
+    if not allowed:
+        return
+
+    ext = os.path.splitext(str(filename or ""))[1].lower().lstrip(".")
+    if not ext or ext not in allowed:
+        accepted = ", ".join(allowed)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Format video invalide pour {context_label}. Formats acceptes: {accepted}.",
+        )
+
 @app.post("/api/process")
 async def process_endpoint(
     request: Request,
@@ -944,9 +1222,29 @@ async def process_endpoint(
     if not api_key:
         raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
 
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    user_id: str = Depends(get_user_id_header)
+
+    # --- Credit pre-check ---
+    if is_supabase_configured():
+        uses_youtube = bool(url)
+        _reel_cost_breakdown = estimate_reel_cost_usd(
+            duration_minutes=10.0,
+            video_size_gb=1.0,
+            uses_youtube_download=uses_youtube,
+            youtube_download_gb=0.5 if uses_youtube else 0.0,
+            uses_openai=True,
+            uses_assembly=True,
+            uses_gemini=False,
+        )
+        _reel_credit_info = calculate_credits_for_operation(_reel_cost_breakdown)
+        _required_credits = _reel_credit_info["final_credits"]
+        _user_data = await supabase_get_user_data(user_id)
+        _user_credits = float(_user_data.get("credit", 0)) if _user_data else 0.0
+        if _user_credits < _required_credits:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {_required_credits} cr, disponible : {_user_credits} cr.",
+            )
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
 
@@ -965,6 +1263,14 @@ async def process_endpoint(
 
     if url and DISABLE_YOUTUBE_URL:
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
+
+    if url:
+        remote_meta = _probe_remote_video_metadata(url)
+        _validate_reel_source_constraints(
+            duration_seconds=float(remote_meta.get("duration_seconds") or 0.0),
+            size_bytes=float(remote_meta.get("size_bytes") or 0.0),
+            source_label="url",
+        )
 
     # Capture attestation context for legal record (IP + timestamp + UA)
     client_ip = request.client.host if request.client else "unknown"
@@ -993,21 +1299,30 @@ async def process_endpoint(
     if url:
         cmd.extend(["-u", url])
     else:
+        _validate_video_extension(file.filename if file else "", context_label="reel")
+
         # Save uploaded file with size limit check
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
 
         # Read file in chunks to check size
         size = 0
-        limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+        limit_bytes = max(0.0, REEL_MAX_STORAGE_GB) * (1024 ** 3)
 
         with open(input_path, "wb") as buffer:
             while content := await file.read(1024 * 1024): # Read 1MB chunks
                 size += len(content)
-                if size > limit_bytes:
+                if limit_bytes > 0 and size > limit_bytes:
                     os.remove(input_path)
                     shutil.rmtree(job_output_dir)
-                    raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                    raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {REEL_MAX_STORAGE_GB:.2f} Go")
                 buffer.write(content)
+
+        local_duration = _probe_local_video_duration_seconds(input_path)
+        _validate_reel_source_constraints(
+            duration_seconds=local_duration,
+            size_bytes=float(size),
+            source_label="fichier",
+        )
 
         cmd.extend(["-i", input_path])
 
@@ -1015,8 +1330,8 @@ async def process_endpoint(
 
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 
-    # Enqueue Job
-    jobs[job_id] = {
+    # Enqueue job runtime payload.
+    runtime_payload = {
         'status': 'queued',
         'logs': [f"Job {job_id} queued."],
         'cmd': cmd,
@@ -1027,12 +1342,68 @@ async def process_endpoint(
         'user_id': user_id,
     }
 
+    jobs[job_id] = dict(runtime_payload)
+    reel_job_manager.runtime_jobs[job_id] = dict(runtime_payload)
+
+    # Persist job state in Supabase.
+    await reel_job_manager.create_job(
+        user_id=user_id,
+        job_type=JobType.GENERATE_REELS,
+        pipeline_name="ReelProcessingPipeline",
+        job_id=job_id,
+        job_data={
+            "source_type": "url" if url else "file",
+            "source_value": url if url else (file.filename if file else ""),
+            "output_dir": job_output_dir,
+            "input_path": input_path,
+            "max_file_size_mb": MAX_FILE_SIZE_MB,
+            "reel_max_duration_minutes": REEL_MAX_DURATION_MINUTES,
+            "reel_max_storage_gb": REEL_MAX_STORAGE_GB,
+            "attestation": attestation,
+        },
+        runtime_data=dict(runtime_payload),
+        max_attempts=REEL_JOB_MAX_ATTEMPTS,
+        reserved_quota=1.0,
+    )
+    await reel_job_manager.enqueue_job(job_id)
+    await ReelProcessingPipeline(reel_job_manager, job_id).queued()
+
     await job_queue.put(job_id)
 
     return {"job_id": job_id, "status": "queued"}
 
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
+    user_id = None
+    # Best effort read user scope from in-memory runtime when available.
+    runtime_job = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id)
+    if runtime_job:
+        user_id = runtime_job.get("user_id")
+
+    supabase_view = await reel_job_manager.get_job_view(job_id, user_id=user_id)
+    if supabase_view:
+        if runtime_job and runtime_job.get('status') in ('queued', 'processing') and runtime_job.get('output_dir'):
+            try:
+                output_dir = runtime_job['output_dir']
+                if os.path.exists(output_dir):
+                    clip_files = sorted([
+                        f for f in os.listdir(output_dir)
+                        if f.endswith('.mp4') and not f.startswith('temp_')
+                    ])
+                    if clip_files:
+                        supabase_view['partialClips'] = [
+                            {
+                                'video_url': f'/videos/{job_id}/{clip_file}',
+                                'file': clip_file,
+                                'index': i,
+                                'status': 'generated'
+                            }
+                            for i, clip_file in enumerate(clip_files)
+                        ]
+            except Exception:
+                pass
+        return supabase_view
+
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -1130,6 +1501,7 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 
 @app.post("/api/edit")
 async def edit_clip(
+    request: Request,
     req: EditRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
@@ -1138,6 +1510,28 @@ async def edit_clip(
     
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
+
+    user_id: str = Depends(get_user_id_header)
+
+    # Credit pre-check for reel auto-edit customization
+    edit_required_credits = 0.0
+    if is_supabase_configured():
+        _edit_breakdown = estimate_reel_cost_usd(
+            duration_minutes=3.0,
+            video_size_gb=0.3,
+            uses_youtube_download=False,
+            uses_openai=True,
+            uses_assembly=False,
+            uses_gemini=False,
+        )
+        edit_required_credits = calculate_credits_for_operation(_edit_breakdown)["final_credits"]
+        _edit_user_data = await supabase_get_user_data(user_id)
+        _edit_available = float(_edit_user_data.get("credit", 0)) if _edit_user_data else 0.0
+        if _edit_available < edit_required_credits:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {edit_required_credits} cr, disponible : {_edit_available} cr.",
+            )
 
     job = jobs.get(req.job_id)
 
@@ -1248,6 +1642,17 @@ async def edit_clip(
         # Let's update the current one's video_url but keep backup?
         # Or return the new URL to the frontend to display.
         
+        if is_supabase_configured() and edit_required_credits > 0:
+            await supabase_deduct_user_credits(user_id, edit_required_credits)
+            await supabase_insert_user_data_history(
+                user_id=user_id,
+                credit=edit_required_credits,
+                storage=0.0,
+                operation="output",
+                operation_type="reels",
+                operation_id=f"{req.job_id}:edit:{req.clip_index}",
+            )
+
         return {
             "success": True, 
             "new_video_url": new_video_url,
@@ -1477,7 +1882,25 @@ async def generate_effects_config(
 
 
 @app.post("/api/subtitle")
-async def add_subtitles(req: SubtitleRequest):
+async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id_header)):
+    subtitle_required_credits = 0.0
+    if is_supabase_configured():
+        _sub_breakdown = estimate_caption_cost_usd(
+            duration_minutes=3.0,
+            video_size_gb=0.2,
+            uses_assembly=True,
+            uses_openai=True,
+            uses_gemini=False,
+        )
+        subtitle_required_credits = calculate_credits_for_operation(_sub_breakdown)["final_credits"]
+        _sub_user_data = await supabase_get_user_data(user_id)
+        _sub_available = float(_sub_user_data.get("credit", 0)) if _sub_user_data else 0.0
+        if _sub_available < subtitle_required_credits:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {subtitle_required_credits} cr, disponible : {_sub_available} cr.",
+            )
+
     # Reload job data from disk just in case metadata was updated.
     # The in-memory job may be gone on the Reels page; metadata on disk is enough.
     job = jobs.get(req.job_id)
@@ -1607,6 +2030,17 @@ async def add_subtitles(req: SubtitleRequest):
         print(f"⚠️ Failed to update metadata.json: {e}")
         # Non-critical, but good for persistence
 
+    if is_supabase_configured() and subtitle_required_credits > 0:
+        await supabase_deduct_user_credits(user_id, subtitle_required_credits)
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=subtitle_required_credits,
+            storage=0.0,
+            operation="output",
+            operation_type="reels",
+            operation_id=f"{req.job_id}:subtitle:{req.clip_index}",
+        )
+
     return {
         "success": True,
         "new_video_url": f"/videos/{req.job_id}/{output_filename}"
@@ -1622,7 +2056,17 @@ class HookRequest(BaseModel):
     size: Optional[str] = "M" # S, M, L
 
 @app.post("/api/hook")
-async def add_hook(req: HookRequest):
+async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header)):
+    hook_required_credits = max(1.0, round(DEFAULT_PUBLICATION_CREDITS * 0.5, 2))
+    if is_supabase_configured():
+        _hook_user_data = await supabase_get_user_data(user_id)
+        _hook_available = float(_hook_user_data.get("credit", 0)) if _hook_user_data else 0.0
+        if _hook_available < hook_required_credits:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {hook_required_credits} cr, disponible : {_hook_available} cr.",
+            )
+
     job = jobs.get(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
@@ -1687,6 +2131,17 @@ async def add_hook(req: HookRequest):
             print(f"✅ Metadata updated with hook video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
+
+    if is_supabase_configured() and hook_required_credits > 0:
+        await supabase_deduct_user_credits(user_id, hook_required_credits)
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=hook_required_credits,
+            storage=0.0,
+            operation="output",
+            operation_type="reels",
+            operation_id=f"{req.job_id}:hook:{req.clip_index}",
+        )
 
     return {
         "success": True,
@@ -2187,7 +2642,6 @@ async def translate_clip(req: TranslateRequest):
 class SocialPostRequest(BaseModel):
     job_id: str
     clip_index: int
-    api_key: Optional[str] = None
     user_id: Optional[str] = None
     platforms: Optional[List[str]] = None # ["tiktok", "instagram", "youtube"]
     # Optional overrides if frontend wants to edit them
@@ -2199,21 +2653,18 @@ class SocialPostRequest(BaseModel):
 import httpx
 
 
-def _resolve_social_credentials(request_api_key: Optional[str], request_user_id: Optional[str]) -> tuple[str, str]:
-    api_key = (request_api_key or os.getenv("UPLOAD_POST_API_KEY") or "").strip()
-    user_id = (request_user_id or os.getenv("UPLOAD_POST_USER_ID") or "").strip()
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Missing Upload-Post API key (request api_key or UPLOAD_POST_API_KEY env)")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing Upload-Post user id (request user_id or UPLOAD_POST_USER_ID env)")
-    return api_key, user_id
+def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:
+    resolved = (explicit_user_id or user_id or "").strip()
+    if not resolved:
+        raise HTTPException(status_code=400, detail="Missing user id (user_id body field or X-User-Id header)")
+    return resolved
 
 
 def _resolve_social_platforms(platforms: Optional[List[str]]) -> List[str]:
     allowed = {"tiktok", "instagram", "youtube", "facebook", "linkedin"}
     candidate = [p.strip().lower() for p in (platforms or []) if isinstance(p, str) and p.strip()]
     if not candidate:
-        env_value = os.getenv("UPLOAD_POST_DEFAULT_PLATFORMS", "tiktok,instagram,youtube")
+        env_value = os.getenv("SOCIAL_DEFAULT_PLATFORMS", "tiktok,instagram,youtube")
         candidate = [p.strip().lower() for p in env_value.split(",") if p.strip()]
 
     deduped = []
@@ -2224,8 +2675,33 @@ def _resolve_social_platforms(platforms: Optional[List[str]]) -> List[str]:
         raise HTTPException(status_code=400, detail="No valid social platforms selected")
     return deduped
 
+
+def _resolve_local_video_path(job_id: str, video_ref: str, clip_index: int) -> str:
+    ref = (video_ref or "").split("?")[0]
+    filename = ref.split("/")[-1] or f"{job_id}_{clip_index + 1}.mp4"
+    candidate = os.path.join(OUTPUT_DIR, job_id, filename)
+    if not os.path.exists(candidate):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {candidate}")
+    return candidate
+
+
+def _resolve_public_video_url(video_ref: str, request: Request, job_id: str, clip_index: int) -> str:
+    ref = (video_ref or "").strip()
+    if ref.startswith(("https://", "http://")):
+        return ref
+    if not ref:
+        raise HTTPException(status_code=404, detail="Video URL not found for this clip")
+
+    if ref.startswith("/"):
+        base_url = SOCIAL_BASE_URL or str(request.base_url).rstrip("/")
+        return f"{base_url}{ref}"
+
+    # Fallback to built-in static route pattern.
+    base_url = SOCIAL_BASE_URL or str(request.base_url).rstrip("/")
+    return f"{base_url}/videos/{job_id}/{ref}"
+
 @app.post("/api/social/post")
-async def post_to_socials(req: SocialPostRequest):
+async def post_to_socials(req: SocialPostRequest, request: Request):
     if req.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -2233,148 +2709,67 @@ async def post_to_socials(req: SocialPostRequest):
     if 'result' not in job or 'clips' not in job['result']:
         raise HTTPException(status_code=400, detail="Job result not available")
         
+    selected_platforms = _resolve_social_platforms(req.platforms)
+    user_id = _resolve_request_user_id(req.user_id, request)
+
     try:
-        api_key, user_id = _resolve_social_credentials(req.api_key, req.user_id)
-        selected_platforms = _resolve_social_platforms(req.platforms)
-
         clip = job['result']['clips'][req.clip_index]
-        video_ref = str(clip.get('video_url') or '').strip()
-        if not video_ref:
-             raise HTTPException(status_code=404, detail="Video URL not found for this clip")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Clip not found")
 
-        filename = video_ref.split('?')[0].split('/')[-1] or f"{req.job_id}_{req.clip_index + 1}.mp4"
-        file_content: bytes
+    video_ref = str(clip.get('video_url') or '').strip()
+    if not video_ref:
+        raise HTTPException(status_code=404, detail="Video URL not found for this clip")
 
-        if video_ref.startswith('http://') or video_ref.startswith('https://'):
-            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                media_response = await client.get(video_ref)
-                media_response.raise_for_status()
-                file_content = media_response.content
-        else:
-            file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-            if not os.path.exists(file_path):
-                 raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
-            with open(file_path, "rb") as f:
-                file_content = f.read()
+    local_video_path = _resolve_local_video_path(req.job_id, video_ref, req.clip_index)
+    public_video_url = _resolve_public_video_url(video_ref, request, req.job_id, req.clip_index)
 
-        # Construct parameters for Upload-Post API
-        # Fallbacks
-        final_title = req.title or clip.get('title', 'Viral Short')
-        final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
-        
-        # Prepare form data
-        url = "https://api.upload-post.com/api/upload"
-        headers = {
-            "Authorization": f"Apikey {api_key}"
-        }
-        
-        # Prepare data as dict (httpx handles lists for multiple values)
-        data_payload = {
-            "user": user_id,
-            "title": final_title,
-            "platform[]": selected_platforms, # Pass list directly
-            "async_upload": "true"  # Enable async upload
-        }
+    final_title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title') or 'Vireel Short'
+    final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
 
-        # Add scheduling if present
-        if req.scheduled_date:
-            data_payload["scheduled_date"] = req.scheduled_date
-            if req.timezone:
-                data_payload["timezone"] = req.timezone
-        
-        # Add Platform specifics
-        if "tiktok" in selected_platforms:
-             data_payload["tiktok_title"] = final_description
-             
-        if "instagram" in selected_platforms:
-             data_payload["instagram_title"] = final_description
-             data_payload["media_type"] = "REELS"
+    results: Dict[str, Any] = {}
+    overall_success = True
 
-        if "youtube" in selected_platforms:
-             yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
-             data_payload["youtube_title"] = yt_title
-             data_payload["youtube_description"] = final_description
-             data_payload["privacyStatus"] = "public"
-
-        if "facebook" in selected_platforms:
-             data_payload["facebook_title"] = final_description or final_title
-
-        if "linkedin" in selected_platforms:
-             data_payload["linkedin_title"] = final_description or final_title
-
-        # Send File
-        files = {
-            "video": (filename, file_content, "video/mp4")
-        }
-
-        # Switch to synchronous Client to avoid "sync request with AsyncClient" error with multipart/files
-        with httpx.Client(timeout=120.0) as client:
-            print(f"📡 Sending to Upload-Post for platforms: {selected_platforms}")
-            response = client.post(url, headers=headers, data=data_payload, files=files)
-            
-        if response.status_code not in [200, 201, 202]: # Added 201
-             print(f"❌ Upload-Post Error: {response.text}")
-             raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
-
-        return response.json()
-
-    except Exception as e:
-        print(f"❌ Social Post Exception: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/social/user")
-async def get_social_user(api_key: str = Header(..., alias="X-Upload-Post-Key")):
-    """Proxy to fetch user ID from Upload-Post"""
-    if not api_key:
-         raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
-         
-    url = "https://api.upload-post.com/api/uploadposts/users"
-    print(f"🔍 Fetching User ID from: {url}")
-    headers = {"Authorization": f"Apikey {api_key}"}
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    for platform_name in selected_platforms:
         try:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                print(f"❌ Upload-Post User Fetch Error: {resp.text}")
-                raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch user: {resp.text}")
-            
-            data = resp.json()
-            print(f"🔍 Upload-Post User Response: {data}")
-            
-            user_id = None
-            # The structure is {'success': True, 'profiles': [{'username': '...'}, ...]}
-            profiles_list = []
-            if isinstance(data, dict):
-                 raw_profiles = data.get('profiles', [])
-                 if isinstance(raw_profiles, list):
-                     for p in raw_profiles:
-                         username = p.get('username')
-                         if username:
-                             # Determine connected platforms
-                             socials = p.get('social_accounts', {})
-                             connected = []
-                             # Check typical platforms
-                             for platform in ['tiktok', 'instagram', 'youtube']:
-                                 account_info = socials.get(platform)
-                                 # If it's a dict and typically has data, or just not empty string
-                                 if isinstance(account_info, dict):
-                                     connected.append(platform)
-                             
-                             profiles_list.append({
-                                 "username": username,
-                                 "connected": connected
-                             })
-            
-            if not profiles_list:
-                # Fallback if no profiles found
-                return {"profiles": [], "error": "No profiles found"}
-                
-            return {"profiles": profiles_list}
-            
-            
-        except Exception as e:
-             raise HTTPException(status_code=500, detail=str(e))
+            account = await _get_social_account(user_id, platform_name)
+            if not account:
+                raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
+
+            if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith(("https://", "http://")):
+                raise HTTPException(status_code=400, detail=f"{platform_name} requires a public video URL")
+
+            publish_payload = PublishRequest(
+                user_id=user_id,
+                title=final_title,
+                description=final_description,
+                text=final_description,
+                caption=final_description,
+                video_url=public_video_url,
+                video_file=local_video_path,
+            )
+
+            platform_result = await publish_post(account, publish_payload)
+            external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done")
+            results[platform_name] = {
+                "success": True,
+                "result": platform_result,
+            }
+        except Exception as exc:
+            overall_success = False
+            err_msg = str(exc)
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg)
+            results[platform_name] = {
+                "success": False,
+                "error": err_msg,
+            }
+
+    return {
+        "success": overall_success,
+        "results": results,
+    }
+
 
 # --- Thumbnail Studio Endpoints ---
 
@@ -2710,10 +3105,9 @@ async def thumbnail_publish(
     title: str = Form(...),
     description: str = Form(...),
     thumbnail_url: str = Form(...),
-    api_key: str = Form(...),
     user_id: str = Form(...),
 ):
-    """Kick off a background upload to YouTube via Upload-Post and return immediately."""
+    """Kick off a background upload to YouTube using the user's connected social account."""
     if session_id not in thumbnail_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2722,7 +3116,7 @@ async def thumbnail_publish(
     if not video_path or not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Original video file not found")
 
-    # Resolve thumbnail path from URL
+    # Resolve thumbnail path from URL (kept for future YouTube thumbnail API support)
     thumb_relative = thumbnail_url.lstrip("/")
     if thumb_relative.startswith("thumbnails/"):
         thumb_path = os.path.join(OUTPUT_DIR, thumb_relative)
@@ -2739,40 +3133,24 @@ async def thumbnail_publish(
     def do_upload():
         """Runs in a thread via BackgroundTasks — does the actual multipart upload."""
         try:
-            upload_url = "https://api.upload-post.com/api/upload"
-            headers = {"Authorization": f"Apikey {api_key}"}
-            data_payload = {
-                "user": user_id,
-                "platform[]": ["youtube"],
-                "title": title,          # required base field (fallback)
-                "async_upload": "true",
-                "youtube_title": title,
-                "youtube_description": description,
-                "privacyStatus": "public",
-            }
-            video_filename = os.path.basename(video_path)
-            thumb_filename = os.path.basename(thumb_path)
+            print(f"📡 [Thumbnail] Publishing to YouTube with connected account... (publish_id={publish_id})")
 
-            print(f"📡 [Thumbnail] Publishing to YouTube via Upload-Post... (publish_id={publish_id})")
-            with open(video_path, "rb") as vf, open(thumb_path, "rb") as tf:
-                files = {
-                    "video": (video_filename, vf.read(), "video/mp4"),
-                    "thumbnail": (thumb_filename, tf.read(), "image/jpeg"),
-                }
+            account = asyncio.run(_get_social_account(user_id, "youtube"))
+            if not account:
+                raise RuntimeError("No connected youtube account found")
 
-            # Use a long timeout — video uploads can take several minutes
-            with httpx.Client(timeout=600.0) as client:
-                response = client.post(upload_url, headers=headers, data=data_payload, files=files)
-
-            if response.status_code not in [200, 201, 202]:
-                err = f"Upload-Post API Error ({response.status_code}): {response.text}"
-                print(f"❌ {err}")
-                publish_jobs[publish_id]["status"] = "failed"
-                publish_jobs[publish_id]["error"] = err
-            else:
-                print(f"✅ [Thumbnail] Published successfully (publish_id={publish_id})")
-                publish_jobs[publish_id]["status"] = "done"
-                publish_jobs[publish_id]["result"] = response.json()
+            payload = PublishRequest(
+                user_id=user_id,
+                title=title,
+                description=description,
+                text=description,
+                video_file=video_path,
+            )
+            result = asyncio.run(publish_post(account, payload))
+            publish_jobs[publish_id]["status"] = "done"
+            publish_jobs[publish_id]["result"] = result
+            external_id = str(result.get("video_id") or result.get("id") or "n/a")
+            asyncio.run(_insert_publish_job(user_id=user_id, platform="youtube", external_id=external_id, status="done"))
 
         except Exception as e:
             err = str(e)
@@ -2796,41 +3174,12 @@ async def thumbnail_publish_status(publish_id: str):
 
 
 class ReelShareRequest(BaseModel):
-    api_key: Optional[str] = None
-    user_id: Optional[str] = None
     platforms: Optional[List[str]] = None
     title: Optional[str] = None
     description: Optional[str] = None
     scheduled_date: Optional[str] = None
     timezone: Optional[str] = "UTC"
 
-
-def _reel_share_payload(final_title: str, final_description: str, user_id: str, platforms: List[str], scheduled_date: Optional[str], timezone: Optional[str]) -> Dict[str, Any]:
-    data_payload: Dict[str, Any] = {
-        "user": user_id,
-        "title": final_title,
-        "platform[]": platforms,
-        "async_upload": "true",
-    }
-    if scheduled_date:
-        data_payload["scheduled_date"] = scheduled_date
-        if timezone:
-            data_payload["timezone"] = timezone
-
-    if "tiktok" in platforms:
-        data_payload["tiktok_title"] = final_description or final_title
-    if "instagram" in platforms:
-        data_payload["instagram_title"] = final_description or final_title
-        data_payload["media_type"] = "REELS"
-    if "youtube" in platforms:
-        data_payload["youtube_title"] = final_title
-        data_payload["youtube_description"] = final_description or final_title
-        data_payload["privacyStatus"] = "public"
-    if "facebook" in platforms:
-        data_payload["facebook_title"] = final_description or final_title
-    if "linkedin" in platforms:
-        data_payload["linkedin_title"] = final_description or final_title
-    return data_payload
 
 
 class StripeCheckoutRequest(BaseModel):
@@ -2861,9 +3210,7 @@ async def create_stripe_checkout_session(request: Request, payload: StripeChecko
     """Create a hosted Stripe Checkout session for a subscription plan."""
     _require_stripe_ready()
 
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    user_id: str = Depends(get_user_id_header)
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase is not configured")
 
@@ -2945,31 +3292,106 @@ async def stripe_webhook(request: Request):
     # ✅ conversion explicite en dict Python natif
     metadata = dict(session.metadata) if session.metadata else {}
     user_id = metadata.get("userid")
-    abonnement = metadata.get("abonnement")
+    payment_mode = metadata.get("payment_mode", "stripe")
 
-    if not user_id or not abonnement:
-        raise HTTPException(status_code=400, detail="Missing subscription metadata")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing user_id in metadata")
 
     amount_total = (session.amount_total or 0) / 100
     payment_reference = session.payment_intent or session.id or ""
-    comment = f"Stripe checkout session {session.id}".strip()
     created_ts = session.created
     payment_date = datetime.fromtimestamp(int(created_ts), tz=timezone.utc) if created_ts else datetime.now(timezone.utc)
+
+    # -----------------------------------------------------------------------
+    # Credit purchase (not a plan subscription)
+    # -----------------------------------------------------------------------
+    if payment_mode == "stripe_credits":
+        existing_purchase = await supabase_get_souscription_by_reference(payment_reference)
+        if existing_purchase:
+            return {"received": True, "duplicate": True}
+
+        policy_state = await _enforce_subscription_retention_policy(user_id)
+        if policy_state.get("state") != "active":
+            return {
+                "received": True,
+                "ignored": "no_active_subscription",
+                "policy_state": policy_state.get("state"),
+            }
+
+        credits_to_add = float(metadata.get("credits_to_add", 0))
+        if credits_to_add <= 0:
+            credits_to_add = usd_to_credits(amount_total)
+
+        # Record as a souscription row for idempotency / audit
+        await supabase_insert_souscription(
+            user_id=user_id,
+            abonnement=null,
+            payment_mode="stripe_credits",
+            payment_amount=amount_total,
+            payment_reference=payment_reference,
+            payment_status="completed",
+            payment_comment=f"Credit purchase {credits_to_add} credits",
+            payment_date=payment_date,
+        )
+
+        await supabase_upsert_user_data_credits(
+            user_id=user_id,
+            credit_delta=credits_to_add,
+        )
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=credits_to_add,
+            storage=0.0,
+            operation="input",
+            operation_type="credit_purchase",
+            operation_id=payment_reference,
+        )
+        return {"received": True, "credits_added": credits_to_add}
+
+    # -----------------------------------------------------------------------
+    # Standard plan subscription
+    # -----------------------------------------------------------------------
+    abonnement = metadata.get("abonnement")
+    if not abonnement:
+        raise HTTPException(status_code=400, detail="Missing subscription metadata")
+
+    comment = f"Stripe checkout session {session.id}".strip()
 
     existing_subscription = await supabase_get_souscription_by_reference(payment_reference)
     if existing_subscription:
         return {"received": True, "duplicate": True}
 
-    await supabase_insert_souscription(
+    new_souscription = await supabase_insert_souscription(
         user_id=user_id,
         abonnement=abonnement,
         payment_mode="stripe",
         payment_amount=amount_total,
         payment_reference=payment_reference,
-        payment_status="confirmed",
+        payment_status="completed",
         payment_comment=comment,
         payment_date=payment_date,
     )
+
+    # --- Credit & storage allocation after successful subscription ---
+    plan = await supabase_get_abonnement(abonnement)
+    if plan:
+        plan_credit  = float(plan.get("credit")   or 0)
+        plan_storage = float(plan.get("stockage")  or 0)
+        souscription_id = str(new_souscription.get("id") or payment_reference)
+
+        await supabase_upsert_user_data_credits(
+            user_id=user_id,
+            credit_delta=plan_credit,
+            storage_delta=plan_storage,
+        )
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=plan_credit,
+            storage=plan_storage,
+            operation="input",
+            operation_type="subscription",
+            operation_id=souscription_id,
+        )
 
     return {"received": True}
 
@@ -2986,17 +3408,176 @@ async def list_abonnements():
 async def get_current_souscription(request: Request) -> Optional[Dict[str, Any]]:
     """Get the current active subscription for a user."""
     user_id = request.headers.get("X-User-Id")
-    if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    await _enforce_subscription_retention_policy(user_id)
     subscription = await get_user_abonnement(user_id)
     return subscription
 
 
-@app.get("/api/reels")
-async def list_reels(request: Request, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
+# ---------------------------------------------------------------------------
+# User credits & history
+# ---------------------------------------------------------------------------
+
+@app.get("/api/user/credits")
+async def get_user_credits(request: Request):
+    """Return the credit/storage balance for the authenticated user."""
     user_id = request.headers.get("X-User-Id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    await _enforce_subscription_retention_policy(user_id)
+
+    data = await supabase_get_user_data(user_id)
+    if not data:
+        return {
+            "credit":   0.0,
+            "stockage": 0.0,
+            "has_credits": False,
+            "abo_costs": {
+                "credit":  0.0,
+                "storage": 0.0,
+            },
+            "default_costs": {
+                "reel":        DEFAULT_REEL_CREDITS,
+                "caption":     DEFAULT_CAPTION_CREDITS,
+                "publication": DEFAULT_PUBLICATION_CREDITS,
+            },
+        }
+
+    credit  = float(data.get("credit",   0))
+    storage = float(data.get("stockage", 0))
+
+    abonnement = await get_user_abonnement(user_id)
+    if not abonnement:
+        abo_costs = {
+            "credit":  0.0,
+            "storage": 0.0,
+        }
+    else:
+        abo_costs = {
+            "credit":  float(abonnement.get("credit",   0)),
+            "storage": float(abonnement.get("stockage", 0)),
+        }
+
+    return {
+        "credit":   credit,
+        "stockage": storage,
+        "has_credits": credit > 0,
+        "abo_costs": abo_costs,
+        "default_costs": {
+            "reel":        DEFAULT_REEL_CREDITS,
+            "caption":     DEFAULT_CAPTION_CREDITS,
+            "publication": DEFAULT_PUBLICATION_CREDITS,
+        },
+    }
+
+
+@app.get("/api/user/history")
+async def get_user_history(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Return paginated credit/storage history for the authenticated user."""
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    rows, total = await supabase_get_user_data_history(user_id, page=page, page_size=page_size)
+    return {
+        "items":     rows,
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+    }
+
+
+class BuyCreditsRequest(BaseModel):
+    amount_usd: float
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
+
+@app.post("/api/stripe/buy-credits")
+async def buy_credits_checkout(request: Request, payload: BuyCreditsRequest):
+    """Create a Stripe Checkout session for purchasing additional credits."""
+    _require_stripe_ready()
+
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    policy_state = await _enforce_subscription_retention_policy(user_id)
+    if policy_state.get("state") != "active":
+        raise HTTPException(
+            status_code=403,
+            detail="Un abonnement actif est requis pour recharger des credits.",
+        )
+
+    amount_usd = float(payload.amount_usd)
+    if amount_usd < 1.0:
+        raise HTTPException(status_code=400, detail="Minimum purchase is 1 EUR")
+
+    credits_to_add = int(usd_to_credits(amount_usd))
+    unit_amount    = int(round(amount_usd * 100))  # in cents
+
+    default_base_url = _frontend_base_url(request)
+    success_url = (
+        payload.success_url
+        or f"{default_base_url}/dashboard/settings?credit_purchase=success"
+    ).strip()
+    cancel_url = (
+        payload.cancel_url
+        or f"{default_base_url}/dashboard/settings?credit_purchase=cancel"
+    ).strip()
+
+    metadata = {
+        "userid":         user_id,
+        "payment_mode":   "stripe_credits",
+        "credits_to_add": str(credits_to_add),
+        "amount_usd":     str(amount_usd),
+    }
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            customer_email=request.headers.get("X-User-Email") or None,
+            line_items=[
+                {
+                    "quantity": 1,
+                    "price_data": {
+                        "currency": STRIPE_CURRENCY,
+                        "unit_amount": unit_amount,
+                        "product_data": {
+                            "name": f"{credits_to_add} Vireel Credits",
+                            "description": f"Achat de {credits_to_add} crédits Vireel",
+                        },
+                    },
+                }
+            ],
+            metadata=metadata,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe checkout error: {exc}")
+
+    return {
+        "checkout_url":  session.url,
+        "session_id":    session.id,
+        "credits_to_add": credits_to_add,
+    }
+
+
+@app.get("/api/reels")
+async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase reels is not configured")
 
@@ -3010,11 +3591,7 @@ async def list_reels(request: Request, page: int = Query(1, ge=1), page_size: in
 
 
 @app.get("/api/reels/{reel_id}/media-url")
-async def reel_media_url(request: Request, reel_id: str):
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-
+async def reel_media_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="Reel not found")
@@ -3023,11 +3600,7 @@ async def reel_media_url(request: Request, reel_id: str):
 
 
 @app.get("/api/reels/{reel_id}/thumbnail-url")
-async def reel_thumbnail_url(request: Request, reel_id: str):
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-
+async def reel_thumbnail_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="Reel not found")
@@ -3037,9 +3610,7 @@ async def reel_thumbnail_url(request: Request, reel_id: str):
 
 @app.get("/api/reels/{reel_id}/preview-url")
 async def reel_preview_url(request: Request, reel_id: str):
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    user_id: str = Depends(get_user_id_header)
 
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -3049,11 +3620,7 @@ async def reel_preview_url(request: Request, reel_id: str):
 
 
 @app.delete("/api/reels/{reel_id}")
-async def delete_reel(request: Request, reel_id: str):
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-
+async def delete_reel(reel_id: str, user_id: str = Depends(get_user_id_header)):
     deleted = await supabase_soft_delete_reel(reel_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Reel not found")
@@ -3061,10 +3628,21 @@ async def delete_reel(request: Request, reel_id: str):
 
 
 @app.post("/api/reels/{reel_id}/share")
-async def share_reel(request: Request, reel_id: str, payload: ReelShareRequest):
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
+    # --- Credit pre-check for publication ---
+    if is_supabase_configured():
+        platform_count = len(payload.platforms) if payload.platforms else 1
+        _pub_cost = calculate_credits_for_operation(
+            estimate_publication_cost_usd(platform_count=platform_count, video_size_gb=0.5)
+        )
+        _pub_required = _pub_cost["final_credits"]
+        _pub_ud = await supabase_get_user_data(user_id)
+        _pub_credits = float(_pub_ud.get("credit", 0)) if _pub_ud else 0.0
+        if _pub_credits < _pub_required:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {_pub_required} cr, disponible : {_pub_credits} cr.",
+            )
 
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -3077,19 +3655,1111 @@ async def share_reel(request: Request, reel_id: str, payload: ReelShareRequest):
 
     final_title = payload.title or row.get("reel_title") or "Vireel"
     final_description = payload.description or row.get("reel_description") or ""
-    api_key, user_id = _resolve_social_credentials(payload.api_key, payload.user_id)
     selected_platforms = _resolve_social_platforms(payload.platforms)
 
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        media_response = await client.get(media_url)
-        media_response.raise_for_status()
-        upload_response = await client.post(
-            "https://api.upload-post.com/api/upload",
-            headers={"Authorization": f"Apikey {api_key}"},
-            data=_reel_share_payload(final_title, final_description, user_id, selected_platforms, payload.scheduled_date, payload.timezone),
-            files={"video": (f"{reel_id}.mp4", media_response.content, "video/mp4")},
+    results: Dict[str, Any] = {}
+    overall_success = True
+    for platform_name in selected_platforms:
+        try:
+            account = await _get_social_account(user_id, platform_name)
+            if not account:
+                raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
+
+            publish_payload = PublishRequest(
+                user_id=user_id,
+                title=final_title,
+                description=final_description,
+                text=final_description,
+                caption=final_description,
+                video_url=media_url,
+            )
+            platform_result = await publish_post(account, publish_payload)
+            external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done")
+            results[platform_name] = {
+                "success": True,
+                "result": platform_result,
+            }
+        except Exception as exc:
+            overall_success = False
+            err_msg = str(exc)
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg)
+            results[platform_name] = {
+                "success": False,
+                "error": err_msg,
+            }
+
+    # Debit credits after publications (best-effort)
+    if is_supabase_configured():
+        platform_count_done = sum(1 for v in results.values() if v.get("success"))
+        if platform_count_done > 0:
+            _pub_done_cost = calculate_credits_for_operation(
+                estimate_publication_cost_usd(platform_count=platform_count_done, video_size_gb=0.5)
+            )
+            _pub_done_credits = _pub_done_cost["final_credits"]
+            await supabase_deduct_user_credits(user_id, _pub_done_credits)
+            await supabase_insert_user_data_history(
+                user_id=user_id,
+                credit=_pub_done_credits,
+                storage=0.0,
+                operation="output",
+                operation_type="publications",
+                operation_id=reel_id,
+            )
+
+    return {
+        "success": overall_success,
+        "results": results,
+    }
+
+
+class SocialAccount(BaseModel):
+    id: int
+    user_id: int
+    platform: str  # "tiktok", "facebook", "linkedin", "youtube"
+    access_token: str  # chiffré (Fernet, ou vault)
+    refresh_token: str | None
+    expires_at: datetime
+    platform_user_id: str
+    scopes: str
+
+
+class FacebookPageSelectionRequest(BaseModel):
+    user_id: str
+    page_id: str
+    page_name: str
+    page_access_token: str
+    user_token_expires_in: int
+
+
+SOCIAL_BASE_URL = os.environ.get("BASE_URL", "").strip().rstrip("/")
+SUPABASE_SOCIAL_ACCOUNTS_TABLE = os.environ.get("SUPABASE_SOCIAL_ACCOUNTS_TABLE", "social_accounts")
+SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE = os.environ.get("SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE", "publish_jobs")
+_OAUTH_STATE_TTL_SECONDS = 600
+_oauth_states: Dict[str, Dict[str, Any]] = {}
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _xor_bytes(value: bytes, key: bytes) -> bytes:
+    if not key:
+        return value
+    return bytes(value[i] ^ key[i % len(key)] for i in range(len(value)))
+
+
+def _encrypt_token(token: str) -> str:
+    if not token:
+        return ""
+    key = (os.environ.get("ENCRYPTION_KEY", "") or "").encode("utf-8")
+    raw = token.encode("utf-8")
+    return base64.urlsafe_b64encode(_xor_bytes(raw, key)).decode("ascii")
+
+
+def _decrypt_token(token_encrypted: Optional[str]) -> str:
+    if not token_encrypted:
+        return ""
+    try:
+        key = (os.environ.get("ENCRYPTION_KEY", "") or "").encode("utf-8")
+        decoded = base64.urlsafe_b64decode(token_encrypted.encode("ascii"))
+        return _xor_bytes(decoded, key).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _resolve_platform_config(platform: str) -> Dict[str, Any]:
+    key = (platform or "").strip().lower()
+    if key not in PLATFORM_CONFIG:
+        raise HTTPException(status_code=404, detail="Unsupported platform")
+    config = PLATFORM_CONFIG[key]
+    if not config.get("client_id") or not config.get("client_secret"):
+        raise HTTPException(status_code=503, detail=f"{key} OAuth is not configured")
+    return config
+
+
+def _oauth_popup_response(success: bool, platform: str, message: Optional[str] = None, page_selection_data: Optional[Dict[str, Any]] = None) -> HTMLResponse:
+    if page_selection_data:
+        # Pour la sélection de pages Facebook
+        payload = {
+            "type": "oauth_page_selection",
+            "platform": platform,
+            "pages": page_selection_data.get("pages", []),
+            "user_token": page_selection_data.get("user_token"),
+            "user_token_expires_in": page_selection_data.get("user_token_expires_in"),
+        }
+    else:
+        payload = {
+            "type": "oauth_success" if success else "oauth_error",
+            "platform": platform,
+            "message": message or "",
+        }
+    return HTMLResponse(
+        f"""
+        <script>
+          window.opener && window.opener.postMessage({json.dumps(payload)}, '*');
+          window.close();
+        </script>
+        """
+    )
+
+
+
+def _oauth_redirect_uri(platform: str, request: Optional[Request] = None) -> str:
+    if SOCIAL_BASE_URL:
+        return f"{SOCIAL_BASE_URL}/api/auth/{platform}/callback"
+    if request:
+        base = str(request.base_url).rstrip("/")
+        return f"{base}/api/auth/{platform}/callback"
+    return f"http://localhost:8000/api/auth/{platform}/callback"
+
+async def fetch_facebook_granted_scopes(access_token: str) -> List[str]:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            "https://graph.facebook.com/me/permissions",
+            params={"access_token": access_token},
+        )
+    response.raise_for_status()
+    data = response.json().get("data") or []
+    return [
+        item.get("permission")
+        for item in data
+        if item.get("status") == "granted" and item.get("permission")
+    ]
+
+
+async def fetch_facebook_pages(user_access_token: str) -> List[Dict[str, Any]]:
+    """
+    Récupère les pages gérées par l'utilisateur avec leurs access tokens.
+    Les tokens de page sont long-lived si le user_access_token est long-lived.
+    """
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            "https://graph.facebook.com/v19.0/me/accounts",
+            params={
+                "fields": "id,name,picture.width(200).height(200),access_token,category",
+                "access_token": user_access_token,
+            },
+        )
+    response.raise_for_status()
+    data = response.json()
+
+    pages = []
+    for item in data.get("data", []):
+        pages.append({
+            "page_id": item.get("id"),
+            "page_name": item.get("name"),
+            "page_picture": item.get("picture", {}).get("data", {}).get("url"),
+            "page_category": item.get("category"),
+            "page_access_token": item.get("access_token"),
+        })
+
+    return pages
+
+
+async def _extract_token_data(platform: str, token_data: Dict[str, Any]) -> Dict[str, Any]:
+    if platform == "tiktok":
+        token_data = token_data.get("data", token_data)
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=502, detail="OAuth provider did not return access_token")
+
+    scopes = token_data.get("scope") or token_data.get("scopes") or ""
+
+    if platform == "facebook":
+        try:
+            granted_scopes = await fetch_facebook_granted_scopes(access_token)
+            if granted_scopes:
+                scopes = " ".join(granted_scopes)
+        except Exception:
+            # On garde le fallback éventuel renvoyé par le provider
+            pass
+
+    return {
+        "access_token": access_token,
+        "refresh_token": token_data.get("refresh_token"),
+        "expires_in": int(token_data.get("expires_in") or 3600),
+        "scopes": scopes,
+    }
+
+async def _get_social_account(user_id: str, platform: str) -> Optional[Dict[str, Any]]:
+    client = await supabase_get_client()
+    response = (
+        await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("platform", platform)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+async def _upsert_social_account(
+    user_id: str,
+    platform: str,
+    access_token: str,
+    refresh_token: Optional[str],
+    expires_in: int,
+    platform_user_id: str,
+    platform_account_name: str,
+    scopes: str,
+) -> None:
+    client = await supabase_get_client()
+    expires_at = datetime.fromtimestamp(time.time() + max(expires_in, 60), tz=timezone.utc).isoformat()
+    payload = {
+        "user_id": user_id,
+        "platform": platform,
+        "access_token_encrypted": _encrypt_token(access_token),
+        "refresh_token_encrypted": _encrypt_token(refresh_token or ""),
+        "platform_user_id": platform_user_id,
+        "platform_account_name": platform_account_name,
+        "scopes": scopes,
+        "expires_at": expires_at,
+        "updated_at": _utcnow_iso(),
+    }
+
+    existing = await _get_social_account(user_id, platform)
+    if existing and existing.get("id"):
+        await (
+            client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
+            .update(payload)
+            .eq("id", existing["id"])
+            .execute()
+        )
+    else:
+        await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE).insert(payload).execute()
+
+
+async def _insert_publish_job(user_id: str, platform: str, external_id: str, status: str, error_message: Optional[str] = None) -> None:
+    client = await supabase_get_client()
+    payload: Dict[str, Any] = {
+        "user_id": user_id,
+        "platform": platform,
+        "external_id": external_id,
+        "status": status,
+    }
+    if error_message:
+        payload["error_message"] = error_message
+    if status in {"done", "failed"}:
+        payload["completed_at"] = _utcnow_iso()
+    await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).insert(payload).execute()
+
+
+@app.get("/api/social/accounts")
+async def list_social_accounts(user_id: str = Query(...)):
+    client = await supabase_get_client()
+    response = (
+        await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
+        .select("id, created_at, user_id, platform, platform_user_id, platform_account_name, scopes, expires_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    rows = response.data or []
+    accounts = [
+        {
+            **row,
+            "connected": True,
+        }
+        for row in rows
+    ]
+    return {"accounts": accounts}
+
+
+@app.delete("/api/social/accounts/{platform}")
+async def disconnect_social_account(platform: str, user_id: str = Query(...)):
+    key = (platform or "").strip().lower()
+    if key not in PLATFORM_CONFIG:
+        raise HTTPException(status_code=404, detail="Unsupported platform")
+    client = await supabase_get_client()
+    response = (
+        await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
+        .delete()
+        .eq("user_id", user_id)
+        .eq("platform", key)
+        .execute()
+    )
+    return {"deleted": bool(response.data)}
+
+
+@app.get("/api/social/publish-jobs")
+async def list_publish_jobs(
+    user_id: str = Depends(get_user_id_header),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    platform: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    date_filter: Optional[str] = Query(None),  # all, today, week, month
+    search: Optional[str] = Query(None),
+):
+    """
+    Récupère les publications sociales de l'utilisateur avec filtres.
+
+    Args:
+        user_id: ID utilisateur
+        page: Numéro de page (par défaut 1)
+        page_size: Nombre d'items par page (par défaut 20, max 100)
+        platform: Filtre par plateforme (facebook, instagram, tiktok, youtube, linkedin)
+        status: Filtre par statut (pending, processing, done, failed)
+        date_filter: Filtre par date (all, today, week, month)
+        search: Recherche dans l'ID externe ou la plateforme
+    """
+    try:
+        client = await supabase_get_client()
+
+        # Construire la requête de base
+        query = (
+            client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE)
+            .select("*", count="exact")
+            .eq("user_id", user_id)
         )
 
-    if upload_response.status_code not in (200, 201, 202):
-        raise HTTPException(status_code=upload_response.status_code, detail=f"Upload-Post Error: {upload_response.text}")
-    return upload_response.json()
+        # Filtrer par plateforme
+        if platform and platform not in ("all", ""):
+            query = query.eq("platform", platform.lower())
+
+        # Filtrer par statut
+        if status and status not in ("all", ""):
+            query = query.eq("status", status.lower())
+
+        # Filtrer par date
+        if date_filter and date_filter != "all":
+            now = datetime.now(timezone.utc)
+            if date_filter == "today":
+                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                query = query.gte("created_at", start_date)
+            elif date_filter == "week":
+                week_ago = now - timedelta(days=7)
+                query = query.gte("created_at", week_ago.isoformat())
+            elif date_filter == "month":
+                month_ago = now - timedelta(days=30)
+                query = query.gte("created_at", month_ago.isoformat())
+
+        # Ordonner par date de création (plus récent en premier)
+        query = query.order("created_at", desc=True)
+
+        # Exécuter la requête avec pagination
+        offset = (page - 1) * page_size
+        response = await query.range(offset, offset + page_size - 1).execute()
+
+        items = response.data or []
+        total = response.count or 0
+
+        # Filtrer par recherche si fournie (filtre côté client pour simplifier)
+        if search and search.strip():
+            search_lower = search.lower().strip()
+            items = [
+                item for item in items
+                if (item.get("external_id", "").lower().find(search_lower) >= 0 or
+                    item.get("platform", "").lower().find(search_lower) >= 0)
+            ]
+            total = len(items)
+
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        }
+    except Exception as e:
+        print(f"⚠️ Erreur lors de la récupération des publications: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
+
+
+@app.post("/api/auth/facebook/select-page")
+async def facebook_select_page(request: Request, payload: FacebookPageSelectionRequest):
+    """
+    L'utilisateur a sélectionné une page Facebook à connecter.
+    Stocke le page_id + page_access_token (pas le token utilisateur).
+    """
+    user_id: str = Depends(get_user_id_header)
+
+    if not payload.page_access_token:
+        raise HTTPException(status_code=400, detail="Missing page_access_token")
+
+    # Stocke le compte avec :
+    # - platform_user_id = page_id
+    # - access_token_encrypted = page_access_token (long-lived)
+    await _upsert_social_account(
+        user_id=user_id,
+        platform="facebook",
+        access_token=payload.page_access_token,
+        refresh_token=None,  # Les tokens de page n'ont pas de refresh token
+        expires_in=payload.user_token_expires_in or 5184000,  # ~60 jours par défaut
+        platform_user_id=payload.page_id,
+        platform_account_name=payload.page_name,
+        scopes="pages_manage_posts,pages_read_engagement",  # Scopes réels pour les pages
+    )
+
+    return {
+        "success": True,
+        "message": f"Connected Facebook page '{payload.page_name}'",
+        "platform": "facebook",
+        "page_id": payload.page_id,
+    }
+
+
+@app.get("/api/auth/{platform}/connect")
+def connect(platform: str, request: Request, user_id: str = Query(...)):
+    key = (platform or "").strip().lower()
+    config = _resolve_platform_config(key)
+    redirect_uri = _oauth_redirect_uri(key, request)
+
+    # Payload signé qui remplace le dict _oauth_states — plus besoin de stockage en mémoire
+    state_payload = {
+        "user_id": user_id,
+        "platform": key,
+        "redirect_uri": redirect_uri,
+    }
+
+    params = {
+        "client_id": config["client_id"],
+        "redirect_uri": redirect_uri,
+        "scope": " ".join(config["scopes"]),
+        "response_type": "code",
+    }
+
+    if key == "youtube":
+        params["access_type"] = "offline"
+        params["prompt"] = "consent"
+
+    if key == "tiktok":
+        code_verifier, code_challenge = generate_pkce_pair()
+        state_payload["code_verifier"] = code_verifier
+
+        params["client_key"] = config["client_id"]
+        params.pop("client_id", None)  # TikTok utilise client_key, pas client_id
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
+
+    # Signe le payload → devient le state envoyé à la plateforme
+    state = _oauth_serializer.dumps(state_payload)
+    params["state"] = state
+
+    auth_url = f"{config['auth_url']}?{urlencode(params)}"
+    return {"auth_url": auth_url}
+
+
+@app.get("/api/auth/{platform}/callback")
+async def callback(platform: str, code: Optional[str] = None, state: str = "", error: Optional[str] = None):
+    key = (platform or "").strip().lower()
+
+    try:
+        state_data = _oauth_serializer.loads(state, max_age=_OAUTH_STATE_TTL_SECONDS)
+    except SignatureExpired:
+        return _oauth_popup_response(False, key, "OAuth state expired")
+    except BadSignature:
+        return _oauth_popup_response(False, key, "Invalid OAuth state")
+
+    if state_data.get("platform") != key:
+        return _oauth_popup_response(False, key, "Platform mismatch in OAuth state")
+    if error:
+        return _oauth_popup_response(False, key, error)
+    if not code:
+        return _oauth_popup_response(False, key, "Missing OAuth code")
+
+    config = _resolve_platform_config(key)
+
+    token_payload = {
+        "code": code,
+        "redirect_uri": state_data.get("redirect_uri") or _oauth_redirect_uri(key),
+        "grant_type": "authorization_code",
+    }
+
+    if key == "tiktok":
+        token_payload["client_key"] = config["client_id"]
+        token_payload["client_secret"] = config["client_secret"]
+        token_payload["code_verifier"] = state_data["code_verifier"]  # ← récupéré du connect
+    else:
+        token_payload["client_id"] = config["client_id"]
+        token_payload["client_secret"] = config["client_secret"]
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(config["token_url"], data=token_payload)
+        response.raise_for_status()
+        raw_token_data = response.json()
+
+        # Instagram : échange immédiatement contre un long-lived token
+        if key == "instagram":
+            raw_token_data = await _exchange_instagram_long_lived_token(
+                config, raw_token_data["access_token"]
+            )
+
+        token_data = _extract_token_data(key, response.json())
+
+        # Facebook : récupère les pages et affiche la sélection
+        if key == "facebook":
+            try:
+                pages = await fetch_facebook_pages(token_data["access_token"])
+                if pages:
+                    # Retourne le modal de sélection de pages
+                    return _oauth_popup_response(
+                        False, key, None,
+                        page_selection_data={
+                            "pages": pages,
+                            "user_token": token_data["access_token"],
+                            "user_token_expires_in": token_data.get("expires_in", 5184000),
+                        }
+                    )
+            except Exception as e:
+                # En cas d'erreur, on continue avec le fallback utilisateur
+                print(f"⚠️ Erreur lors de la récupération des pages Facebook: {e}")
+
+        identity = await fetch_platform_identity(key, token_data["access_token"])
+        await _upsert_social_account(
+            user_id=state_data["user_id"],
+            platform=key,
+            access_token=token_data["access_token"],
+            refresh_token=token_data.get("refresh_token"),
+            expires_in=int(token_data.get("expires_in") or 3600),
+            platform_user_id=identity.get("id", ""),
+            platform_account_name=identity.get("name", key),
+            scopes=str(token_data.get("scopes") or ""),
+        )
+        return _oauth_popup_response(True, key)
+    except Exception as exc:
+        return _oauth_popup_response(False, key, str(exc))
+
+
+async def _exchange_instagram_long_lived_token(config: dict, short_lived_token: str) -> dict:
+    """
+    Instagram : le token initial expire en 1h.
+    On l'échange immédiatement contre un token valide 60 jours.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            config["long_lived_token_url"],
+            params={
+                "grant_type": "ig_exchange_token",
+                "client_secret": config["client_secret"],
+                "access_token": short_lived_token,
+            },
+        )
+    response.raise_for_status()
+    data = response.json()
+    # data = {"access_token": "...", "token_type": "bearer", "expires_in": 5184000}  # 60 jours en secondes
+    return data
+
+async def fetch_platform_identity(platform: str, access_token: str):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        if platform == "linkedin":
+            response = await client.get("https://api.linkedin.com/v2/userinfo", headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            return {"id": str(data.get("sub") or ""), "name": data.get("name") or "LinkedIn"}
+
+        if platform == "facebook":
+            response = await client.get("https://graph.facebook.com/me", params={"fields": "id,name"}, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            return {"id": str(data.get("id") or ""), "name": data.get("name") or "Facebook"}
+
+        if platform == "instagram":
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    "https://graph.instagram.com/me",
+                    params={
+                        "fields": "id,username,account_type",
+                        "access_token": access_token,
+                    },
+                )
+            response.raise_for_status()
+            data = response.json()
+            return {"id": data["id"], "name": data.get("username", "instagram")}
+
+        if platform == "youtube":
+            response = await client.get("https://www.googleapis.com/youtube/v3/channels", params={"part": "snippet", "mine": "true"}, headers=headers)
+            response.raise_for_status()
+            items = response.json().get("items") or []
+            first = items[0] if items else {}
+            return {"id": str(first.get("id") or ""), "name": ((first.get("snippet") or {}).get("title") or "YouTube")}
+
+        if platform == "tiktok":
+            response = await client.get(
+                "https://open.tiktokapis.com/v2/user/info/",
+                params={"fields": "open_id,display_name"},
+                headers=headers,
+            )
+            response.raise_for_status()
+            user = ((response.json().get("data") or {}).get("user") or {})
+            return {"id": str(user.get("open_id") or ""), "name": user.get("display_name") or "TikTok"}
+
+    raise HTTPException(status_code=404, detail="Unsupported platform")
+
+
+def _is_token_expiring(account: Dict[str, Any], margin_seconds: int = 300) -> bool:
+    expires_at = account.get("expires_at")
+    if not expires_at:
+        return True
+    try:
+        expires_dt = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        platform = str(account.get("platform") or "").lower()
+        # Instagram tokens (via Meta) ont une fenêtre de 60 jours mais se dégradent silencieusement ;
+        # forcer un refresh si l'expiration est dans moins de 5 jours.
+        if platform == "instagram":
+            margin_seconds = max(margin_seconds, 5 * 24 * 3600)  # 432 000 secondes
+        return expires_dt <= datetime.now(timezone.utc) + timedelta(seconds=margin_seconds)
+    except Exception:
+        return True
+
+
+async def get_valid_token(account: Dict[str, Any]) -> str:
+    access_token = _decrypt_token(account.get("access_token_encrypted"))
+    if access_token and not _is_token_expiring(account):
+        return access_token
+
+    platform = str(account.get("platform") or "").lower()
+
+    # Instagram : pas de refresh_token classique, on rafraîchit le long-lived
+    # access_token directement via un GET dédié (ig_refresh_token)
+    if platform == "instagram":
+        if not access_token:
+            raise HTTPException(status_code=401, detail="Instagram account token missing, reconnection required")
+
+        config = _resolve_platform_config(platform)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                "https://graph.instagram.com/refresh_access_token",
+                params={
+                    "grant_type": "ig_refresh_token",
+                    "access_token": access_token,
+                },
+            )
+        response.raise_for_status()
+        new_data = response.json()
+
+        refreshed_access_token = new_data["access_token"]
+        expires_in = int(new_data.get("expires_in") or 5184000)  # 60 jours par défaut
+
+        client = await supabase_get_client()
+        await (
+            client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
+            .update(
+                {
+                    "access_token_encrypted": _encrypt_token(refreshed_access_token),
+                    "expires_at": datetime.fromtimestamp(time.time() + max(expires_in, 60), tz=timezone.utc).isoformat(),
+                    "updated_at": _utcnow_iso(),
+                }
+            )
+            .eq("id", account.get("id"))
+            .execute()
+        )
+        return refreshed_access_token
+
+    # --- Flow générique existant pour les autres plateformes ---
+    refresh_token = _decrypt_token(account.get("refresh_token_encrypted"))
+    if not refresh_token:
+        if access_token:
+            return access_token
+        raise HTTPException(status_code=401, detail="Account token expired and no refresh token available")
+
+    config = _resolve_platform_config(platform)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            config["token_url"],
+            data={
+                "client_id": config["client_id"],
+                "client_secret": config["client_secret"],
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+    response.raise_for_status()
+
+    new_tokens = _extract_token_data(platform, response.json())
+    refreshed_access_token = new_tokens["access_token"]
+    refreshed_refresh_token = new_tokens.get("refresh_token") or refresh_token
+    expires_in = int(new_tokens.get("expires_in") or 3600)
+
+    client = await supabase_get_client()
+    await (
+        client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
+        .update(
+            {
+                "access_token_encrypted": _encrypt_token(refreshed_access_token),
+                "refresh_token_encrypted": _encrypt_token(refreshed_refresh_token),
+                "expires_at": datetime.fromtimestamp(time.time() + max(expires_in, 60), tz=timezone.utc).isoformat(),
+                "updated_at": _utcnow_iso(),
+            }
+        )
+        .eq("id", account.get("id"))
+        .execute()
+    )
+    return refreshed_access_token
+
+
+class PublishRequest(BaseModel):
+    user_id: str
+    text: Optional[str] = None
+    caption: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    video_url: Optional[str] = None
+    video_file: Optional[str] = None
+    privacy_level: Optional[str] = "PUBLIC_TO_EVERYONE"
+
+
+async def publish_post(account: Dict[str, Any], content: PublishRequest):
+    token = await get_valid_token(account)
+    headers = {"Authorization": f"Bearer {token}"}
+    platform = str(account.get("platform") or "").lower()
+    text_value = content.text or content.caption or content.description or "Posted from Vireel"
+
+    if platform == "linkedin":
+
+        if content.video_url:
+            try:
+                return await publish_to_linkedin_video(
+                    access_token=token,
+                    owner_urn=f"urn:li:person:{account.get('platform_user_id')}",
+                    video_url=content.video_url,
+                    title=content.title or "Vireel",
+                    description=text_value,
+                )
+            except Exception:
+                # fallback texte seul
+                pass
+
+        payload = {
+            "author": f"urn:li:person:{account.get('platform_user_id')}",
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {"text": text_value},
+                    "shareMediaCategory": "NONE",
+                }
+            },
+            "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post("https://api.linkedin.com/v2/ugcPosts", json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+    if platform == "facebook":
+        if content.video_url:
+            try:
+                return await publish_to_facebook_video(
+                    access_token=token,
+                    target_id=str(account.get("platform_user_id") or ""),
+                    video_url=content.video_url,
+                    message=text_value,
+                    title=content.title or "Vireel",
+                    description=content.description or text_value,
+                )
+            except Exception:
+                # fallback texte seul
+                pass
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"https://graph.facebook.com/{account.get('platform_user_id')}/feed",
+                data={"message": text_value, "access_token": token},
+            )
+        response.raise_for_status()
+        return response.json()
+
+    if platform == "instagram":
+        if not content.video_url:
+            raise HTTPException(status_code=400, detail="video_url is required for Instagram publication")
+        ig_user_id = str(account.get("platform_user_id") or "").strip()
+        if not ig_user_id:
+            raise HTTPException(status_code=400, detail="Connected Instagram account id is missing")
+        return await publish_to_instagram(token, ig_user_id, content.video_url, text_value)
+
+    if platform == "youtube":
+        video_path = (content.video_file or "").strip()
+        temp_path = ""
+        if not video_path:
+            if not content.video_url:
+                raise HTTPException(status_code=400, detail="video_file or video_url is required for YouTube publication")
+            temp_path = os.path.join(UPLOAD_DIR, f"yt_publish_{uuid.uuid4().hex}.mp4")
+            async with httpx.AsyncClient(timeout=180.0, follow_redirects=True) as client:
+                media_response = await client.get(content.video_url)
+                media_response.raise_for_status()
+            with open(temp_path, "wb") as handle:
+                handle.write(media_response.content)
+            video_path = temp_path
+
+        try:
+            return await upload_youtube_video(
+                token,
+                video_path,
+                content.title or "Vireel Short",
+                content.description or text_value,
+            )
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+    if platform == "tiktok":
+        if not content.video_url:
+            raise HTTPException(status_code=400, detail="video_url is required for TikTok publication")
+        return await publish_to_tiktok(token, content.video_url, text_value, content.privacy_level or "PUBLIC_TO_EVERYONE")
+
+    raise HTTPException(status_code=404, detail="Unsupported platform")
+
+
+async def upload_youtube_video(access_token: str, video_path: str, title: str, description: str, privacy: str = "public"):
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    metadata = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "categoryId": "22",
+        },
+        "status": {
+            "privacyStatus": privacy,
+        },
+    }
+
+    file_size = os.path.getsize(video_path)
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        init_response = await client.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"uploadType": "resumable", "part": "snippet,status"},
+            headers={
+                **headers,
+                "X-Upload-Content-Type": "video/*",
+                "X-Upload-Content-Length": str(file_size),
+                "Content-Type": "application/json; charset=UTF-8",
+            },
+            json=metadata,
+        )
+    init_response.raise_for_status()
+
+    upload_url = init_response.headers.get("Location")
+    if not upload_url:
+        raise HTTPException(status_code=502, detail="YouTube upload session URL is missing")
+
+    with open(video_path, "rb") as file_handle:
+        file_data = file_handle.read()
+
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        upload_response = await client.put(
+            upload_url,
+            headers={
+                "Content-Type": "video/*",
+                "Content-Length": str(file_size),
+            },
+            content=file_data,
+        )
+    upload_response.raise_for_status()
+    result = upload_response.json()
+    return {
+        "video_id": result.get("id"),
+        "url": f"https://youtube.com/watch?v={result.get('id')}",
+    }
+
+
+async def publish_to_tiktok(access_token: str, video_url: str, caption: str, privacy_level: str = "PUBLIC_TO_EVERYONE"):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "post_info": {
+            "title": caption,
+            "privacy_level": privacy_level,
+            "disable_duet": False,
+            "disable_comment": False,
+            "disable_stitch": False,
+            "brand_content_toggle": False,
+            "brand_organic_toggle": False,
+        },
+        "source_info": {
+            "source": "PULL_FROM_URL",
+            "video_url": video_url,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        init_response = await client.post(
+            "https://open.tiktokapis.com/v2/post/publish/video/init/",
+            headers=headers,
+            json=payload,
+        )
+    init_response.raise_for_status()
+
+    init_data = init_response.json()
+    if init_data.get("error", {}).get("code") != "ok":
+        raise HTTPException(status_code=502, detail=f"TikTok publish init failed: {init_data}")
+
+    publish_id = ((init_data.get("data") or {}).get("publish_id") or "").strip()
+    if not publish_id:
+        raise HTTPException(status_code=502, detail="TikTok publish_id missing")
+    return await poll_tiktok_status(access_token, publish_id)
+
+
+async def poll_tiktok_status(access_token: str, publish_id: str, max_attempts: int = 20):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    delay = 2.0
+    for _ in range(max_attempts):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
+                headers=headers,
+                json={"publish_id": publish_id},
+            )
+        response.raise_for_status()
+        data = (response.json().get("data") or {})
+        status = data.get("status")
+        if status == "PUBLISH_COMPLETE":
+            return {"success": True, "publish_id": publish_id, "status": status}
+        if status == "FAILED":
+            return {"success": False, "publish_id": publish_id, "status": status, "error": data.get("fail_reason") or "unknown"}
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.5, 30.0)
+
+    return {"success": False, "publish_id": publish_id, "status": "TIMEOUT", "error": "timeout"}
+
+
+async def publish_to_facebook_video(
+    access_token: str,
+    target_id: str,
+    video_url: str,
+    message: str,
+    title: str,
+    description: str,
+):
+    """
+    Publie une vidéo sur une page Facebook.
+
+    Args:
+        access_token: Page access token (long-lived, stocké en DB)
+        target_id: page_id (stocké en platform_user_id)
+        video_url: URL publique de la vidéo
+        message: Texte du post
+        title: Titre (optionnel pour Facebook)
+        description: Description (optionnel)
+    """
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Connected Facebook target id is missing")
+
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Facebook page access token expired or missing")
+
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(
+            f"https://graph.facebook.com/v19.0/{target_id}/videos",
+            data={
+                "file_url": video_url,
+                "description": message or description,
+                "title": title,
+                "access_token": access_token,
+            },
+        )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Facebook publish failed: {response.text}"
+        )
+
+    data = response.json()
+    return {
+        "id": data.get("id"),
+    }
+
+
+async def publish_to_instagram(account: SocialAccount, content: PublishRequest):
+    token = await get_valid_token(account)
+    ig_user_id = account.platform_user_id
+
+    # Étape 1 — Créer le container média (l'image/vidéo doit être une URL publique HTTPS)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        container_response = await client.post(
+            f"https://graph.instagram.com/v25.0/{ig_user_id}/media",
+            data={
+                "video_url": content.video_url,  # ou image_url selon le type
+                "caption": content.text,
+                "media_type": "REELS",  # ou "IMAGE", "VIDEO", "STORIES"
+                "access_token": token,
+            },
+        )
+    container_response.raise_for_status()
+    creation_id = container_response.json()["id"]
+
+    # Étape 2 — Attendre que le container soit prêt (polling, comme TikTok)
+    status = await _poll_instagram_container_status(token, creation_id)
+    if status != "FINISHED":
+        raise Exception(f"Container Instagram non prêt: {status}")
+
+    # Étape 3 — Publier le container
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        publish_response = await client.post(
+            f"https://graph.instagram.com/v25.0/{ig_user_id}/media_publish",
+            data={
+                "creation_id": creation_id,
+                "access_token": token,
+            },
+        )
+    publish_response.raise_for_status()
+    return publish_response.json()  # contient l'id du post publié
+
+
+async def _poll_instagram_container_status(token: str, creation_id: str, max_attempts: int = 20):
+    delay = 2
+    for _ in range(max_attempts):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"https://graph.instagram.com/v25.0/{creation_id}",
+                params={"fields": "status_code", "access_token": token},
+            )
+        status = response.json().get("status_code")
+        if status in ("FINISHED", "ERROR"):
+            return status
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.5, 30)
+    return "TIMEOUT"
+
+
+async def publish_to_facebook_page(page_id: str, page_access_token: str, message: str):
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"https://graph.facebook.com/v19.0/{page_id}/feed",
+            data={
+                "message": message,
+                "access_token": page_access_token,  # token de la Page, pas de l'utilisateur
+            },
+        )
+    response.raise_for_status()
+    return response.json()
+
+async def get_facebook_long_lived_token(short_lived_token: str) -> str:
+    """Échange un token court-terme contre un token long-terme (~60 jours)"""
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            "https://graph.facebook.com/v19.0/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": os.getenv("FACEBOOK_CLIENT_ID"),
+                "client_secret": os.getenv("FACEBOOK_CLIENT_SECRET"),
+                "access_token": short_lived_token,
+            },
+        )
+    response.raise_for_status()
+    return response.json().get("access_token")
+
+

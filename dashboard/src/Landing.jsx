@@ -8,12 +8,12 @@ const TikTokIcon = ({ size = 16, className = "" }) => (
 );
 
 const FeatureCard = ({ icon: Icon, title, description }) => (
-  <div className="group bg-surface/50 backdrop-blur-xl border border-white/10 rounded-2xl p-6 hover:border-primary/30 transition-all duration-300 hover:shadow-lg hover:shadow-primary/5">
+  <div className="group bg-surface/50 backdrop-blur-xl border border-slate-300 dark:border-white/10 rounded-2xl p-6 hover:border-primary/30 transition-all duration-300 hover:shadow-lg hover:shadow-primary/5">
     <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4 group-hover:bg-primary/20 transition-colors">
       <Icon size={24} className="text-primary" />
     </div>
-    <h3 className="text-lg font-semibold text-white mb-2">{title}</h3>
-    <p className="text-zinc-400 text-sm leading-relaxed">{description}</p>
+    <h3 className="title-contrast text-lg font-semibold mb-2">{title}</h3>
+    <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">{description}</p>
   </div>
 );
 
@@ -23,15 +23,15 @@ const StepCard = ({ number, title, description }) => (
       {number}
     </div>
     <div>
-      <h3 className="text-white font-semibold mb-1">{title}</h3>
-      <p className="text-zinc-400 text-sm leading-relaxed">{description}</p>
+      <h3 className="title-contrast font-semibold mb-1">{title}</h3>
+      <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">{description}</p>
     </div>
   </div>
 );
 
 const ComparisonRow = ({ feature, Vireel, opusclip, kapwing }) => (
-  <tr className="border-b border-white/5">
-    <td className="py-3 px-4 text-sm text-zinc-300">{feature}</td>
+  <tr className="border-b border-slate-200 dark:border-white/5">
+    <td className="py-3 px-4 text-sm text-slate-700 dark:text-zinc-300">{feature}</td>
     <td className="py-3 px-4 text-center">{Vireel}</td>
     <td className="py-3 px-4 text-center">{opusclip}</td>
     <td className="py-3 px-4 text-center">{kapwing}</td>
@@ -39,17 +39,17 @@ const ComparisonRow = ({ feature, Vireel, opusclip, kapwing }) => (
 );
 
 const FAQItem = ({ question, answer, isOpen, onClick }) => (
-  <div className="border border-white/10 rounded-xl overflow-hidden">
+  <div className="border border-slate-300 dark:border-white/10 rounded-xl overflow-hidden">
     <button
       onClick={onClick}
       className="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-white/5 transition-colors"
     >
       <span className="text-white font-medium pr-4">{question}</span>
-      <ChevronDown size={18} className={`text-zinc-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      <ChevronDown size={18} className={`text-slate-500 dark:text-zinc-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
     </button>
     {isOpen && (
       <div className="px-6 pb-5">
-        <p className="faq-answer text-zinc-400 text-sm leading-relaxed">{answer}</p>
+        <p className="faq-answer text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">{answer}</p>
       </div>
     )}
   </div>
@@ -136,7 +136,7 @@ export default function Landing({ onLaunchApp }) {
     },
     {
       question: "Is Vireel really free? What's the catch?",
-      answer: "Vireel is 100% free and open source. You self-host it using Docker on your own machine or server. It uses three external APIs — all with free tiers. Google Gemini API (required) powers the AI analysis, viral moment detection, and thumbnail generation — its free tier includes 1,500 requests per day. ElevenLabs API (optional) enables AI voice dubbing in 30+ languages — free tier included. Upload-Post API (optional) is a social media API that allows direct publishing to YouTube, TikTok, and Instagram — 10 free uploads/month, no credit card required. There are no watermarks, no usage limits, no monthly subscriptions, and no per-video fees — unlike Opus Clip ($15-228/month) or Kapwing ($24-79/month)."
+      answer: "Vireel is 100% free and open source. You self-host it using Docker on your own machine or server. It uses external APIs with free tiers. Google Gemini API (required) powers the AI analysis, viral moment detection, and thumbnail generation — its free tier includes 1,500 requests per day. ElevenLabs API (optional) enables AI voice dubbing in 30+ languages — free tier included. Social publishing is done through native OAuth account connections (YouTube, TikTok, Instagram, Facebook, LinkedIn). There are no watermarks, no usage limits, no monthly subscriptions, and no per-video fees — unlike Opus Clip ($15-228/month) or Kapwing ($24-79/month)."
     },
     {
       question: "How does Vireel compare to Opus Clip?",
@@ -185,18 +185,18 @@ export default function Landing({ onLaunchApp }) {
   ];
 
   const checkIcon = <Check size={16} className="text-green-400 mx-auto" />;
-  const xIcon = <span className="text-zinc-500 text-sm">Paid</span>;
+  const xIcon = <span className="text-slate-400 dark:text-zinc-500 text-sm">Paid</span>;
 
   return (
-    <div className="min-h-screen bg-background text-white">
+    <div className="min-h-screen bg-background text-slate-900 dark:text-white">
       {/* Navigation */}
-      <nav className="fixed top-0 w-full z-50 bg-background/80 backdrop-blur-xl border-b border-white/5">
+      <nav className="fixed top-0 w-full z-50 bg-background/80 backdrop-blur-xl border-b border-slate-200 dark:border-white/5">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <img src="/logo-vireel.png" alt="Vireel logo" className="w-8 h-8" />
             <span className="text-lg font-bold">Vireel</span>
           </div>
-          <div className="hidden md:flex items-center gap-8 text-sm text-zinc-400">
+          <div className="hidden md:flex items-center gap-8 text-sm text-slate-500 dark:text-zinc-400">
             <a href="#features" className="hover:text-white transition-colors">Features</a>
             <a href="#how-it-works" className="hover:text-white transition-colors">How It Works</a>
             <a href="#comparison" className="hover:text-white transition-colors">Comparison</a>
@@ -207,7 +207,7 @@ export default function Landing({ onLaunchApp }) {
               href="https://github.com/mutonby/Vireel"
               target="_blank"
               rel="noopener noreferrer"
-              className="hidden sm:flex items-center gap-2 text-sm text-zinc-400 hover:text-white transition-colors"
+              className="hidden sm:flex items-center gap-2 text-sm text-slate-500 dark:text-zinc-400 hover:text-white transition-colors"
             >
               <Github size={18} />
               <span>GitHub</span>
@@ -236,7 +236,7 @@ export default function Landing({ onLaunchApp }) {
             & AI UGC Video Creator
           </h1>
 
-          <p className="hero-description text-lg md:text-xl text-zinc-400 max-w-3xl mx-auto mb-10 leading-relaxed">
+          <p className="hero-description text-lg md:text-xl text-slate-500 dark:text-zinc-400 max-w-3xl mx-auto mb-10 leading-relaxed">
             Three tools in one. <strong className="text-white">Clip Generator:</strong> turn your long-form videos into viral shorts with AI moment detection, smart 9:16 crop, and auto subtitles. <strong className="text-white">AI Shorts:</strong> generate UGC marketing videos with AI actors and lip-sync for any business. <strong className="text-white">YouTube Studio:</strong> free AI thumbnail generator, 10 viral title suggestions with refinement chat, and auto descriptions with chapters. Self-hosted, open source, no limits.
           </p>
 
@@ -252,7 +252,7 @@ export default function Landing({ onLaunchApp }) {
               href="https://github.com/mutonby/Vireel"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2 bg-white/5 border border-white/10 text-white px-8 py-3.5 rounded-xl font-medium transition-all hover:bg-white/10 text-lg"
+              className="flex items-center gap-2 bg-white/5 border border-slate-300 dark:border-white/10 text-white px-8 py-3.5 rounded-xl font-medium transition-all hover:bg-white/10 text-lg"
             >
               <Github size={20} />
               View on GitHub
@@ -260,18 +260,18 @@ export default function Landing({ onLaunchApp }) {
           </div>
 
           {/* Platform Icons */}
-          <div className="flex items-center justify-center gap-6 text-zinc-500">
+          <div className="flex items-center justify-center gap-6 text-slate-400 dark:text-zinc-500">
             <span className="text-sm">Export to:</span>
             <div className="flex items-center gap-4">
-              <div className="flex items-center gap-1.5 text-zinc-400">
+              <div className="flex items-center gap-1.5 text-slate-500 dark:text-zinc-400">
                 <TikTokIcon size={18} />
                 <span className="text-sm">TikTok</span>
               </div>
-              <div className="flex items-center gap-1.5 text-zinc-400">
+              <div className="flex items-center gap-1.5 text-slate-500 dark:text-zinc-400">
                 <Instagram size={18} />
                 <span className="text-sm">Reels</span>
               </div>
-              <div className="flex items-center gap-1.5 text-zinc-400">
+              <div className="flex items-center gap-1.5 text-slate-500 dark:text-zinc-400">
                 <Youtube size={18} />
                 <span className="text-sm">Shorts</span>
               </div>
@@ -281,23 +281,23 @@ export default function Landing({ onLaunchApp }) {
       </section>
 
       {/* Stats Bar */}
-      <section className="border-y border-white/5 bg-surface/30">
+      <section className="border-y border-slate-200 dark:border-white/5 bg-surface/30">
         <div className="max-w-5xl mx-auto px-6 py-10 grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
           <div>
             <div className="text-3xl font-bold text-white">100%</div>
-            <div className="text-sm text-zinc-400 mt-1">Free & Open Source</div>
+            <div className="text-sm text-slate-500 dark:text-zinc-400 mt-1">Free & Open Source</div>
           </div>
           <div>
             <div className="text-3xl font-bold text-white">3</div>
-            <div className="text-sm text-zinc-400 mt-1">Tools in One</div>
+            <div className="text-sm text-slate-500 dark:text-zinc-400 mt-1">Tools in One</div>
           </div>
           <div>
             <div className="text-3xl font-bold text-white">30+</div>
-            <div className="text-sm text-zinc-400 mt-1">Dubbing Languages</div>
+            <div className="text-sm text-slate-500 dark:text-zinc-400 mt-1">Dubbing Languages</div>
           </div>
           <div>
             <div className="text-3xl font-bold text-white">$0</div>
-            <div className="text-sm text-zinc-400 mt-1">No Watermarks</div>
+            <div className="text-sm text-slate-500 dark:text-zinc-400 mt-1">No Watermarks</div>
           </div>
         </div>
       </section>
@@ -307,39 +307,39 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">3 Free Tools in 1 Platform</h2>
-            <p className="text-zinc-400 max-w-2xl mx-auto">Everything you need to create, optimize, and publish short-form video content — all free and open source.</p>
+            <p className="text-slate-500 dark:text-zinc-400 max-w-2xl mx-auto">Everything you need to create, optimize, and publish short-form video content — all free and open source.</p>
           </div>
           <div className="grid md:grid-cols-3 gap-6">
             <div className="bg-surface/50 border border-primary/20 rounded-2xl p-8 relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-primary/5 rounded-full -translate-y-1/2 translate-x-1/2" />
               <Scissors size={28} className="text-primary mb-4" />
-              <h3 className="text-xl font-bold text-white mb-2">Clip Generator</h3>
-              <p className="text-zinc-400 text-sm leading-relaxed mb-4">Turn your long-form videos into viral-ready 9:16 shorts. AI detects the best moments, crops to vertical with face tracking, and adds subtitles automatically.</p>
+              <h3 className="title-contrast text-xl font-bold mb-2">Clip Generator</h3>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed mb-4">Turn your long-form videos into viral-ready 9:16 shorts. AI detects the best moments, crops to vertical with face tracking, and adds subtitles automatically.</p>
               <ul className="space-y-1.5">
                 {['AI viral moment detection', 'Smart face-tracking crop', 'Auto subtitles + hook overlays', 'AI dubbing in 30+ languages'].map((f, i) => (
-                  <li key={i} className="flex items-center gap-2 text-xs text-zinc-400"><Check size={12} className="text-green-400 shrink-0" />{f}</li>
+                  <li key={i} className="flex items-center gap-2 text-xs text-slate-500 dark:text-zinc-400"><Check size={12} className="text-green-400 shrink-0" />{f}</li>
                 ))}
               </ul>
             </div>
             <div className="bg-surface/50 border border-violet-500/20 rounded-2xl p-8 relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-violet-500/5 rounded-full -translate-y-1/2 translate-x-1/2" />
               <Sparkles size={28} className="text-violet-400 mb-4" />
-              <h3 className="text-xl font-bold text-white mb-2">AI Shorts</h3>
-              <p className="text-zinc-400 text-sm leading-relaxed mb-4">Generate UGC marketing videos with AI actors for any product or business. No camera, no studio. Just describe your product and get a viral-ready video.</p>
+              <h3 className="title-contrast text-xl font-bold mb-2">AI Shorts</h3>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed mb-4">Generate UGC marketing videos with AI actors for any product or business. No camera, no studio. Just describe your product and get a viral-ready video.</p>
               <ul className="space-y-1.5">
                 {['AI actor generation + lip-sync', 'Script writing from URL or description', 'B-roll + TikTok-style subtitles', 'From $0.65 per video'].map((f, i) => (
-                  <li key={i} className="flex items-center gap-2 text-xs text-zinc-400"><Check size={12} className="text-green-400 shrink-0" />{f}</li>
+                  <li key={i} className="flex items-center gap-2 text-xs text-slate-500 dark:text-zinc-400"><Check size={12} className="text-green-400 shrink-0" />{f}</li>
                 ))}
               </ul>
             </div>
             <div className="bg-surface/50 border border-pink-500/20 rounded-2xl p-8 relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-pink-500/5 rounded-full -translate-y-1/2 translate-x-1/2" />
               <Monitor size={28} className="text-pink-400 mb-4" />
-              <h3 className="text-xl font-bold text-white mb-2">YouTube Studio</h3>
-              <p className="text-zinc-400 text-sm leading-relaxed mb-4">Complete free AI YouTube toolkit. Generate thumbnails with your face, get 10 viral title suggestions with refinement chat, and auto-generate descriptions with timestamps.</p>
+              <h3 className="title-contrast text-xl font-bold mb-2">YouTube Studio</h3>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed mb-4">Complete free AI YouTube toolkit. Generate thumbnails with your face, get 10 viral title suggestions with refinement chat, and auto-generate descriptions with timestamps.</p>
               <ul className="space-y-1.5">
                 {['AI thumbnail generator (with face upload)', '10 viral title suggestions + chat', 'Auto descriptions with chapters', 'Direct publish to YouTube'].map((f, i) => (
-                  <li key={i} className="flex items-center gap-2 text-xs text-zinc-400"><Check size={12} className="text-green-400 shrink-0" />{f}</li>
+                  <li key={i} className="flex items-center gap-2 text-xs text-slate-500 dark:text-zinc-400"><Check size={12} className="text-green-400 shrink-0" />{f}</li>
                 ))}
               </ul>
             </div>
@@ -352,7 +352,7 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">Free AI Clip Generator + UGC Video Creator</h2>
-            <p className="text-zinc-400 max-w-2xl mx-auto">Three tools in one: clip long videos into viral shorts, generate UGC marketing videos with AI actors, and a complete YouTube Studio for thumbnails, titles, and descriptions.</p>
+            <p className="text-slate-500 dark:text-zinc-400 max-w-2xl mx-auto">Three tools in one: clip long videos into viral shorts, generate UGC marketing videos with AI actors, and a complete YouTube Studio for thumbnails, titles, and descriptions.</p>
           </div>
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
             {features.map((feature, i) => (
@@ -367,55 +367,55 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-5xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">All APIs Have Free Tiers</h2>
-            <p className="text-zinc-400 max-w-2xl mx-auto">Vireel uses three external APIs — all with generous free tiers. Only Gemini is required. Your API keys are encrypted client-side and never stored on the server.</p>
+            <p className="text-slate-500 dark:text-zinc-400 max-w-2xl mx-auto">Vireel uses three external APIs — all with generous free tiers. Only Gemini is required. Your API keys are encrypted client-side and never stored on the server.</p>
           </div>
           <div className="grid md:grid-cols-3 gap-5">
-            <div className="bg-surface/50 border border-white/10 rounded-2xl p-6 relative">
+            <div className="bg-surface/50 border border-slate-300 dark:border-white/10 rounded-2xl p-6 relative">
               <div className="absolute top-4 right-4 bg-primary/20 text-primary text-[10px] font-bold px-2 py-0.5 rounded-full border border-primary/30">REQUIRED</div>
               <div className="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center mb-4">
                 <Cpu size={24} className="text-blue-400" />
               </div>
-              <h3 className="text-lg font-semibold text-white mb-1">Google Gemini API</h3>
+              <h3 className="title-contrast text-lg font-semibold mb-1">Google Gemini API</h3>
               <span className="inline-block text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full mb-3">Free tier: 1,500 req/day</span>
-              <p className="text-zinc-400 text-sm leading-relaxed">Powers all AI features: viral moment detection, title generation, video effects, YouTube thumbnail creation, and description writing. The core engine of Vireel.</p>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">Powers all AI features: viral moment detection, title generation, video effects, YouTube thumbnail creation, and description writing. The core engine of Vireel.</p>
             </div>
-            <div className="bg-surface/50 border border-white/10 rounded-2xl p-6 relative">
-              <div className="absolute top-4 right-4 bg-zinc-700/50 text-zinc-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-zinc-600/30">OPTIONAL</div>
+            <div className="bg-surface/50 border border-slate-300 dark:border-white/10 rounded-2xl p-6 relative">
+              <div className="absolute top-4 right-4 bg-zinc-700/50 text-slate-500 dark:text-zinc-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-zinc-600/30">OPTIONAL</div>
               <div className="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center mb-4">
                 <Languages size={24} className="text-purple-400" />
               </div>
-              <h3 className="text-lg font-semibold text-white mb-1">ElevenLabs API</h3>
+              <h3 className="title-contrast text-lg font-semibold mb-1">ElevenLabs API</h3>
               <span className="inline-block text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full mb-3">Free tier included</span>
-              <p className="text-zinc-400 text-sm leading-relaxed">Enables AI voice dubbing and translation in 30+ languages. Preserves the original speaker's voice while translating audio. Dubbed clips are auto-subtitled.</p>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">Enables AI voice dubbing and translation in 30+ languages. Preserves the original speaker's voice while translating audio. Dubbed clips are auto-subtitled.</p>
             </div>
-            <div className="bg-surface/50 border border-white/10 rounded-2xl p-6 relative">
-              <div className="absolute top-4 right-4 bg-zinc-700/50 text-zinc-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-zinc-600/30">OPTIONAL</div>
+            <div className="bg-surface/50 border border-slate-300 dark:border-white/10 rounded-2xl p-6 relative">
+              <div className="absolute top-4 right-4 bg-zinc-700/50 text-slate-500 dark:text-zinc-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-zinc-600/30">OPTIONAL</div>
               <div className="w-12 h-12 rounded-xl bg-pink-500/10 flex items-center justify-center mb-4">
                 <Globe size={24} className="text-pink-400" />
               </div>
-              <h3 className="text-lg font-semibold text-white mb-1">Upload-Post API</h3>
+              <h3 className="title-contrast text-lg font-semibold mb-1">Social OAuth</h3>
               <span className="inline-block text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full mb-3">Free tier included</span>
-              <p className="text-zinc-400 text-sm leading-relaxed">Enables direct publishing to YouTube, TikTok, and Instagram Reels from the dashboard. <a href="https://www.upload-post.com" target="_blank" rel="noopener noreferrer" className="text-pink-400 hover:text-pink-300 underline">Social media API</a> that lets you post your clips and thumbnails without leaving Vireel.</p>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">Enables direct publishing to YouTube, TikTok, Instagram Reels, Facebook, and LinkedIn from the dashboard via native connected social accounts.</p>
             </div>
           </div>
           <div className="grid md:grid-cols-2 gap-5 mt-5">
-            <div className="bg-surface/50 border border-white/10 rounded-2xl p-6 relative">
+            <div className="bg-surface/50 border border-slate-300 dark:border-white/10 rounded-2xl p-6 relative">
               <div className="absolute top-4 right-4 bg-violet-700/50 text-violet-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-violet-500/30">AI SHORTS</div>
               <div className="w-12 h-12 rounded-xl bg-violet-500/10 flex items-center justify-center mb-4">
                 <Zap size={24} className="text-violet-400" />
               </div>
-              <h3 className="text-lg font-semibold text-white mb-1">fal.ai API</h3>
+              <h3 className="title-contrast text-lg font-semibold mb-1">fal.ai API</h3>
               <span className="inline-block text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full mb-3">Pay-per-use from $0.04</span>
-              <p className="text-zinc-400 text-sm leading-relaxed">Powers AI Shorts: generates AI actor images (Flux), talking head videos (Hailuo/Kling), and lip-sync (VEED). Required only for the AI UGC video generator.</p>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">Powers AI Shorts: generates AI actor images (Flux), talking head videos (Hailuo/Kling), and lip-sync (VEED). Required only for the AI UGC video generator.</p>
             </div>
-            <div className="bg-surface/50 border border-white/10 rounded-2xl p-6 relative">
+            <div className="bg-surface/50 border border-slate-300 dark:border-white/10 rounded-2xl p-6 relative">
               <div className="absolute top-4 right-4 bg-violet-700/50 text-violet-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-violet-500/30">AI SHORTS</div>
               <div className="w-12 h-12 rounded-xl bg-violet-500/10 flex items-center justify-center mb-4">
                 <Languages size={24} className="text-violet-400" />
               </div>
-              <h3 className="text-lg font-semibold text-white mb-1">ElevenLabs TTS</h3>
+              <h3 className="title-contrast text-lg font-semibold mb-1">ElevenLabs TTS</h3>
               <span className="inline-block text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full mb-3">Free tier included</span>
-              <p className="text-zinc-400 text-sm leading-relaxed">Generates natural voiceovers for AI Shorts from the script. Multiple voice options for male and female actors in English and Spanish.</p>
+              <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">Generates natural voiceovers for AI Shorts from the script. Multiple voice options for male and female actors in English and Spanish.</p>
             </div>
           </div>
         </div>
@@ -426,7 +426,7 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">How It Works</h2>
-            <p className="text-zinc-400 max-w-2xl mx-auto">From a long-form video to viral-ready clips in 5 automated steps. The entire pipeline runs on your machine with AI doing the heavy lifting.</p>
+            <p className="text-slate-500 dark:text-zinc-400 max-w-2xl mx-auto">From a long-form video to viral-ready clips in 5 automated steps. The entire pipeline runs on your machine with AI doing the heavy lifting.</p>
           </div>
           <div className="space-y-8">
             {steps.map((step, i) => (
@@ -441,7 +441,7 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-5xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">Built with Proven Technology</h2>
-            <p className="text-zinc-400 max-w-2xl mx-auto">Vireel combines industry-leading AI models and open source tools into a production-ready video processing pipeline.</p>
+            <p className="text-slate-500 dark:text-zinc-400 max-w-2xl mx-auto">Vireel combines industry-leading AI models and open source tools into a production-ready video processing pipeline.</p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
@@ -455,9 +455,9 @@ export default function Landing({ onLaunchApp }) {
               { name: "React + Vite", desc: "Dashboard" },
               { name: "Docker", desc: "Deployment" }
             ].map((tech, i) => (
-              <div key={i} className="bg-surface/50 border border-white/10 rounded-xl p-4 text-center">
+              <div key={i} className="bg-surface/50 border border-slate-300 dark:border-white/10 rounded-xl p-4 text-center">
                 <div className="text-white font-medium text-sm">{tech.name}</div>
-                <div className="text-zinc-500 text-xs mt-1">{tech.desc}</div>
+                <div className="text-slate-400 dark:text-zinc-500 text-xs mt-1">{tech.desc}</div>
               </div>
             ))}
           </div>
@@ -469,18 +469,18 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">Free Clip Generator vs Paid Alternatives</h2>
-            <p className="text-zinc-400 max-w-2xl mx-auto">Why pay $15-228/month for an AI clip generator when you can self-host the same capabilities for free? Vireel includes a free YouTube thumbnail generator, AI title suggestions, and auto descriptions — features that paid tools charge extra for.</p>
+            <p className="text-slate-500 dark:text-zinc-400 max-w-2xl mx-auto">Why pay $15-228/month for an AI clip generator when you can self-host the same capabilities for free? Vireel includes a free YouTube thumbnail generator, AI title suggestions, and auto descriptions — features that paid tools charge extra for.</p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                <tr className="border-b border-white/10">
-                  <th className="py-3 px-4 text-left text-sm text-zinc-400 font-medium">Feature</th>
+                <tr className="border-b border-slate-300 dark:border-white/10">
+                  <th className="py-3 px-4 text-left text-sm text-slate-500 dark:text-zinc-400 font-medium">Feature</th>
                   <th className="py-3 px-4 text-center text-sm font-medium">
                     <span className="text-primary">Vireel</span>
                   </th>
-                  <th className="py-3 px-4 text-center text-sm text-zinc-400 font-medium">Opus Clip</th>
-                  <th className="py-3 px-4 text-center text-sm text-zinc-400 font-medium">Kapwing</th>
+                  <th className="py-3 px-4 text-center text-sm text-slate-500 dark:text-zinc-400 font-medium">Opus Clip</th>
+                  <th className="py-3 px-4 text-center text-sm text-slate-500 dark:text-zinc-400 font-medium">Kapwing</th>
                 </tr>
               </thead>
               <tbody>
@@ -488,17 +488,17 @@ export default function Landing({ onLaunchApp }) {
                 <ComparisonRow feature="AI Viral Moment Detection" Vireel={checkIcon} opusclip={checkIcon} kapwing={checkIcon} />
                 <ComparisonRow feature="Smart Vertical Cropping" Vireel={checkIcon} opusclip={checkIcon} kapwing={checkIcon} />
                 <ComparisonRow feature="Auto Subtitles" Vireel={checkIcon} opusclip={checkIcon} kapwing={checkIcon} />
-                <ComparisonRow feature="AI Voice Dubbing (30+ langs)" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">Limited</span>} kapwing={<span className="text-zinc-500 text-sm">No</span>} />
-                <ComparisonRow feature="AI Video Effects" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">No</span>} kapwing={checkIcon} />
+                <ComparisonRow feature="AI Voice Dubbing (30+ langs)" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">Limited</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} />
+                <ComparisonRow feature="AI Video Effects" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} kapwing={checkIcon} />
                 <ComparisonRow feature="Hook Text Overlays" Vireel={checkIcon} opusclip={checkIcon} kapwing={checkIcon} />
-                <ComparisonRow feature="Self-Hosted / Privacy" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">Cloud only</span>} kapwing={<span className="text-zinc-500 text-sm">Cloud only</span>} />
-                <ComparisonRow feature="No Watermark" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">Free tier only</span>} kapwing={<span className="text-zinc-500 text-sm">Paid</span>} />
-                <ComparisonRow feature="Open Source" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">No</span>} kapwing={<span className="text-zinc-500 text-sm">No</span>} />
-                <ComparisonRow feature="AI YouTube Thumbnail Generator" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">No</span>} kapwing={<span className="text-zinc-500 text-sm">Paid</span>} />
-                <ComparisonRow feature="AI Title & Description Generator" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">Limited</span>} kapwing={<span className="text-zinc-500 text-sm">Paid</span>} />
-                <ComparisonRow feature="AI UGC Video Generator" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">No</span>} kapwing={<span className="text-zinc-500 text-sm">No</span>} />
-                <ComparisonRow feature="AI Actors with Lip-Sync" Vireel={checkIcon} opusclip={<span className="text-zinc-500 text-sm">No</span>} kapwing={<span className="text-zinc-500 text-sm">No</span>} />
-                <ComparisonRow feature="Usage Limits" Vireel={<span className="text-green-400 text-sm">Unlimited</span>} opusclip={<span className="text-zinc-500 text-sm">Per plan</span>} kapwing={<span className="text-zinc-500 text-sm">Per plan</span>} />
+                <ComparisonRow feature="Self-Hosted / Privacy" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">Cloud only</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">Cloud only</span>} />
+                <ComparisonRow feature="No Watermark" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">Free tier only</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">Paid</span>} />
+                <ComparisonRow feature="Open Source" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} />
+                <ComparisonRow feature="AI YouTube Thumbnail Generator" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">Paid</span>} />
+                <ComparisonRow feature="AI Title & Description Generator" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">Limited</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">Paid</span>} />
+                <ComparisonRow feature="AI UGC Video Generator" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} />
+                <ComparisonRow feature="AI Actors with Lip-Sync" Vireel={checkIcon} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">No</span>} />
+                <ComparisonRow feature="Usage Limits" Vireel={<span className="text-green-400 text-sm">Unlimited</span>} opusclip={<span className="text-slate-400 dark:text-zinc-500 text-sm">Per plan</span>} kapwing={<span className="text-slate-400 dark:text-zinc-500 text-sm">Per plan</span>} />
               </tbody>
             </table>
           </div>
@@ -510,7 +510,7 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-5xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">Who Uses Vireel?</h2>
-            <p className="text-zinc-400 max-w-2xl mx-auto">Content creators, marketers, and agencies use Vireel to scale their short-form video production. According to HubSpot's 2025 report, short-form video is the #1 content format with the highest ROI.</p>
+            <p className="text-slate-500 dark:text-zinc-400 max-w-2xl mx-auto">Content creators, marketers, and agencies use Vireel to scale their short-form video production. According to HubSpot's 2025 report, short-form video is the #1 content format with the highest ROI.</p>
           </div>
           <div className="grid md:grid-cols-3 gap-5">
             {[
@@ -535,10 +535,10 @@ export default function Landing({ onLaunchApp }) {
                 icon: Sparkles
               }
             ].map((useCase, i) => (
-              <div key={i} className="bg-surface/50 border border-white/10 rounded-2xl p-6">
+              <div key={i} className="bg-surface/50 border border-slate-300 dark:border-white/10 rounded-2xl p-6">
                 <useCase.icon size={24} className="text-primary mb-4" />
-                <h3 className="text-lg font-semibold text-white mb-2">{useCase.title}</h3>
-                <p className="text-zinc-400 text-sm leading-relaxed">{useCase.description}</p>
+                <h3 className="title-contrast text-lg font-semibold mb-2">{useCase.title}</h3>
+                <p className="text-slate-500 dark:text-zinc-400 text-sm leading-relaxed">{useCase.description}</p>
               </div>
             ))}
           </div>
@@ -550,7 +550,7 @@ export default function Landing({ onLaunchApp }) {
         <div className="max-w-3xl mx-auto">
           <div className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">Frequently Asked Questions</h2>
-            <p className="text-zinc-400">Everything you need to know about Vireel, from setup to features.</p>
+            <p className="text-slate-500 dark:text-zinc-400">Everything you need to know about Vireel, from setup to features.</p>
           </div>
           <div className="space-y-3">
             {faqs.map((faq, i) => (
@@ -570,7 +570,7 @@ export default function Landing({ onLaunchApp }) {
       <section className="py-20 px-6">
         <div className="max-w-3xl mx-auto text-center">
           <h2 className="text-3xl md:text-4xl font-bold mb-4">Start Creating Viral Videos for Free</h2>
-          <p className="text-zinc-400 mb-8 max-w-xl mx-auto">No sign-up, no credit card, no watermarks. Generate viral clips from long videos or create AI UGC marketing videos with AI actors for any business. Self-host with Docker.</p>
+          <p className="text-slate-500 dark:text-zinc-400 mb-8 max-w-xl mx-auto">No sign-up, no credit card, no watermarks. Generate viral clips from long videos or create AI UGC marketing videos with AI actors for any business. Self-host with Docker.</p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <button
               onClick={onLaunchApp}
@@ -583,7 +583,7 @@ export default function Landing({ onLaunchApp }) {
               href="https://github.com/mutonby/Vireel"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors text-sm"
+              className="flex items-center gap-2 text-slate-500 dark:text-zinc-400 hover:text-white transition-colors text-sm"
             >
               <Github size={18} />
               Star on GitHub
@@ -593,13 +593,13 @@ export default function Landing({ onLaunchApp }) {
       </section>
 
       {/* Footer */}
-      <footer className="border-t border-white/5 py-10 px-6">
+      <footer className="border-t border-slate-200 dark:border-white/5 py-10 px-6">
         <div className="max-w-5xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <img src="/logo-vireel.png" alt="Vireel" className="w-6 h-6" />
-            <span className="text-sm text-zinc-400">Vireel — Free Open Source Clip Generator & AI UGC Video Creator</span>
+            <span className="text-sm text-slate-500 dark:text-zinc-400">Vireel — Free Open Source Clip Generator & AI UGC Video Creator</span>
           </div>
-          <div className="flex items-center gap-6 text-sm text-zinc-500">
+          <div className="flex items-center gap-6 text-sm text-slate-400 dark:text-zinc-500">
             <a href="https://github.com/mutonby/Vireel" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">GitHub</a>
             <a href="#features" className="hover:text-white transition-colors">Features</a>
             <a href="#faq" className="hover:text-white transition-colors">FAQ</a>

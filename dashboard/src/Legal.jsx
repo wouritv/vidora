@@ -7,8 +7,8 @@ const ISSUES_URL = 'https://github.com/mutonby/Vireel/issues';
 function Section({ title, children }) {
     return (
         <section className="mb-7">
-            <h2 className="text-lg font-bold text-white mb-2">{title}</h2>
-            <div className="text-zinc-300 leading-relaxed space-y-2 text-sm">{children}</div>
+            <h2 className="title-contrast text-lg font-bold mb-2">{title}</h2>
+            <div className="text-slate-700 dark:text-zinc-300 leading-relaxed space-y-2 text-sm">{children}</div>
         </section>
     );
 }
@@ -20,11 +20,11 @@ export default function Legal() {
 
     return (
         <div className="min-h-screen bg-bg text-white">
-            <header className="border-b border-white/5 sticky top-0 bg-bg/95 backdrop-blur z-10">
+            <header className="border-b border-slate-200 dark:border-white/5 sticky top-0 bg-bg/95 backdrop-blur z-10">
                 <div className="max-w-3xl mx-auto px-6 py-4 flex items-center">
                     <button
                         onClick={handleBack}
-                        className="text-zinc-400 hover:text-white flex items-center gap-2 text-sm"
+                        className="text-slate-500 dark:text-zinc-400 hover:text-white flex items-center gap-2 text-sm"
                     >
                         <ArrowLeft size={16} /> Back
                     </button>
@@ -33,7 +33,7 @@ export default function Legal() {
 
             <main className="max-w-3xl mx-auto px-6 py-12">
                 <h1 className="text-3xl md:text-4xl font-bold mb-2">Terms & Privacy</h1>
-                <p className="text-zinc-500 text-sm mb-10">Last updated: {LAST_UPDATED}</p>
+                <p className="text-slate-400 dark:text-zinc-500 text-sm mb-10">Last updated: {LAST_UPDATED}</p>
 
                 <Section title="The short version">
                     <p>
@@ -85,7 +85,7 @@ export default function Legal() {
                             for debugging and abuse prevention.
                         </li>
                         <li>
-                            <strong className="text-white">API keys (Gemini, ElevenLabs, Upload-Post):</strong> stored
+                            <strong className="text-white">API keys (Gemini, ElevenLabs):</strong> stored
                             encrypted in your browser's <code className="text-zinc-200">localStorage</code>. They are
                             sent as request headers when a feature needs them, used to call the relevant third party,
                             and never written to our database or disk.
@@ -98,7 +98,7 @@ export default function Legal() {
                     <p>
                         When you use a feature that requires it, Vireel forwards relevant data to the third-party
                         API for which you provided a key — Google Gemini (AI analysis), ElevenLabs (optional dubbing),
-                        Upload-Post (optional social posting). Those services have their own terms and privacy policies
+                        and connected social platform APIs for optional publishing. Those services have their own terms and privacy policies
                         which apply in addition to this notice.
                     </p>
                 </Section>

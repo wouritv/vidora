@@ -78,20 +78,20 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 5. **Video**: Talking head generation (Hailuo 2.3 Fast img2video + VEED Lipsync)
 6. **B-roll**: AI-generated visuals with Ken Burns effect
 7. **Composite**: FFmpeg final assembly with subtitles and hook overlays
-8. **Publish**: Direct posting to TikTok, Instagram Reels, YouTube Shorts via Upload-Post
+8. **Publish**: Direct posting to TikTok, Instagram Reels, YouTube Shorts via connected OAuth accounts
 
 ### YouTube Studio
 - AI-powered title generation with 10 viral options
 - Interactive refinement chat for titles
 - AI thumbnail generation with custom face + background
 - Auto descriptions with chapter timestamps from Whisper transcript
-- Direct YouTube publishing via Upload-Post
+- Direct YouTube publishing via connected OAuth account
 
 ### Social Auto-Publishing
 - **One-click posting** to TikTok, Instagram Reels, and YouTube Shorts simultaneously
 - **Schedule uploads** for any date and time — plan your content calendar and let Vireel publish automatically
 - **Multi-platform distribution** — publish to all your social networks at once from a single interface
-- Upload-Post integration with async uploads
+- Native social API publishing with connected accounts
 
 ### Infrastructure
 - S3 cloud backup (private bucket for clips, public bucket for gallery/avatars)
@@ -118,7 +118,7 @@ Videos generated with Vireel AI Shorts — no camera, no studio, no actors:
 
 | | | |
 |:---:|:---:|:---:|
-| [![Biohacking for Investors](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/cdceec1b/actor.png)](https://Vireel.app/video/cdceec1b) | [![Secret Weapon for Devs](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/d3a80b6b/actor.png)](https://Vireel.app/video/d3a80b6b) | [![El Secreto de los Agentes de IA](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/8ab7de92/actor.png)](https://Vireel.app/video/8ab7de92) |
+| [![Biohacking for Investors](screenshots/ai-shorts.png)](https://Vireel.app/gallery) | [![Secret Weapon for Devs](screenshots/ugc-gallery.png)](https://Vireel.app/gallery) | [![El Secreto de los Agentes de IA](screenshots/youtube-studio.png)](https://Vireel.app/gallery) |
 | **Biohacking for Investors** · LOW COST | **Secret Weapon for Devs** · LOW COST | **El Secreto de los Agentes de IA** · PREMIUM |
 
 > Browse all videos at [Vireel.app/gallery](https://Vireel.app/gallery)
@@ -157,10 +157,10 @@ Vireel is free. You only pay for the AI APIs you use — and most have generous 
 | **Google Gemini** | Free trial with generous limits | < $0.01 per 10-min video | Viral moment detection, script generation, web research |
 | **fal.ai** | Pay-per-use | ~$0.50-1.50 per AI Short | Actor generation, talking head video, lip-sync |
 | **ElevenLabs** | Free tier available | Pay-per-use | Voiceover, voice dubbing |
-| **Upload-Post** | **10 free uploads/month** to all networks (no credit card) | Pay-per-use | Auto-publishing to TikTok, Instagram, YouTube |
+| **Social APIs** | Depends on each platform | Depends on each platform | Auto-publishing to TikTok, Instagram, YouTube |
 | **AWS S3** | Optional | ~$0.023/GB | Cloud backup for clips and gallery |
 
-**Bottom line:** You can clip videos for practically free with Gemini, and publish 10 videos/month to all social networks at zero cost with Upload-Post.
+**Bottom line:** You can clip videos for practically free with Gemini, then publish directly with your own connected social accounts.
 
 ---
 
@@ -170,7 +170,7 @@ Vireel is free. You only pay for the AI APIs you use — and most have generous 
 - **Google Gemini API Key** ([Free — get it here](https://aistudio.google.com/app/apikey)) — required for all AI features
 - **fal.ai API Key** ([Pay-per-use](https://fal.ai)) — required for AI Shorts (actor generation, video, lip-sync)
 - **ElevenLabs API Key** ([Free tier](https://elevenlabs.io)) — required for voiceover/dubbing
-- **Upload-Post API Key** ([free tier](https://upload-post.com)) — required for direct social posting
+- **Social OAuth app credentials** (TikTok / Meta / YouTube / LinkedIn) — required for direct social posting
 
 ---
 
@@ -196,7 +196,7 @@ docker compose up --build
 ### 4. Open Dashboard
 Navigate to **`http://localhost:5175`**
 
-1. Go to **Settings** and enter your API keys (Gemini, fal.ai, ElevenLabs, Upload-Post)
+1. Go to **Settings** and connect your social accounts (TikTok, Instagram, YouTube, Facebook, LinkedIn)
 2. **Clip Generator**: Upload a long-form video to generate viral shorts
 3. **AI Shorts**: Describe your product or paste a URL to generate UGC marketing videos
 4. **YouTube Studio**: Generate thumbnails, titles, and descriptions for YouTube
@@ -214,7 +214,7 @@ Navigate to **`http://localhost:5175`**
 5. **Extract** — FFmpeg precise clip cutting
 6. **Reframe** — AI vertical cropping with subject tracking
 7. **Effects** — Subtitles, hooks, AI video effects
-8. **Publish** — S3 backup + Upload-Post social distribution
+8. **Publish** — S3 backup + native social distribution
 
 ### AI Shorts
 1. **Analyze** — Website scraping + Gemini web research (or manual description)
@@ -225,7 +225,7 @@ Navigate to **`http://localhost:5175`**
 6. **B-roll** — Flux 2 Pro image generation + Ken Burns effect
 7. **Composite** — FFmpeg assembly with ASS subtitles and hook overlays
 8. **Gallery** — Upload to public S3 with metadata for SEO pages
-9. **Publish** — Upload-Post to TikTok, Instagram, YouTube
+9. **Publish** — Native platform APIs to TikTok, Instagram, YouTube
 
 ---
 
@@ -237,7 +237,7 @@ Navigate to **`http://localhost:5175`**
 | Frontend | React 18, Vite 4, Tailwind CSS 3.4 |
 | AI APIs | Google Gemini, fal.ai (Flux, Hailuo, VEED, Kling), ElevenLabs |
 | Infrastructure | Docker + Docker Compose, AWS S3 |
-| Publishing | Upload-Post API (TikTok, Instagram, YouTube) |
+| Publishing | Native platform APIs (TikTok, Instagram, YouTube, Facebook, LinkedIn) |
 
 ---
 
@@ -252,9 +252,18 @@ Navigate to **`http://localhost:5175`**
 | `AWS_S3_BUCKET` | Private bucket for clip backup |
 | `AWS_S3_PUBLIC_BUCKET` | Public bucket for gallery/avatars |
 | `MAX_CONCURRENT_JOBS` | Concurrent processing limit (default: 5) |
-| `UPLOAD_POST_API_KEY` | Optional server-side Upload-Post API key fallback |
-| `UPLOAD_POST_USER_ID` | Optional server-side Upload-Post profile/user fallback |
-| `UPLOAD_POST_DEFAULT_PLATFORMS` | Default post targets if request omits platforms (e.g. `tiktok,instagram,youtube`) |
+| `SOCIAL_DEFAULT_PLATFORMS` | Default post targets if request omits platforms (e.g. `tiktok,instagram,youtube`) |
+| `FACEBOOK_CLIENT_ID` | Meta/Facebook OAuth client id |
+| `FACEBOOK_CLIENT_SECRET` | Meta/Facebook OAuth client secret |
+| `INSTAGRAM_CLIENT_ID` | Instagram OAuth client id (optional, falls back to Facebook app id) |
+| `INSTAGRAM_CLIENT_SECRET` | Instagram OAuth client secret (optional, falls back to Facebook app secret) |
+| `LINKEDIN_CLIENT_ID` | LinkedIn OAuth client id |
+| `LINKEDIN_CLIENT_SECRET` | LinkedIn OAuth client secret |
+| `YOUTUBE_CLIENT_ID` | Google OAuth client id for YouTube upload |
+| `YOUTUBE_CLIENT_SECRET` | Google OAuth client secret for YouTube upload |
+| `TIKTOK_CLIENT_KEY` | TikTok OAuth client key |
+| `TIKTOK_CLIENT_SECRET` | TikTok OAuth client secret |
+| `BASE_URL` | Public backend base URL used for OAuth callbacks and public media URLs |
 
 **Client-side (encrypted in localStorage):**
 | Key | Description |
@@ -262,7 +271,7 @@ Navigate to **`http://localhost:5175`**
 | `GEMINI_API_KEY` | Google Gemini — required |
 | `FAL_KEY` | fal.ai — required for AI Shorts |
 | `ELEVENLABS_API_KEY` | ElevenLabs — required for voiceover/dubbing |
-| `UPLOAD_POST_API_KEY` | Upload-Post — optional if server-side env fallback is configured |
+| `Vireel-connected-networks` | Connected networks cache used by posting UI |
 
 ---
 
@@ -277,14 +286,12 @@ Navigate to **`http://localhost:5175`**
 
 ---
 
-## Social Media Setup (Upload-Post)
+## Social Media Setup (Native OAuth)
 
-1. **Register**: [app.upload-post.com/login](https://app.upload-post.com/login)
-2. **Create Profile**: Go to [Manage Users](https://app.upload-post.com/manage-users)
-3. **Connect Accounts**: Link TikTok, Instagram, and/or YouTube
-4. **Get API Key**: Navigate to [API Keys](https://app.upload-post.com/api-keys)
-5. **Use in Vireel**: Paste API key + profile user in `Settings` (optional when server env fallback is set)
-6. **Connected Platforms**: Enable available networks in `Settings > Connected Networks`; posting UIs read from this config
+1. Configure OAuth environment variables in backend `.env` (Meta/Instagram, TikTok, YouTube, LinkedIn)
+2. Set `BASE_URL` to your public backend URL
+3. Open `Settings > Connected Networks` and click **Connect** for each platform
+4. Publish from clip/reel screens; only connected platforms are used
 
 ---
 

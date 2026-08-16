@@ -1533,26 +1533,42 @@ def transcribe_video(video_path):
     """
     provider = os.getenv("TRANSCRIBER_PROVIDER", "hybrid").strip().lower()
     fallback = os.getenv("TRANSCRIBER_FALLBACK", "faster_whisper").strip().lower()
+    assembly_retry_attempts = max(1, int(os.getenv("ASSEMBLY_RETRY_ATTEMPTS", "2")))
+    assembly_retry_delay_seconds = max(0.0, float(os.getenv("ASSEMBLY_RETRY_DELAY_SECONDS", "2")))
 
     print(f"🎛️  Transcriber provider: {provider}")
 
     if provider == "assemblyai":
-        return _transcribe_with_assemblyai(video_path)
+        last_error = None
+        for attempt in range(1, assembly_retry_attempts + 1):
+            try:
+                return _transcribe_with_assemblyai(video_path)
+            except Exception as exc:
+                last_error = exc
+                print(f"⚠️ AssemblyAI failed (attempt {attempt}/{assembly_retry_attempts}): {exc}")
+                if attempt < assembly_retry_attempts and assembly_retry_delay_seconds > 0:
+                    time.sleep(assembly_retry_delay_seconds)
+        raise RuntimeError(f"AssemblyAI transcription failed after {assembly_retry_attempts} attempts: {last_error}")
 
     if provider == "faster_whisper":
         return _transcribe_with_faster_whisper(video_path)
 
-    # Hybrid: try AssemblyAI, fallback local if enabled
-    try:
-        return _transcribe_with_assemblyai(video_path)
-    except Exception as e:
-        print(f"⚠️ AssemblyAI failed: {e}")
+    # Hybrid: retry AssemblyAI first, then fallback local if enabled.
+    last_error = None
+    for attempt in range(1, assembly_retry_attempts + 1):
+        try:
+            return _transcribe_with_assemblyai(video_path)
+        except Exception as exc:
+            last_error = exc
+            print(f"⚠️ AssemblyAI failed (attempt {attempt}/{assembly_retry_attempts}): {exc}")
+            if attempt < assembly_retry_attempts and assembly_retry_delay_seconds > 0:
+                time.sleep(assembly_retry_delay_seconds)
 
-        if fallback == "faster_whisper":
-            print("↩️ Falling back to Faster-Whisper...")
-            return _transcribe_with_faster_whisper(video_path)
+    if fallback == "faster_whisper":
+        print("↩️ Falling back to Faster-Whisper...")
+        return _transcribe_with_faster_whisper(video_path)
 
-        raise RuntimeError(f"Transcription failed and fallback disabled. Root cause: {e}")
+    raise RuntimeError(f"Transcription failed and fallback disabled. Root cause: {last_error}")
 
 def _extract_error_message(exc):
     """Return a lowercase best-effort error string for provider routing."""

@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Youtube, Upload, FileVideo, X } from 'lucide-react';
 import { getApiUrl } from '../config';
+import { useTranslation } from '../state/LanguageContext';
 
-export default function MediaInput({ onProcess, isProcessing }) {
+export default function MediaInput({ onProcess, isProcessing, isCreditBlocked = false, creditWarning = "" }) {
+    const { t } = useTranslation();
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
     const [mode, setMode] = useState('url'); // 'url' | 'file'
     const [url, setUrl] = useState('');
@@ -40,29 +42,29 @@ export default function MediaInput({ onProcess, isProcessing }) {
     };
 
     return (
-        <div className="bg-surface border border-white/5 rounded-2xl p-6 animate-[fadeIn_0.6s_ease-out]">
-            <div className="flex gap-4 mb-6 border-b border-white/5 pb-4">
+        <div className="bg-surface border border-slate-200 dark:border-white/5 rounded-2xl p-6 animate-[fadeIn_0.6s_ease-out]">
+            <div className="flex gap-4 mb-6 border-b border-slate-200 dark:border-white/5 pb-4">
                 {youtubeUrlEnabled && (
                     <button
                         onClick={() => setMode('url')}
                         className={`flex items-center gap-2 pb-2 px-2 transition-all ${mode === 'url'
                             ? 'text-primary border-b-2 border-primary -mb-[17px]'
-                            : 'text-zinc-400 hover:text-white'
+                            : 'text-slate-500 dark:text-zinc-400 hover:text-white'
                             }`}
                     >
                         <Youtube size={18} />
-                        YouTube URL
+                        {t('mediaInput.youtubeUrl', 'YouTube URL')}
                     </button>
                 )}
                 <button
                     onClick={() => setMode('file')}
                     className={`flex items-center gap-2 pb-2 px-2 transition-all ${mode === 'file'
                         ? 'text-primary border-b-2 border-primary -mb-[17px]'
-                        : 'text-zinc-400 hover:text-white'
+                        : 'text-slate-500 dark:text-zinc-400 hover:text-white'
                         }`}
                 >
                     <Upload size={18} />
-                    Upload File
+                    {t('mediaInput.uploadFile', 'Upload File')}
                 </button>
             </div>
 
@@ -105,15 +107,21 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     onChange={(e) => setFile(e.target.files?.[0] || null)}
                                     className="hidden"
                                 />
-                                <Upload className="mx-auto mb-3 text-zinc-500" size={24} />
-                                <p className="text-zinc-400">Click to upload or drag and drop</p>
-                                <p className="text-xs text-zinc-600 mt-1">MP4, MOV up to 500MB</p>
+                                <Upload className="mx-auto mb-3 text-slate-400 dark:text-zinc-500" size={24} />
+                                <p className="text-slate-500 dark:text-zinc-400">{t('mediaInput.uploadHint', 'Click to upload or drag and drop')}</p>
+                                <p className="text-xs text-zinc-600 mt-1">{t('mediaInput.uploadDetail', 'MP4, MOV, AVI')}</p>
                             </label>
                         )}
                     </div>
                 )}
 
-                <label className="flex items-start gap-2 mt-5 text-xs text-zinc-400 cursor-pointer select-none">
+                {creditWarning ? (
+                    <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                        {creditWarning}
+                    </div>
+                ) : null}
+
+                <label className="flex items-start gap-2 mt-5 text-xs text-slate-500 dark:text-zinc-400 cursor-pointer select-none">
                     <input
                         type="checkbox"
                         checked={acknowledged}
@@ -121,24 +129,24 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         className="mt-0.5 accent-primary cursor-pointer"
                     />
                     <span>
-                        I confirm I own this content or have the rights to process it. I am responsible for any content I submit. See our <a href="/#legal" target="_blank" rel="noopener noreferrer" className="text-primary underline" onClick={(e) => e.stopPropagation()}>Terms & Privacy</a>.
+                        {t('mediaInput.ack', 'I confirm I own this content or have the rights to process it. I am responsible for any content I submit. See our')} <a href="http://wouri-academy.com/wp-content/uploads/2026/08/politique_confidentialite.pdf" target="_blank" rel="noopener noreferrer" className="text-primary underline" onClick={(e) => e.stopPropagation()}>{t('mediaInput.terms', 'Terms & Privacy')}</a>.
                     </span>
                 </label>
 
                 <button
                     type="submit"
-                    disabled={isProcessing || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && !file)}
-                    className="w-full btn-primary mt-4 flex items-center justify-center gap-2"
+                    disabled={isProcessing || isCreditBlocked || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && !file)}
+                    className="w-full btn-primary mt-4 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     {isProcessing ? (
                         <>
                             <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            Processing Video...
+                            {t('mediaInput.processing', 'Processing Video...')}
                         </>
+                    ) : isCreditBlocked ? (
+                        <>{t('mediaInput.insufficientCredits', 'Insufficient credits')}</>
                     ) : (
-                        <>
-                            Generate Clips
-                        </>
+                        <>{t('mediaInput.generateClips', 'Generate Clips')}</>
                     )}
                 </button>
             </form>

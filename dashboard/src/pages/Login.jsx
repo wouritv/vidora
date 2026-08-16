@@ -4,8 +4,10 @@ import { getSupabaseBrowserClient } from "../lib/supabase-browser";
 import { useAuth } from "../state/AuthContext";
 import AuthLayout from "../layouts/AuthLayout";
 import "../styles/auth-legacy.css";
+import { useTranslation } from "../state/LanguageContext";
 
 export default function Login() {
+    const { t } = useTranslation();
     const navigate = useNavigate();
     const { isAuthenticated, loading: authLoading } = useAuth();
 
@@ -56,7 +58,7 @@ export default function Login() {
                 return;
             }
 
-            setSuccess("Compte cree. Verifie ton email si la confirmation est activee.");
+            setSuccess(t("app.accountCreate","Compte cree. Verifie ton email si la confirmation est activee."));
         } catch (caughtError) {
             setError(caughtError instanceof Error ? caughtError.message : "Erreur inconnue");
         } finally {
@@ -82,7 +84,7 @@ export default function Login() {
                 setError(oauthError.message);
             }
         } catch (caughtError) {
-            setError(caughtError instanceof Error ? caughtError.message : "Erreur OAuth inconnue");
+            setError(caughtError instanceof Error ? caughtError.message : t("app.erreurAuth","Erreur OAuth inconnue"));
         }
     }
 
@@ -90,13 +92,13 @@ export default function Login() {
         <AuthLayout title="Connexion" subtitle="Continue avec Google ou Apple">
             <main className="page auth-page">
                 <section className="card auth-card auth-surface">
-                    <p className="eyebrow">Authentification</p>
-                    <h1>{mode === "signin" ? "Connexion" : "Creation de compte"}</h1>
-                    <p className="hint">Connecte-toi pour acceder au dashboard.</p>
+                    <p className="eyebrow">{t("app.authTitle","Authentification")}</p>
+                    <h1>{mode === "signin" ? t("app.btLogin","Connexion") : t("app.btRegister","Creation de compte")}</h1>
+                    <p className="hint">{t("app.authSubtitle","Connecte-toi pour acceder au dashboard.")}</p>
 
                     <form onSubmit={handleAuth} className="form auth-form">
                         <label>
-                            Email
+                            {t("app.email","Email")}
                             <input
                                 type="email"
                                 value={email}
@@ -106,7 +108,7 @@ export default function Login() {
                         </label>
 
                         <label>
-                            Mot de passe
+                            {t("app.password","Mot de passe")}
                             <input
                                 type="password"
                                 value={password}
@@ -119,14 +121,14 @@ export default function Login() {
                         {mode === "signin" ? (
                             <div className="auth-links-row">
                                 <Link to="/reset-password" className="auth-link">
-                                    Mot de passe oublie ?
+                                    {t("app.passwordForgot","Mot de passe oublié ?")}
                                 </Link>
                             </div>
                         ) : null}
 
                         <div className="actions auth-actions">
                             <button type="submit" disabled={loading}>
-                                {loading ? "Patiente..." : mode === "signin" ? "Se connecter" : "Creer un compte"}
+                                {loading ? t("app.loading","Chargement...") : mode === "signin" ? t("app.connectTitle","Se connecter") : t("app.registerTitle","Créer un compte")}
                             </button>
 
                             <button
@@ -139,7 +141,7 @@ export default function Login() {
                                 }
                                 disabled={loading}
                             >
-                                {mode === "signin" ? "Passer a inscription" : "Passer a connexion"}
+                                {mode === "signin" ? t("app.btRegister2","Passer a inscription") : t("app.btLogin2","Passer a connexion")}
                             </button>
                         </div>
 

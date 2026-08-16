@@ -76,7 +76,7 @@
 │ Google Gemini        ● Ready                                   │
 │ OpenAI              ● Ready                                   │
 │ ElevenLabs          ● Not configured                           │
-│ Upload-Post         ● Not configured                           │
+│ Social OAuth        ● Not configured                           │
 │ AWS S3              ● Ready                                   │
 │ Supabase            ● Ready                                   │
 │                                                                 │
@@ -143,7 +143,7 @@
     {/* Light Theme */}
     <button 
       onClick={() => setTheme('light')}
-      className={theme === 'light' ? 'border-yellow-400' : 'border-white/10'}
+      className={theme === 'light' ? 'border-yellow-400' : 'border-slate-300 dark:border-white/10'}
     >
       <Sun size={24} />
       Light
@@ -152,7 +152,7 @@
     {/* Dark Theme */}
     <button 
       onClick={() => setTheme('dark')}
-      className={theme === 'dark' ? 'border-blue-400' : 'border-white/10'}
+      className={theme === 'dark' ? 'border-blue-400' : 'border-slate-300 dark:border-white/10'}
     >
       <Moon size={24} />
       Dark
@@ -161,7 +161,7 @@
     {/* System Theme */}
     <button 
       onClick={() => setTheme('system')}
-      className={theme === 'system' ? 'border-green-400' : 'border-white/10'}
+      className={theme === 'system' ? 'border-green-400' : 'border-slate-300 dark:border-white/10'}
     >
       <Monitor size={24} />
       System
@@ -180,14 +180,14 @@
       <div 
         key={network.id}
         onClick={() => toggleNetwork(network.id)}
-        className={isConnected ? 'border-green-500' : 'border-white/10'}
+        className={isConnected ? 'border-green-500' : 'border-slate-300 dark:border-white/10'}
       >
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">
             <NetworkIcon />
             <div>
               <p>{network.name}</p>
-              <p className="text-xs text-zinc-500">{network.description}</p>
+              <p className="text-xs text-slate-400 dark:text-zinc-500">{network.description}</p>
             </div>
           </div>
           {isConnected && (

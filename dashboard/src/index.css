@@ -7,31 +7,49 @@
 :root {
   --color-background: 9 9 11;
   --color-surface: 24 24 27;
+  --color-text: 255 255 255; /* Blanc par défaut (Mode Sombre) */
+  --border-color: 255 255 255; /* Blanc pour le Mode Sombre */
 }
 
 :root.dark {
   --color-background: 9 9 11;
   --color-surface: 24 24 27;
+  --color-text: 255 255 255;
+  --border-color: 255 255 255;
 }
 
 :root.light {
   --color-background: 245 245 245;
   --color-surface: 255 255 255;
+  --color-text: 0 0 0;
+  --border-color: 203 213 225;
+}
+
+@layer utilities {
+  .text-white {
+    color: rgb(var(--color-text));
+  }
+  .border-white {
+    border-color: rgb(var(--border-color));
+  }
 }
 
 @layer base {
   body {
     @apply bg-background text-white antialiased transition-colors duration-300;
   }
-
   body.light {
     @apply text-slate-900;
   }
 }
 
 @layer components {
+  .title-contrast {
+    @apply text-black dark:text-white;
+  }
+
   .glass-panel {
-    @apply bg-surface/50 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl;
+    @apply bg-surface/50 backdrop-blur-xl border border-slate-300 dark:border-white/10 rounded-2xl shadow-xl;
   }
 
   :root.light .glass-panel {
@@ -39,7 +57,7 @@
   }
 
   .input-field {
-    @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-zinc-500;
+    @apply w-full bg-white/5 border border-slate-300 dark:border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-slate-400 dark:text-zinc-500;
   }
 
   :root.light .input-field {

@@ -303,18 +303,18 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-5xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
+            <div className="bg-[#121214] border border-slate-300 dark:border-white/10 p-6 rounded-2xl w-full max-w-5xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
                 <button
                     onClick={onClose}
-                    className="absolute top-4 right-4 text-zinc-500 hover:text-white z-10"
+                    className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-white z-10"
                 >
                     <X size={20} />
                 </button>
 
                 {/* Left: Preview */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]">
+                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-slate-200 dark:border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]">
                     {captionsLoading ? (
-                        <div className="flex items-center gap-2 text-zinc-400">
+                        <div className="flex items-center gap-2 text-slate-500 dark:text-zinc-400">
                             <Loader2 size={16} className="animate-spin" />
                             <span className="text-sm">Loading preview...</span>
                         </div>
@@ -344,20 +344,20 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                 {/* Right: Controls */}
                 <div className="w-full md:w-80 flex flex-col">
-                    <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2 shrink-0">
+                    <h3 className="title-contrast text-xl font-bold mb-4 flex items-center gap-2 shrink-0">
                         <Type className="text-primary" /> Auto Subtitles
                     </h3>
 
                     <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar pr-1">
                         {/* Position Selector */}
-                        <div className="p-3 rounded-lg border border-white/10 bg-white/[0.03]">
+                        <div className="p-3 rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03]">
                             <div className="flex items-center justify-between gap-3">
                                 <div>
-                                    <p className="text-xs font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-2">
+                                    <p className="text-xs font-bold text-slate-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-2">
                                         <Languages size={14} className="text-emerald-400" />
                                         Activer la traduction
                                     </p>
-                                    <p className="text-[11px] text-zinc-500 mt-1">Conserve les memes styles/animations avec preview en direct.</p>
+                                    <p className="text-[11px] text-slate-400 dark:text-zinc-500 mt-1">Conserve les memes styles/animations avec preview en direct.</p>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input
@@ -382,14 +382,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                             {translationEnabled ? (
                                 <div className="mt-3 space-y-3 animate-[fadeIn_0.2s_ease-out]">
                                     <div>
-                                        <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">
+                                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2">
                                             <Globe size={12} className="inline mr-1" />
                                             Language
                                         </label>
                                         <select
                                             value={targetLanguage}
                                             onChange={(e) => setTargetLanguage(e.target.value)}
-                                            className="w-full bg-black/40 border border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-emerald-500/50"
+                                            className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-emerald-500/50"
                                             disabled={isProcessing}
                                         >
                                             {Object.entries(languages)
@@ -412,7 +412,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         </div>
                                     ) : null}
                                     {!previewError && previewProviders.length > 0 ? (
-                                        <p className="text-[11px] text-zinc-500">
+                                        <p className="text-[11px] text-slate-400 dark:text-zinc-500">
                                             Provider: {previewProviders.join(', ')}
                                         </p>
                                     ) : null}
@@ -421,10 +421,10 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Position libre (X/Y)</label>
-                            <div className="space-y-3 rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Position libre (X/Y)</label>
+                            <div className="space-y-3 rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] p-3">
                                 <div>
-                                    <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1">
+                                    <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-zinc-400 mb-1">
                                         <span>X</span>
                                         <span>{positionX}%</span>
                                     </div>
@@ -438,7 +438,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     />
                                 </div>
                                 <div>
-                                    <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1">
+                                    <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-zinc-400 mb-1">
                                         <span>Y</span>
                                         <span>{positionY}%</span>
                                     </div>
@@ -455,19 +455,19 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Style du texte</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Style du texte</label>
                             <div className="grid grid-cols-2 gap-2">
                                 <button
                                     type="button"
                                     onClick={() => setBold((v) => !v)}
-                                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${bold ? 'border-primary bg-primary/20 text-white' : 'border-white/10 bg-white/5 text-zinc-400'}`}
+                                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${bold ? 'border-primary bg-primary/20 text-white' : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-500 dark:text-zinc-400'}`}
                                 >
                                     Gras
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => setItalic((v) => !v)}
-                                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${italic ? 'border-primary bg-primary/20 text-white' : 'border-white/10 bg-white/5 text-zinc-400'}`}
+                                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${italic ? 'border-primary bg-primary/20 text-white' : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-500 dark:text-zinc-400'}`}
                                 >
                                     Italique
                                 </button>
@@ -482,7 +482,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         key={opt.value}
                                         type="button"
                                         onClick={() => setTextCase(opt.value)}
-                                        className={`rounded-lg border px-2 py-2 text-xs ${textCase === opt.value ? 'border-primary bg-primary/20 text-white' : 'border-white/10 bg-white/5 text-zinc-400'}`}
+                                        className={`rounded-lg border px-2 py-2 text-xs ${textCase === opt.value ? 'border-primary bg-primary/20 text-white' : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-500 dark:text-zinc-400'}`}
                                     >
                                         {opt.label}
                                     </button>
@@ -492,17 +492,17 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Animation Style (new) */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Animation</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Animation</label>
                             <div className="grid grid-cols-2 gap-2">
                                 {ANIMATION_OPTIONS.map((opt) => (
                                     <button
                                         key={opt.value}
                                         onClick={() => setAnimation(opt.value)}
                                         title={opt.desc}
-                                        className={`p-2 rounded-lg border text-center transition-all ${animation === opt.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                        className={`p-2 rounded-lg border text-center transition-all ${animation === opt.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-slate-200 dark:border-white/5 text-slate-500 dark:text-zinc-400 hover:bg-white/10'}`}
                                     >
                                         <div className="text-xs font-medium">{opt.label}</div>
-                                        <div className="text-[10px] text-zinc-500 leading-tight mt-0.5 line-clamp-2">{opt.desc}</div>
+                                        <div className="text-[10px] text-slate-400 dark:text-zinc-500 leading-tight mt-0.5 line-clamp-2">{opt.desc}</div>
                                     </button>
                                 ))}
                             </div>
@@ -514,7 +514,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 <button
                                     type="button"
                                     onClick={() => setShowTextEditor(!showTextEditor)}
-                                    className="w-full flex items-center justify-between text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2"
+                                    className="w-full flex items-center justify-between text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2"
                                 >
                                     <span>Edit Text ({captions.length} words)</span>
                                     <span className={`transition-transform ${showTextEditor ? 'rotate-180' : ''}`}>▾</span>
@@ -524,7 +524,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         value={editableText}
                                         onChange={(e) => handleTextEdit(e.target.value)}
                                         rows={5}
-                                        className="w-full bg-black/40 border border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-primary/50 resize-none leading-relaxed animate-[fadeIn_0.15s_ease-out]"
+                                        className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-primary/50 resize-none leading-relaxed animate-[fadeIn_0.15s_ease-out]"
                                         placeholder="Edit subtitle text..."
                                     />
                                 )}
@@ -533,8 +533,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Font Family */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">
-                                Police — <span className="text-zinc-500 normal-case font-normal" style={{ fontFamily: fontName }}>{fontName}</span>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
+                                Police — <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal" style={{ fontFamily: fontName }}>{fontName}</span>
                             </label>
                             <div className="max-h-52 overflow-y-auto custom-scrollbar pr-1 space-y-2">
                                 {[...new Set(FONT_OPTIONS.map(f => f.category))].map(cat => (
@@ -545,7 +545,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                                 <button
                                                     key={f.value}
                                                     onClick={() => setFontName(f.value)}
-                                                    className={`px-2 py-1.5 rounded-lg border text-sm text-center truncate transition-all ${fontName === f.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-300 hover:bg-white/10 hover:border-white/20'}`}
+                                                    className={`px-2 py-1.5 rounded-lg border text-sm text-center truncate transition-all ${fontName === f.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-slate-200 dark:border-white/5 text-slate-700 dark:text-zinc-300 hover:bg-white/10 hover:border-slate-400 dark:border-white/20'}`}
                                                     style={{ fontFamily: f.value }}
                                                     title={f.label}
                                                 >
@@ -560,8 +560,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Font Size */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">
-                                Taille du texte <span className="text-zinc-500 normal-case font-normal">({fontSize}px)</span>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
+                                Taille du texte <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal">({fontSize}px)</span>
                             </label>
                             <input
                                 type="range"
@@ -571,7 +571,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 onChange={(e) => setFontSize(Number(e.target.value))}
                                 className="w-full accent-primary"
                             />
-                            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
+                            <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500 mt-1">
                                 <span>Petit</span>
                                 <span>Grand</span>
                             </div>
@@ -579,19 +579,19 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Text Color */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Text Color</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Text Color</label>
                             <div className="flex flex-wrap gap-2">
                                 {COLOR_PRESETS.map((c) => (
                                     <button
                                         key={c.color}
                                         onClick={() => setFontColor(c.color)}
-                                        className={`w-7 h-7 rounded-full border-2 transition-all ${fontColor === c.color ? 'border-white scale-110' : 'border-white/20 hover:border-white/50'}`}
+                                        className={`w-7 h-7 rounded-full border-2 transition-all ${fontColor === c.color ? 'border-white scale-110' : 'border-slate-400 dark:border-white/20 hover:border-slate-200 dark:border-white/50'}`}
                                         style={{ backgroundColor: c.color }}
                                         title={c.label}
                                     />
                                 ))}
-                                <label className="w-7 h-7 rounded-full border-2 border-dashed border-white/20 cursor-pointer flex items-center justify-center hover:border-white/50 transition-all overflow-hidden relative" title="Custom color">
-                                    <span className="text-[10px] text-zinc-400">+</span>
+                                <label className="w-7 h-7 rounded-full border-2 border-dashed border-slate-400 dark:border-white/20 cursor-pointer flex items-center justify-center hover:border-slate-200 dark:border-white/50 transition-all overflow-hidden relative" title="Custom color">
+                                    <span className="text-[10px] text-slate-500 dark:text-zinc-400">+</span>
                                     <input type="color" value={fontColor} onChange={(e) => setFontColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                 </label>
                             </div>
@@ -599,13 +599,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Highlight Color (new) */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Highlight Color</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Highlight Color</label>
                             <div className="flex flex-wrap gap-2">
                                 {HIGHLIGHT_COLOR_PRESETS.map((c) => (
                                     <button
                                         key={c.color}
                                         onClick={() => setHighlightColor(c.color)}
-                                        className={`w-7 h-7 rounded-full border-2 transition-all ${highlightColor === c.color ? 'border-white scale-110' : 'border-white/20 hover:border-white/50'}`}
+                                        className={`w-7 h-7 rounded-full border-2 transition-all ${highlightColor === c.color ? 'border-white scale-110' : 'border-slate-400 dark:border-white/20 hover:border-slate-200 dark:border-white/50'}`}
                                         style={{ backgroundColor: c.color }}
                                         title={c.label}
                                     />
@@ -614,23 +614,23 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Couleur de l'ombre</label>
-                            <div className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                                <label className="relative w-8 h-8 rounded-lg border border-white/10 cursor-pointer overflow-hidden shrink-0" title="Shadow color">
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Couleur de l'ombre</label>
+                            <div className="flex items-center gap-3 rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] p-3">
+                                <label className="relative w-8 h-8 rounded-lg border border-slate-300 dark:border-white/10 cursor-pointer overflow-hidden shrink-0" title="Shadow color">
                                     <div className="w-full h-full" style={{ backgroundColor: textShadowColor }} />
                                     <input type="color" value={textShadowColor} onChange={(e) => setTextShadowColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                 </label>
-                                <div className="flex-1 grid grid-cols-3 gap-2 text-[10px] text-zinc-500">
+                                <div className="flex-1 grid grid-cols-3 gap-2 text-[10px] text-slate-400 dark:text-zinc-500">
                                     <div>
-                                        <div className="mb-1 text-zinc-400">Blur {shadowBlur}px</div>
+                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">Blur {shadowBlur}px</div>
                                         <input type="range" min="0" max="24" value={shadowBlur} onChange={(e) => setShadowBlur(Number(e.target.value))} className="w-full accent-primary" />
                                     </div>
                                     <div>
-                                        <div className="mb-1 text-zinc-400">Offset X {shadowOffsetX}px</div>
+                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">Offset X {shadowOffsetX}px</div>
                                         <input type="range" min="-20" max="20" value={shadowOffsetX} onChange={(e) => setShadowOffsetX(Number(e.target.value))} className="w-full accent-primary" />
                                     </div>
                                     <div>
-                                        <div className="mb-1 text-zinc-400">Offset Y {shadowOffsetY}px</div>
+                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">Offset Y {shadowOffsetY}px</div>
                                         <input type="range" min="-20" max="20" value={shadowOffsetY} onChange={(e) => setShadowOffsetY(Number(e.target.value))} className="w-full accent-primary" />
                                     </div>
                                 </div>
@@ -639,9 +639,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Border / Outline */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Border</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Border</label>
                             <div className="flex items-center gap-3">
-                                <label className="relative w-8 h-8 rounded-lg border border-white/10 cursor-pointer overflow-hidden shrink-0" title="Border color">
+                                <label className="relative w-8 h-8 rounded-lg border border-slate-300 dark:border-white/10 cursor-pointer overflow-hidden shrink-0" title="Border color">
                                     <div className="w-full h-full" style={{ backgroundColor: borderColor }} />
                                     <input type="color" value={borderColor} onChange={(e) => setBorderColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                 </label>
@@ -654,7 +654,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         onChange={(e) => setBorderWidth(parseInt(e.target.value))}
                                         className="w-full accent-primary"
                                     />
-                                    <div className="flex justify-between text-[10px] text-zinc-500">
+                                    <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500">
                                         <span>None</span>
                                         <span>Thick</span>
                                     </div>
@@ -663,8 +663,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">
-                                Mots par ligne <span className="text-zinc-500 normal-case font-normal">({wordsPerLine})</span>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
+                                Mots par ligne <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal">({wordsPerLine})</span>
                             </label>
                             <input
                                 type="range"
@@ -674,7 +674,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 onChange={(e) => setWordsPerLine(Number(e.target.value))}
                                 className="w-full accent-primary"
                             />
-                            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
+                            <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500 mt-1">
                                 <span>2</span>
                                 <span>8</span>
                             </div>
@@ -683,7 +683,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         {/* Background Box */}
                         <div>
                             <div className="flex items-center justify-between mb-2">
-                                <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Background Box</label>
+                                <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Background Box</label>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input type="checkbox" checked={bgOpacity > 0} onChange={(e) => setBgOpacity(e.target.checked ? 0.5 : 0)} className="sr-only peer" />
                                     <div className="w-8 h-4 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[0px] after:left-[0px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
@@ -692,7 +692,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                             {bgOpacity > 0 && (
                                 <div className="space-y-3 animate-[fadeIn_0.2s_ease-out]">
                                     <div className="flex items-center gap-3">
-                                        <label className="relative w-8 h-8 rounded-lg border border-white/10 cursor-pointer overflow-hidden shrink-0" title="Background color">
+                                        <label className="relative w-8 h-8 rounded-lg border border-slate-300 dark:border-white/10 cursor-pointer overflow-hidden shrink-0" title="Background color">
                                             <div className="w-full h-full" style={{ backgroundColor: bgColor }} />
                                             <input type="color" value={bgColor} onChange={(e) => setBgColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                         </label>
@@ -705,7 +705,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                                 onChange={(e) => setBgOpacity(parseInt(e.target.value) / 100)}
                                                 className="w-full accent-primary"
                                             />
-                                            <div className="flex justify-between text-[10px] text-zinc-500">
+                                            <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500">
                                                 <span>Transparent</span>
                                                 <span>{Math.round(bgOpacity * 100)}%</span>
                                             </div>

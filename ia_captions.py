@@ -10,16 +10,26 @@ import httpx
 from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from s3_uploader import generate_presigned_url
+from s3_uploader import generate_presigned_url, delete_s3_object
 from subtitles import burn_subtitles, transcribe_audio
-from supabase_media import (
-    get_row as supabase_get_media_row,
+from supabase_request import (
     is_supabase_configured,
-    list_rows as supabase_list_media_rows,
-    media_status_value,
-    save_media_rows as supabase_save_media_rows,
-    soft_delete_row as supabase_soft_delete_media_row,
+    get_user_abonnement,
+    caption_status_value,
+    insert_captions as supabase_insert_captions,
+    list_captions as supabase_list_captions,
+    get_caption as supabase_get_caption,
+    soft_delete_caption as supabase_soft_delete_caption,
+    get_user_data as supabase_get_user_data,
+    upsert_user_data_credits as supabase_upsert_user_data_credits,
+    insert_user_data_history as supabase_insert_user_data_history,
 )
+from billing import (
+    estimate_caption_cost_usd,
+    calculate_credits_for_operation,
+)
+from job_manager import JobManager, JobType
+from pipelines import CaptionProcessingPipeline
 
 router = APIRouter()
 
@@ -27,8 +37,13 @@ UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "output"
 SESSION_ROOT = os.path.join(UPLOAD_DIR, "caption_sessions")
 os.makedirs(SESSION_ROOT, exist_ok=True)
+CAPTION_MAX_DURATION_MINUTES = float(os.environ.get("CAPTION_MAX_DURATION", "30"))
+CAPTION_MAX_STORAGE_GB = float(os.environ.get("CAPTION_MAX_STORAGE", "5"))
+VIREEL_VIDEO_FORMAT = os.environ.get("VIREEL_VIDEO_FORMAT", "mp4,mov,avi")
+STORAGE_OVERAGE_TOLERANCE_PERCENT = float(os.environ.get("STORAGE_OVERAGE_TOLERANCE_PERCENT", "10"))
 
 caption_sessions: Dict[str, Dict[str, Any]] = {}
+caption_job_manager = JobManager(queue_name="captions")
 
 PLATFORM_GUIDES: Dict[str, str] = {
     "tiktok": "Punchy, short, energetic phrasing with strong hooks.",
@@ -36,7 +51,6 @@ PLATFORM_GUIDES: Dict[str, str] = {
     "linkedin": "Professional and insight-driven phrasing with credibility.",
     "facebook": "Conversational and broad-audience friendly language.",
 }
-
 
 class CaptionLine(BaseModel):
     start: float
@@ -71,8 +85,6 @@ class RenderRequest(BaseModel):
 
 
 class MediaShareRequest(BaseModel):
-    api_key: str
-    user_id: str
     platforms: List[str]
     title: Optional[str] = None
     description: Optional[str] = None
@@ -86,6 +98,150 @@ class FeatureRemovedResponse(BaseModel):
 
 def _session_dir(session_id: str) -> str:
     return os.path.join(SESSION_ROOT, session_id)
+
+
+def _bytes_to_gb(size_bytes: float) -> float:
+    return max(0.0, float(size_bytes) / (1024 ** 3))
+
+
+def _probe_local_video_duration_seconds(video_path: str) -> float:
+    if not video_path or not os.path.exists(video_path):
+        return 0.0
+
+    try:
+        probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        out = subprocess.check_output(probe_cmd, stderr=subprocess.STDOUT).decode().strip()
+        duration = float(out or 0)
+        if duration > 0:
+            return duration
+    except Exception:
+        pass
+
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return max(0.0, float(frame_count / fps if fps else 0.0))
+    except Exception:
+        return 0.0
+
+
+def _validate_caption_source_constraints(duration_seconds: float, size_bytes: float) -> None:
+    max_duration_seconds = max(0.0, CAPTION_MAX_DURATION_MINUTES) * 60.0
+    max_size_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
+
+    if max_size_bytes > 0 and size_bytes > max_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Fichier trop volumineux: {_bytes_to_gb(size_bytes):.2f} Go. "
+                f"Maximum autorise: {CAPTION_MAX_STORAGE_GB:.2f} Go."
+            ),
+        )
+
+
+def _allowed_video_formats() -> List[str]:
+    return [
+        fmt.strip().lower().lstrip(".")
+        for fmt in str(VIREEL_VIDEO_FORMAT or "").split(",")
+        if fmt and fmt.strip()
+    ]
+
+
+def _validate_caption_video_extension(filename: str) -> None:
+    allowed = _allowed_video_formats()
+    if not allowed:
+        return
+
+    ext = os.path.splitext(str(filename or ""))[1].lower().lstrip(".")
+    if not ext or ext not in allowed:
+        accepted = ", ".join(allowed)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Format video invalide. Formats acceptes: {accepted}.",
+        )
+
+
+async def _ensure_caption_subscription_active(user_id: str) -> None:
+    active = await get_user_abonnement(user_id)
+    if not active:
+        raise HTTPException(status_code=403, detail="Abonnement inactif. Veuillez reactiver une formule.")
+    if active.get("account_disabled_at"):
+        raise HTTPException(status_code=403, detail="Compte desactive. Reactivez votre abonnement.")
+    if active.get("paused_at"):
+        raise HTTPException(status_code=403, detail="Abonnement en pause. Reprenez votre abonnement pour continuer.")
+
+
+async def _reserve_caption_storage_or_raise(user_id: str, required_gb: float) -> str:
+    required_gb = max(0.0, float(required_gb))
+    if required_gb <= 0:
+        return ""
+    user_data = await supabase_get_user_data(user_id)
+    available_gb = float((user_data or {}).get("stockage") or 0.0)
+    if required_gb <= available_gb:
+        return ""
+
+    if available_gb <= 0:
+        raise HTTPException(status_code=400, detail="Stockage insuffisant pour generer des captions.")
+
+    overage_gb = required_gb - available_gb
+    overage_pct = (overage_gb / available_gb) * 100.0
+    if overage_pct > STORAGE_OVERAGE_TOLERANCE_PERCENT:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Stockage insuffisant pour captions. Depassement de {overage_pct:.2f}% "
+                f"(max autorise {STORAGE_OVERAGE_TOLERANCE_PERCENT:.2f}%)."
+            ),
+        )
+    return f"Depassement de stockage autorise ({overage_pct:.2f}%)."
+
+
+async def _debit_caption_storage(user_id: str, used_gb: float, operation_id: str) -> None:
+    used_gb = max(0.0, float(used_gb))
+    if used_gb <= 0:
+        return
+    await supabase_upsert_user_data_credits(user_id=user_id, credit_delta=0.0, storage_delta=-used_gb)
+    await supabase_insert_user_data_history(
+        user_id=user_id,
+        credit=0.0,
+        storage=used_gb,
+        operation="output",
+        operation_type="captions",
+        operation_id=operation_id,
+    )
+
+
+async def _credit_caption_storage(user_id: str, freed_gb: float, operation_id: str) -> None:
+    freed_gb = max(0.0, float(freed_gb))
+    if freed_gb <= 0:
+        return
+    await supabase_upsert_user_data_credits(user_id=user_id, credit_delta=0.0, storage_delta=freed_gb)
+    await supabase_insert_user_data_history(
+        user_id=user_id,
+        credit=0.0,
+        storage=freed_gb,
+        operation="input",
+        operation_type="captions",
+        operation_id=operation_id,
+    )
+
+    if max_duration_seconds > 0 and duration_seconds > max_duration_seconds:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Video trop longue: {duration_seconds / 60.0:.2f} min. "
+                f"Maximum autorise: {CAPTION_MAX_DURATION_MINUTES:.2f} min."
+            ),
+        )
 
 
 def _srt_timestamp(seconds: float) -> str:
@@ -249,32 +405,6 @@ def _cleanup_caption_session(session_id: str) -> None:
     caption_sessions.pop(session_id, None)
 
 
-def _upload_post_payload(final_title: str, final_description: str, platforms: List[str], user_id: str, scheduled_date: Optional[str] = None, timezone_name: Optional[str] = None) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "user": user_id,
-        "title": final_title,
-        "platform[]": platforms,
-        "async_upload": "true",
-    }
-    if scheduled_date:
-        payload["scheduled_date"] = scheduled_date
-        if timezone_name:
-            payload["timezone"] = timezone_name
-    if "tiktok" in platforms:
-        payload["tiktok_title"] = final_description or final_title
-    if "youtube" in platforms:
-        payload["youtube_title"] = final_title
-        payload["youtube_description"] = final_description or final_title
-        payload["privacyStatus"] = "public"
-    if "linkedin" in platforms:
-        payload["linkedin_title"] = final_title
-        payload["linkedin_description"] = final_description or final_title
-    if "facebook" in platforms:
-        payload["facebook_title"] = final_title
-        payload["facebook_description"] = final_description or final_title
-    return payload
-
-
 async def _normalize_media_row(item: Dict[str, Any]) -> Dict[str, Any]:
     s3_key = item.get("caption_s3_key") or ""
     media_url = _media_url_from_s3_key(s3_key) or item.get("caption_url") or ""
@@ -311,9 +441,11 @@ async def removed_youtube_resumes(path: str):
 
 
 @router.post("/api/captions/upload")
-async def captions_upload(file: UploadFile = File(...)):
+async def captions_upload(request: Request, file: UploadFile = File(...)):
     if not file.content_type or not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="Veuillez uploader un fichier video valide")
+
+    _validate_caption_video_extension(file.filename or "")
 
     session_id = str(uuid.uuid4())
     session_dir = _session_dir(session_id)
@@ -321,14 +453,32 @@ async def captions_upload(file: UploadFile = File(...)):
     file_name = file.filename or "upload.mp4"
     input_path = os.path.join(session_dir, file_name)
 
-    with open(input_path, "wb") as fp:
-        shutil.copyfileobj(file.file, fp)
+    size_bytes = 0
+    try:
+        with open(input_path, "wb") as fp:
+            while chunk := await file.read(1024 * 1024):
+                size_bytes += len(chunk)
+                fp.write(chunk)
+
+        duration_seconds = _probe_local_video_duration_seconds(input_path)
+        _validate_caption_source_constraints(duration_seconds, size_bytes)
+    except HTTPException:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Impossible de valider la video: {exc}")
 
     caption_sessions[session_id] = {
         "session_id": session_id,
         "input_path": input_path,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "remove_silences": False,
+        "user_id": request.headers.get("X-User-Id") or "",
     }
 
     return {"session_id": session_id, "file_name": file_name}
@@ -336,6 +486,7 @@ async def captions_upload(file: UploadFile = File(...)):
 
 @router.post("/api/captions/analyze")
 async def captions_analyze(
+    request: Request,
     req: AnalyzeRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     x_openai_key: Optional[str] = Header(None, alias="X-OpenAI-Key"),
@@ -347,18 +498,57 @@ async def captions_analyze(
     if not session:
         raise HTTPException(status_code=404, detail="Session introuvable")
 
+    user_id = request.headers.get("X-User-Id") or session.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    await _ensure_caption_subscription_active(user_id)
+
+    # --- Credit pre-check ---
+    if is_supabase_configured():
+        _cap_cost = calculate_credits_for_operation(
+            estimate_caption_cost_usd(duration_minutes=10.0, video_size_gb=0.5)
+        )
+        _required = _cap_cost["final_credits"]
+        _ud = await supabase_get_user_data(user_id)
+        _available = float(_ud.get("credit", 0)) if _ud else 0.0
+        if _available < _required:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {_required} cr, disponible : {_available} cr.",
+            )
+
+    job_row = await caption_job_manager.create_job(
+        user_id=user_id,
+        job_type=JobType.TRANSCRIBE,
+        pipeline_name="CaptionProcessingPipeline",
+        job_data={
+            "session_id": req.session_id,
+            "platform": req.platform,
+            "remove_silences": bool(req.remove_silences),
+        },
+        max_attempts=1,
+    )
+    job_id = job_row.get("id")
+    pipeline = CaptionProcessingPipeline(caption_job_manager, job_id)
+    await caption_job_manager.start_job(job_id)
+
     input_path = session.get("input_path")
     if not input_path or not os.path.exists(input_path):
+        await caption_job_manager.fail_job(job_id, "Video introuvable", error_code="VIDEO_NOT_FOUND")
         raise HTTPException(status_code=404, detail="Video introuvable")
 
     working_path = input_path
     session_dir = _session_dir(req.session_id)
+    await pipeline.analyzing()
     if req.remove_silences:
         working_path = _remove_silences(input_path, session_dir)
 
+    await pipeline.transcribing()
     transcript = transcribe_audio(working_path)
     segments = _normalize_segments(transcript)
     if not segments:
+        await caption_job_manager.fail_job(job_id, "Aucune voix detectee dans cette video", error_code="NO_SPEECH")
         raise HTTPException(status_code=400, detail="Aucune voix detectee dans cette video")
 
     caption_texts = _generate_caption_texts(
@@ -381,7 +571,18 @@ async def captions_analyze(
             "captions": [c.model_dump() for c in captions],
             "language": transcript.get("language", "auto"),
             "duration": int(round(segments[-1]["end"])),
+            "user_id": session.get("user_id") or user_id,
         }
+    )
+
+    await caption_job_manager.complete_job(
+        job_id,
+        {
+            "session_id": req.session_id,
+            "platform": req.platform,
+            "captions_count": len(captions),
+            "language": transcript.get("language", "auto"),
+        },
     )
 
     return {
@@ -395,20 +596,44 @@ async def captions_analyze(
 
 @router.post("/api/captions/render")
 async def captions_render(request: Request, req: RenderRequest):
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    await _ensure_caption_subscription_active(user_id)
+
+    job_row = await caption_job_manager.create_job(
+        user_id=user_id,
+        job_type=JobType.RENDER_VIDEO,
+        pipeline_name="CaptionProcessingPipeline",
+        job_data={
+            "session_id": req.session_id,
+            "platform": req.platform,
+        },
+        max_attempts=1,
+    )
+    job_id = job_row.get("id")
+    pipeline = CaptionProcessingPipeline(caption_job_manager, job_id)
+    await caption_job_manager.start_job(job_id)
+
     if req.platform not in PLATFORM_GUIDES:
+        await caption_job_manager.fail_job(job_id, "Plateforme non supportee", error_code="INVALID_PLATFORM")
         raise HTTPException(status_code=400, detail="Plateforme non supportee")
 
     session = caption_sessions.get(req.session_id)
     if not session:
+        await caption_job_manager.fail_job(job_id, "Session introuvable", error_code="SESSION_NOT_FOUND")
         raise HTTPException(status_code=404, detail="Session introuvable")
 
     working_path = session.get("working_path") or session.get("input_path")
     if not working_path or not os.path.exists(working_path):
+        await caption_job_manager.fail_job(job_id, "Video introuvable", error_code="VIDEO_NOT_FOUND")
         raise HTTPException(status_code=404, detail="Video introuvable")
 
     style = req.style or CaptionStyle()
     captions = req.captions or [CaptionLine(**row) for row in session.get("captions", [])]
     if not captions:
+        await caption_job_manager.fail_job(job_id, "Aucun caption disponible", error_code="CAPTIONS_NOT_FOUND")
         raise HTTPException(status_code=400, detail="Aucun caption disponible")
 
     session_dir = _session_dir(req.session_id)
@@ -418,6 +643,7 @@ async def captions_render(request: Request, req: RenderRequest):
     output_name = f"captioned_{req.platform}_{req.session_id}.mp4"
     output_path = os.path.join(session_dir, output_name)
 
+    await pipeline.rendering()
     burn_subtitles(
         video_path=working_path,
         srt_path=srt_path,
@@ -432,17 +658,24 @@ async def captions_render(request: Request, req: RenderRequest):
         bg_opacity=style.bg_opacity,
     )
 
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     if not is_supabase_configured():
+        await caption_job_manager.fail_job(job_id, "Supabase media is not configured", error_code="SUPABASE_NOT_CONFIGURED")
         raise HTTPException(status_code=503, detail="Supabase media is not configured")
 
+    output_size_bytes = int(os.path.getsize(output_path) or 0) if os.path.exists(output_path) else 0
+    output_size_gb = _bytes_to_gb(output_size_bytes)
+    storage_warning = await _reserve_caption_storage_or_raise(user_id, output_size_gb)
+    if storage_warning:
+        await caption_job_manager.update_progress(job_id, 92, "storage_warning", {"warning": storage_warning})
+
+    await pipeline.persisting()
     s3_key = _upload_caption_video_to_s3(output_path, req.session_id)
     if not s3_key:
+        await caption_job_manager.fail_job(job_id, "S3 upload failed for IA captions output", error_code="S3_UPLOAD_FAILED")
         raise HTTPException(status_code=500, detail="S3 upload failed for IA captions output")
     media_url = _media_url_from_s3_key(s3_key)
     if not media_url:
+        await caption_job_manager.fail_job(job_id, "Unable to generate media URL from S3", error_code="S3_URL_FAILED")
         raise HTTPException(status_code=500, detail="Unable to generate media URL from S3")
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -458,10 +691,11 @@ async def captions_render(request: Request, req: RenderRequest):
         "caption_created_at": now_iso,
         "caption_updated_at": now_iso,
         "caption_user_id": user_id,
-        "caption_status": media_status_value("termine"),
+        "caption_status": caption_status_value("termine"),
         "caption_job_id": req.session_id,
         "caption_clip_index": 0,
         "caption_s3_key": s3_key,
+        "caption_size_bytes": output_size_bytes,
         "generation_inputs": {
             "platform": req.platform,
             "remove_silences": bool(session.get("remove_silences")),
@@ -470,10 +704,34 @@ async def captions_render(request: Request, req: RenderRequest):
         "input_source_type": "upload",
         "input_source_value": os.path.basename(session.get("input_path") or ""),
     }
-    saved = await supabase_save_media_rows("ia_caption", [row])
+    saved = await supabase_insert_captions([row])
     if not saved:
+        await caption_job_manager.fail_job(job_id, "Failed to persist IA captions row in Supabase", error_code="CAPTION_PERSISTENCE_FAILED")
         raise HTTPException(status_code=500, detail="Failed to persist IA captions row in Supabase")
     item = await _normalize_media_row(saved[0])
+
+    await caption_job_manager.complete_job(
+        job_id,
+        {
+            "session_id": req.session_id,
+            "platform": req.platform,
+            "item_id": item.get("id"),
+            "media_url": item.get("media_url"),
+        },
+    )
+
+    # Debit credits after caption render success (best-effort)
+    if is_supabase_configured():
+        _cap_bd = estimate_caption_cost_usd(duration_minutes=10.0, video_size_gb=0.5)
+        _cap_cr = calculate_credits_for_operation(_cap_bd)["final_credits"]
+        await caption_job_manager.debit_credits_for_job(
+            job_id=job_id,
+            user_id=user_id,
+            credits=_cap_cr,
+            operation_type="captions",
+        )
+
+    await _debit_caption_storage(user_id, output_size_gb, operation_id=str(item.get("id") or req.session_id))
 
     # Keep output fully remote: drop all local artifacts right after persistence.
     _cleanup_caption_session(req.session_id)
@@ -492,7 +750,7 @@ async def list_ia_captions(request: Request, page: int = 1, page_size: int = 10,
     user_id = request.headers.get("X-User-Id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-    rows, total = await supabase_list_media_rows("ia_caption", user_id=user_id, page=page, page_size=page_size, status=status, query=q)
+    rows, total = await supabase_list_captions(user_id=user_id, page=page, page_size=page_size, status=status, query=q)
     return {
         "items": [await _normalize_media_row(row) for row in rows],
         "total": total,
@@ -506,7 +764,7 @@ async def ia_caption_media_url(request: Request, item_id: str):
     user_id = request.headers.get("X-User-Id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-    row = await supabase_get_media_row("ia_caption", item_id, user_id)
+    row = await supabase_get_caption(item_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
     item = await _normalize_media_row(row)
@@ -518,9 +776,24 @@ async def delete_ia_caption(request: Request, item_id: str):
     user_id = request.headers.get("X-User-Id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-    deleted = await supabase_soft_delete_media_row("ia_caption", item_id, user_id)
+
+    row = await supabase_get_caption(item_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    size_bytes = int(row.get("caption_size_bytes") or 0)
+    freed_gb = _bytes_to_gb(size_bytes)
+    s3_key = str(row.get("caption_s3_key") or "").strip()
+    bucket = os.environ.get("AWS_S3_BUCKET", "")
+
+    deleted = await supabase_soft_delete_caption(item_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Media not found")
+
+    if bucket and s3_key:
+        delete_s3_object(bucket, s3_key)
+
+    await _credit_caption_storage(user_id, freed_gb, operation_id=f"delete:{item_id}")
     return {"deleted": True}
 
 
@@ -529,7 +802,7 @@ async def download_ia_caption(request: Request, item_id: str):
     user_id = request.headers.get("X-User-Id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-    row = await supabase_get_media_row("ia_caption", item_id, user_id)
+    row = await supabase_get_caption(item_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
     item = await _normalize_media_row(row)
@@ -542,7 +815,7 @@ async def share_ia_caption(request: Request, item_id: str, payload: MediaShareRe
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
 
-    row = await supabase_get_media_row("ia_caption", item_id, user_id)
+    row = await supabase_get_caption(item_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
 
@@ -554,17 +827,37 @@ async def share_ia_caption(request: Request, item_id: str, payload: MediaShareRe
     final_title = payload.title or row.get("caption_title") or "Vireel"
     final_description = payload.description or row.get("caption_description") or ""
 
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        media_response = await client.get(media_url)
-        media_response.raise_for_status()
-        upload_response = await client.post(
-            "https://api.upload-post.com/api/upload",
-            headers={"Authorization": f"Apikey {payload.api_key}"},
-            data=_upload_post_payload(final_title, final_description, payload.platforms, payload.user_id, payload.scheduled_date, payload.timezone),
-            files={"video": (f"{item_id}.mp4", media_response.content, "video/mp4")},
-        )
+    selected_platforms = [str(name or "").strip().lower() for name in payload.platforms if str(name or "").strip()]
+    if not selected_platforms:
+        raise HTTPException(status_code=400, detail="No platforms selected")
+    if payload.scheduled_date:
+        raise HTTPException(status_code=400, detail="Scheduled caption sharing is not supported in this endpoint")
 
-    if upload_response.status_code not in (200, 201, 202):
-        raise HTTPException(status_code=upload_response.status_code, detail=f"Upload-Post Error: {upload_response.text}")
-    return upload_response.json()
+    results: Dict[str, Any] = {}
+    overall_success = True
+    base_api = str(request.base_url).rstrip("/")
+
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        for platform in selected_platforms:
+            try:
+                response = await client.post(
+                    f"{base_api}/api/publish/{platform}",
+                    json={
+                        "user_id": user_id,
+                        "title": final_title,
+                        "description": final_description,
+                        "text": final_description,
+                        "caption": final_description,
+                        "video_url": media_url,
+                    },
+                    headers={"X-User-Id": user_id},
+                )
+                if response.status_code >= 400:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+                results[platform] = {"success": True, "result": response.json()}
+            except Exception as exc:
+                overall_success = False
+                results[platform] = {"success": False, "error": str(exc)}
+
+    return {"success": overall_success, "results": results}
 

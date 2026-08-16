@@ -2,16 +2,19 @@ import { useEffect, useMemo, useState } from "react";
 import { Play, Plus, Download, Loader2, Search, Share2, Trash2, X, LayoutGrid, List } from "lucide-react";
 import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
+import { useUserCredits } from "../state/UserCreditsContext";
 import { useNavigate } from "react-router-dom";
 import ResultCard from "../components/ResultCard";
 import SharePostModal from "../components/SharePostModal";
-import { decrypt } from "../lib/encryption";
 import { getConnectedPlatforms } from "../lib/platforms";
 import { toResultCardClip } from "../lib/clips";
 import { statusLabel, statusClass } from "../lib/status";
+import { useTranslation } from "../state/LanguageContext";
 
 export default function ReelsPage() {
     const { user } = useAuth();
+    const { credits, defaultCosts } = useUserCredits();
+    const {t} = useTranslation();
     const connectedPlatforms = getConnectedPlatforms();
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -44,6 +47,10 @@ export default function ReelsPage() {
     const navigate = useNavigate();
 
     const totalPages = useMemo(() => Math.max(1, Math.ceil(total / pageSize)), [total, pageSize]);
+    const reelCostEstimate = Number(defaultCosts?.reel || 1);
+    const publicationCostEstimate = Number(defaultCosts?.publication || 1);
+    const canCreateReel = credits >= reelCostEstimate;
+    const canShareReel = credits >= publicationCostEstimate;
 
     const resolveReelPreview = (item) => item.reel_preview_url || item.reel_thumbnail_url || item.reel_playback_url || item.reel_url || "";
     const getGridPreviewKey = (item) => `${item.id || "unknown"}:${resolveReelPreview(item) || "none"}`;
@@ -160,7 +167,7 @@ export default function ReelsPage() {
 
     const handleDelete = async (reelId) => {
         if (!user?.id) return;
-        if (!globalThis.confirm("Supprimer ce reel ?")) return;
+        if (!globalThis.confirm(t("reels.confirmDelete", "Delete this reel?"))) return;
 
         setDeletingId(reelId);
         try {
@@ -193,7 +200,7 @@ export default function ReelsPage() {
                 globalThis.open(fallbackUrl, "_blank", "noopener,noreferrer");
                 return;
             }
-            globalThis.alert("No download url available");
+            globalThis.alert(t("reels.noDownloadUrl", "No download URL available"));
             return;
         }
 
@@ -201,6 +208,10 @@ export default function ReelsPage() {
     };
 
     const handleShare = (item) => {
+        if (!canShareReel) {
+            setShareResult({ success: false, msg: t("reels.shareDisabledInsufficient", "Insufficient credits. Sharing is disabled.") });
+            return;
+        }
         const fallbackPlatforms = ['tiktok', 'instagram', 'youtube'];
         const nextDefaultPlatforms = connectedPlatforms.length > 0 ? connectedPlatforms : fallbackPlatforms;
         setSharePlatforms({
@@ -210,7 +221,7 @@ export default function ReelsPage() {
             facebook: nextDefaultPlatforms.includes('facebook'),
             linkedin: nextDefaultPlatforms.includes('linkedin'),
         });
-        setShareTitle(item?.reel_title || "Viral Short");
+        setShareTitle(item?.reel_title || t("reels.defaultShareTitle", "Viral Short"));
         setShareDescription(item?.reel_description || "");
         setShareScheduling(false);
         setShareScheduleDate("");
@@ -221,20 +232,20 @@ export default function ReelsPage() {
     const submitShare = async () => {
         if (!user?.id) return;
         if (!shareModalItem?.id) return;
+        if (!canShareReel) {
+            setShareResult({ success: false, msg: t("reels.shareDisabledInsufficient", "Insufficient credits. Sharing is disabled.") });
+            return;
+        }
 
         const selectedPlatforms = Object.keys(sharePlatforms).filter((k) => Boolean(sharePlatforms[k]));
         if (selectedPlatforms.length === 0) {
-            setShareResult({ success: false, msg: "Select at least one platform." });
+            setShareResult({ success: false, msg: t("reels.selectAtLeastOnePlatform", "Select at least one platform.") });
             return;
         }
         if (shareScheduling && !shareScheduleDate) {
-            setShareResult({ success: false, msg: "Please select a date and time." });
+            setShareResult({ success: false, msg: t("reels.selectDateTime", "Please select a date and time.") });
             return;
         }
-
-        const encryptedUploadPostKey = localStorage.getItem("uploadPostKey_v3") || "";
-        const apiKey = decrypt(encryptedUploadPostKey);
-        const uploadPostUser = globalThis.localStorage.getItem("uploadUserId") || "";
 
         setSharingId(shareModalItem.id);
         setShareResult(null);
@@ -244,8 +255,6 @@ export default function ReelsPage() {
                 title: shareTitle || undefined,
                 description: shareDescription || undefined,
             };
-            if (apiKey) payload.api_key = apiKey;
-            if (uploadPostUser) payload.user_id = uploadPostUser;
             if (shareScheduling && shareScheduleDate) {
                 payload.scheduled_date = new Date(shareScheduleDate).toISOString();
                 payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -262,24 +271,24 @@ export default function ReelsPage() {
 
             if (!response.ok) {
                 const errText = await response.text();
-                let msg = "Share failed";
+                let msg = t("reels.shareFailed", "Share failed");
                 try {
                     const parsed = JSON.parse(errText);
                     msg = parsed?.detail || errText || msg;
                 } catch {
                     msg = errText || msg;
                 }
-                setShareResult({ success: false, msg: `Failed: ${msg}` });
+                setShareResult({ success: false, msg: `${t("reels.failedPrefix", "Failed")}: ${msg}` });
                 return;
             }
 
-            setShareResult({ success: true, msg: "Share request sent." });
+            setShareResult({ success: true, msg: t("reels.shareSent", "Share request sent.") });
             setTimeout(() => {
                 setShareResult(null);
                 setShareModalItem(null);
             }, 1500);
         } catch (err) {
-            setShareResult({ success: false, msg: `Failed: ${err.message || "Share failed"}` });
+            setShareResult({ success: false, msg: `${t("reels.failedPrefix", "Failed")}: ${err.message || t("reels.shareFailed", "Share failed")}` });
         } finally {
             setSharingId("");
         }
@@ -304,8 +313,8 @@ export default function ReelsPage() {
         <div className="flex-1 overflow-y-auto p-8 space-y-6">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
-                    <h1 className="text-3xl font-black tracking-tight">Reels generes</h1>
-                    <p className="mt-2 text-sm text-zinc-400">Recherche, filtre, suppression, partage et telechargement.</p>
+                    <h1 className="text-3xl font-black tracking-tight">{t('reels.title', 'Generated reels')}</h1>
+                    <p className="mt-2 text-sm text-slate-500 dark:text-zinc-400">{t('reels.subtitle', 'Search, filter, delete, share and download.')}</p>
                 </div>
 
                 <button
@@ -313,18 +322,23 @@ export default function ReelsPage() {
                     onClick={() => {
                         navigate("/dashboard/reel-generator?new=1");
                     }}
-                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
+                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                     <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
                         <Plus size={16} />
                     </div>
                     <div className="hidden lg:block overflow-hidden">
-                        <p className="text-sm font-bold text-white leading-none mb-0.5">Nouvelle opération</p>
+                        <p className="text-sm font-bold text-white leading-none mb-0.5">{t('app.newOperation', 'New operation')}</p>
                     </div>
                 </button>
             </div>
 
-            <section className="rounded-2xl border border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
+            <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
+                {!canCreateReel ? (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                        {t('reels.insufficientForNew', 'Insufficient balance for new generation ')}
+                    </div>
+                ) : null}
                 {shareResult ? (
                     <div className={`rounded-lg border px-3 py-2 text-xs ${shareResult.success ? 'border-green-500/30 bg-green-500/10 text-green-300' : 'border-red-500/30 bg-red-500/10 text-red-300'}`}>
                         {shareResult.msg}
@@ -332,12 +346,12 @@ export default function ReelsPage() {
                 ) : null}
                 <div className="grid gap-3 md:grid-cols-[1fr_220px_auto_auto]">
                     <label className="relative">
-                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-zinc-500" />
                         <input
                             value={queryInput}
                             onChange={(e) => setQueryInput(e.target.value)}
-                            placeholder="Rechercher par titre ou description..."
-                            className="w-full rounded-xl border border-white/10 bg-black/30 py-2.5 pl-10 pr-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-primary/60"
+                            placeholder={t('reels.searchPlaceholder', 'Search by title or description...')}
+                            className="w-full rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 py-2.5 pl-10 pr-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-primary/60"
                         />
                     </label>
 
@@ -347,38 +361,38 @@ export default function ReelsPage() {
                             setPage(1);
                             setStatus(e.target.value);
                         }}
-                        className="rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-primary/60"
+                        className="rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-primary/60"
                     >
-                        <option value="">Tous les statuts</option>
-                        <option value="en_cours">En cours</option>
-                        <option value="termine">Termine</option>
-                        <option value="echec">Echec</option>
+                        <option value="">{t('reels.allStatuses', 'All statuses')}</option>
+                        <option value="en_cours">{t("reels.statusInProgress", "In progress")}</option>
+                        <option value="termine">{t("reels.statusDone", "Done")}</option>
+                        <option value="echec">{t("reels.statusFailed", "Failed")}</option>
                     </select>
 
                     <button
                         type="button"
                         onClick={refresh}
-                        className="rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 hover:bg-white/10"
+                        className="rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 hover:bg-white/10"
                     >
-                        Rafraichir
+                        {t('settings.refresh', 'Refresh')}
                     </button>
 
-                    <div className="inline-flex rounded-xl border border-white/10 bg-black/30 p-1">
+                    <div className="inline-flex rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-1">
                         <button
                             type="button"
                             onClick={() => setViewMode("table")}
-                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "table" ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
-                            title="Vue tableau"
+                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "table" ? "bg-white/10 text-white" : "text-slate-500 dark:text-zinc-400 hover:text-zinc-200"}`}
+                            title={t("reels.tableView", "Table view")}
                         >
-                            <List size={14} /> Tableau
+                            <List size={14} /> {t("reels.tableLabel", "Table")}
                         </button>
                         <button
                             type="button"
                             onClick={() => setViewMode("grid")}
-                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "grid" ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
-                            title="Vue grille"
+                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "grid" ? "bg-white/10 text-white" : "text-slate-500 dark:text-zinc-400 hover:text-zinc-200"}`}
+                            title={t("reels.gridView", "Grid view")}
                         >
-                            <LayoutGrid size={14} /> Grille
+                            <LayoutGrid size={14} /> {t("reels.gridLabel", "Grid")}
                         </button>
                     </div>
                 </div>
@@ -387,21 +401,21 @@ export default function ReelsPage() {
                     <div className="overflow-x-auto">
                         <table className="min-w-full text-sm">
                             <thead>
-                                <tr className="border-b border-white/10 text-left text-zinc-400">
-                                    <th className="px-3 py-3 font-medium">Reel</th>
-                                    <th className="px-3 py-3 font-medium">Description</th>
-                                    <th className="px-3 py-3 font-medium">Duree</th>
-                                    <th className="px-3 py-3 font-medium">Statut</th>
-                                    <th className="px-3 py-3 font-medium">Cree le</th>
-                                    <th className="px-3 py-3 font-medium text-right">Actions</th>
+                                <tr className="border-b border-slate-300 dark:border-white/10 text-left text-slate-500 dark:text-zinc-400">
+                                    <th className="px-3 py-3 font-medium">{t("reels.tableReel", "Reel")}</th>
+                                    <th className="px-3 py-3 font-medium">{t("generatedMedia.tableDescription", "Description")}</th>
+                                    <th className="px-3 py-3 font-medium">{t("generatedMedia.tableDuration", "Duration")}</th>
+                                    <th className="px-3 py-3 font-medium">{t("generatedMedia.tableStatus", "Status")}</th>
+                                    <th className="px-3 py-3 font-medium">{t("generatedMedia.tableCreatedAt", "Created at")}</th>
+                                    <th className="px-3 py-3 font-medium text-right">{t("generatedMedia.tableActions", "Actions")}</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {loading && (
                                     <tr>
-                                        <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">
+                                        <td colSpan={6} className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">
                                             <span className="inline-flex items-center gap-2">
-                                                <Loader2 size={14} className="animate-spin" /> Chargement...
+                                                <Loader2 size={14} className="animate-spin" /> {t('reels.loading', 'Loading...')}
                                             </span>
                                         </td>
                                     </tr>
@@ -417,29 +431,29 @@ export default function ReelsPage() {
 
                                 {!loading && !error && items.length === 0 && (
                                     <tr>
-                                        <td colSpan={6} className="px-3 py-10 text-center text-zinc-400">
-                                            Aucun reel trouve.
+                                        <td colSpan={6} className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">
+                                            {t('reels.noneFound', 'No reels found.')}
                                         </td>
                                     </tr>
                                 )}
 
                                 {!loading && !error &&
                                     items.map((item) => (
-                                        <tr key={item.id} className="border-b border-white/5 align-top">
+                                        <tr key={item.id} className="border-b border-slate-200 dark:border-white/5 align-top">
                                             <td className="px-3 py-3">
-                                                <p className="font-semibold text-white line-clamp-2">{item.reel_title || "Sans titre"}</p>
-                                                <p className="mt-1 text-xs text-zinc-500">ID: {item.id}</p>
+                                                <p className="font-semibold text-white line-clamp-2">{item.reel_title || t("generatedMedia.untitled", "Untitled")}</p>
+                                                <p className="mt-1 text-xs text-slate-400 dark:text-zinc-500">ID: {item.id}</p>
                                             </td>
-                                            <td className="px-3 py-3 text-zinc-300 max-w-md">
+                                            <td className="px-3 py-3 text-slate-700 dark:text-zinc-300 max-w-md">
                                                 <p className="line-clamp-3">{item.reel_description || "-"}</p>
                                             </td>
-                                            <td className="px-3 py-3 text-zinc-300">{item.reel_duration ? `${item.reel_duration}s` : "-"}</td>
+                                            <td className="px-3 py-3 text-slate-700 dark:text-zinc-300">{item.reel_duration ? `${item.reel_duration}s` : "-"}</td>
                                             <td className="px-3 py-3">
                                                 <span className={`inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.reel_status)}`}>
                                                     {statusLabel(item.reel_status)}
                                                 </span>
                                             </td>
-                                            <td className="px-3 py-3 text-zinc-400">
+                                            <td className="px-3 py-3 text-slate-500 dark:text-zinc-400">
                                                 {item.reel_created_at ? new Date(item.reel_created_at).toLocaleString() : "-"}
                                             </td>
                                             <td className="px-3 py-3">
@@ -447,8 +461,8 @@ export default function ReelsPage() {
                                                     <button
                                                         type="button"
                                                         onClick={() => handlePreview(item)}
-                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
-                                                        title="Visualiser"
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                                        title={t('reels.preview', 'Preview')}
                                                     >
                                                         <Play size={14} />
                                                     </button>
@@ -456,8 +470,8 @@ export default function ReelsPage() {
                                                     <button
                                                         type="button"
                                                         onClick={() => handleDownload(item.id)}
-                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
-                                                        title="Telecharger"
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                                        title={t('reels.download', 'Download')}
                                                     >
                                                         <Download size={14} />
                                                     </button>
@@ -465,9 +479,9 @@ export default function ReelsPage() {
                                                     <button
                                                         type="button"
                                                         onClick={() => handleShare(item)}
-                                                        disabled={sharingId === item.id}
+                                                        disabled={sharingId === item.id || !canShareReel}
                                                         className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50"
-                                                        title="Partager"
+                                                        title={t('reels.share', 'Share')}
                                                     >
                                                         {sharingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
                                                     </button>
@@ -477,7 +491,7 @@ export default function ReelsPage() {
                                                         onClick={() => handleDelete(item.id)}
                                                         disabled={deletingId === item.id}
                                                         className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50"
-                                                        title="Supprimer"
+                                                        title={t('reels.delete', 'Delete')}
                                                     >
                                                         {deletingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
                                                     </button>
@@ -491,9 +505,9 @@ export default function ReelsPage() {
                 ) : (
                     <div>
                         {loading ? (
-                            <div className="px-3 py-10 text-center text-zinc-400">
+                            <div className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">
                                 <span className="inline-flex items-center gap-2">
-                                    <Loader2 size={14} className="animate-spin" /> Chargement...
+                                    <Loader2 size={14} className="animate-spin" /> {t('reels.loading', 'Loading...')}
                                 </span>
                             </div>
                         ) : null}
@@ -501,13 +515,13 @@ export default function ReelsPage() {
                         {!loading && error ? <div className="px-3 py-10 text-center text-red-300">{error}</div> : null}
 
                         {!loading && !error && items.length === 0 ? (
-                            <div className="px-3 py-10 text-center text-zinc-400">Aucun reel trouve.</div>
+                            <div className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">{t('reels.noneFound', 'No reels found.')}</div>
                         ) : null}
 
                         {!loading && !error && items.length > 0 ? (
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                                 {items.map((item) => (
-                                    <article key={item.id} className="group overflow-hidden rounded-2xl border border-white/10 bg-white/5">
+                                    <article key={item.id} className="group overflow-hidden rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5">
                                         <div className="relative aspect-video bg-black/40">
                                             {resolveReelPreview(item) && !failedGridPreviewKeys.has(getGridPreviewKey(item)) ? (
                                                 <img
@@ -517,7 +531,7 @@ export default function ReelsPage() {
                                                     onError={() => handleGridPreviewError(item)}
                                                 />
                                             ) : (
-                                                <div className="flex h-full w-full items-center justify-center text-zinc-500">Apercu indisponible</div>
+                                                <div className="flex h-full w-full items-center justify-center text-slate-400 dark:text-zinc-500">{t("reels.previewUnavailable", "Preview unavailable")}</div>
                                             )}
 
                                             <span className={`absolute right-2 top-2 inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.reel_status)}`}>
@@ -528,25 +542,25 @@ export default function ReelsPage() {
                                                 <button
                                                     type="button"
                                                     onClick={() => handlePreview(item)}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
-                                                    title="Visualiser"
+                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
+                                                    title={t('reels.preview', 'Preview')}
                                                 >
                                                     <Play size={14} />
                                                 </button>
                                                 <button
                                                     type="button"
                                                     onClick={() => handleDownload(item.id)}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
-                                                    title="Telecharger"
+                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
+                                                    title={t('reels.download', 'Download')}
                                                 >
                                                     <Download size={14} />
                                                 </button>
                                                 <button
                                                     type="button"
                                                     onClick={() => handleShare(item)}
-                                                    disabled={sharingId === item.id}
+                                                    disabled={sharingId === item.id || !canShareReel}
                                                     className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/40 bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50"
-                                                    title="Partager"
+                                                    title={t('reels.share', 'Share')}
                                                 >
                                                     {sharingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
                                                 </button>
@@ -555,7 +569,7 @@ export default function ReelsPage() {
                                                     onClick={() => handleDelete(item.id)}
                                                     disabled={deletingId === item.id}
                                                     className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/40 bg-red-500/20 text-red-300 hover:bg-red-500/30 disabled:opacity-50"
-                                                    title="Supprimer"
+                                                    title={t('reels.delete', 'Delete')}
                                                 >
                                                     {deletingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
                                                 </button>
@@ -563,9 +577,9 @@ export default function ReelsPage() {
                                         </div>
 
                                         <div className="space-y-2 p-3">
-                                            <p className="line-clamp-2 text-sm font-semibold text-white">{item.reel_title || "Sans titre"}</p>
-                                            <p className="line-clamp-2 text-xs text-zinc-400">{item.reel_description || "-"}</p>
-                                            <p className="text-xs text-zinc-500">
+                                            <p className="line-clamp-2 text-sm font-semibold text-white">{item.reel_title || t("generatedMedia.untitled", "Untitled")}</p>
+                                            <p className="line-clamp-2 text-xs text-slate-500 dark:text-zinc-400">{item.reel_description || "-"}</p>
+                                            <p className="text-xs text-slate-400 dark:text-zinc-500">
                                                 {item.reel_duration ? `${item.reel_duration}s` : "-"} • {item.reel_created_at ? new Date(item.reel_created_at).toLocaleString() : "-"}
                                             </p>
                                         </div>
@@ -576,27 +590,27 @@ export default function ReelsPage() {
                     </div>
                 )}
 
-                <div className="flex items-center justify-between border-t border-white/10 pt-4 text-sm">
-                    <p className="text-zinc-400">{total} reel(s)</p>
+                <div className="flex items-center justify-between border-t border-slate-300 dark:border-white/10 pt-4 text-sm">
+                    <p className="text-slate-500 dark:text-zinc-400">{total} {t("reels.reelCount", "reel(s)")}</p>
                     <div className="flex items-center gap-2">
                         <button
                             type="button"
                             onClick={() => setPage((p) => Math.max(1, p - 1))}
                             disabled={page <= 1}
-                            className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-1.5 text-slate-700 dark:text-zinc-300 disabled:opacity-40"
                         >
-                            Precedent
+                            {t('reels.previous', 'Previous')}
                         </button>
-                        <span className="text-zinc-400">
-                            Page {page} / {totalPages}
+                        <span className="text-slate-500 dark:text-zinc-400">
+                            {t('reels.page', 'Page')} {page} / {totalPages}
                         </span>
                         <button
                             type="button"
                             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                             disabled={page >= totalPages}
-                            className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-1.5 text-slate-700 dark:text-zinc-300 disabled:opacity-40"
                         >
-                            Suivant
+                            {t('reels.next', 'Next')}
                         </button>
                     </div>
                 </div>
@@ -619,16 +633,15 @@ export default function ReelsPage() {
                 isSubmitting={Boolean(shareModalItem && sharingId === shareModalItem.id)}
                 result={shareResult}
                 onSubmit={submitShare}
-                hasLocalCredentials={Boolean(decrypt(globalThis.localStorage.getItem("uploadPostKey_v3") || "") && globalThis.localStorage.getItem("uploadUserId"))}
             />
 
             {previewItem && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">
-                    <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-zinc-950 shadow-2xl">
-                        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                    <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-slate-300 dark:border-white/10 bg-zinc-950 shadow-2xl">
+                        <div className="flex items-center justify-between border-b border-slate-300 dark:border-white/10 px-4 py-3">
                             <div>
-                                <p className="text-sm font-semibold text-white">{previewItem.reel_title || "Visualisation du reel"}</p>
-                                <p className="text-xs text-zinc-400">Apercu avec les memes actions que les clips generes.</p>
+                                <p className="text-sm font-semibold text-white">{previewItem.reel_title || t("reels.previewTitle", "Reel preview")}</p>
+                                <p className="text-xs text-slate-500 dark:text-zinc-400">{t("reels.previewSubtitle", "Preview with the same actions as generated clips.")}</p>
                             </div>
                             <button
                                 type="button"
@@ -636,8 +649,8 @@ export default function ReelsPage() {
                                     setPreviewItem(null);
                                     setPreviewUrl("");
                                 }}
-                                className="rounded-lg border border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10"
-                                title="Fermer"
+                                className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10"
+                                title={t('app.close', 'Close')}
                             >
                                 <X size={16} />
                             </button>

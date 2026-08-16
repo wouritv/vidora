@@ -3,8 +3,10 @@ import { useState } from "react";
 import { getSupabaseBrowserClient } from "../lib/supabase-browser";
 import AuthLayout from "../layouts/AuthLayout";
 import "../styles/auth-legacy.css";
+import { useTranslation } from "../state/LanguageContext";
 
 export default function ResetPassword() {
+    const { t } = useTranslation();
     const [email, setEmail] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
@@ -29,9 +31,9 @@ export default function ResetPassword() {
                 return;
             }
 
-            setSuccess("Un lien de reinitialisation a ete envoye par email.");
+            setSuccess(t("app.resetPasswordSuccess","Un lien de reinitialisation a ete envoye par email."));
         } catch (caughtError) {
-            setError(caughtError instanceof Error ? caughtError.message : "Erreur inconnue");
+            setError(caughtError instanceof Error ? caughtError.message : t("app.unknownError","Erreur inconnue"));
         } finally {
             setLoading(false);
         }
@@ -44,15 +46,15 @@ export default function ResetPassword() {
         >
             <main className="page auth-page">
                 <section className="card auth-card auth-surface">
-                    <p className="eyebrow">Mot de passe</p>
-                    <h1>Reinitialiser</h1>
+                    <p className="eyebrow">{t("app.password","Mot de passe")}</p>
+                    <h1>{t("app.btReset","Reinitialiser")}</h1>
                     <p className="hint">
-                        Saisis l'adresse email du compte pour recevoir le lien de reinitialisation.
+                        {t("app.resetSubtitle","Saisis l'adresse email du compte pour recevoir le lien de reinitialisation.")}
                     </p>
 
                     <form onSubmit={handleReset} className="form auth-form">
                         <label>
-                            Email
+                            {t("app.email","Email")}
                             <input
                                 type="email"
                                 value={email}
@@ -63,11 +65,11 @@ export default function ResetPassword() {
 
                         <div className="actions auth-actions">
                             <button type="submit" disabled={loading}>
-                                {loading ? "Envoi..." : "Envoyer le lien"}
+                                {loading ? t("app.sending","Envoi...") : t("app.sendLink","Envoyer le lien")}
                             </button>
 
                             <Link to="/login" className="link-pill">
-                                Retour connexion
+                                {t("app.backToLogin","Retour connexion")}
                             </Link>
                         </div>
                     </form>

@@ -3,8 +3,10 @@ import { useEffect, useState } from "react";
 import { getSupabaseBrowserClient } from "../lib/supabase-browser";
 import AuthLayout from "../layouts/AuthLayout";
 import "../styles/auth-legacy.css";
+import { useTranslation } from "../state/LanguageContext";
 
 export default function UpdatePassword() {
+    const { t } = useTranslation();
     const navigate = useNavigate();
 
     const [ready, setReady] = useState(false);
@@ -36,7 +38,7 @@ export default function UpdatePassword() {
         setSuccess("");
 
         if (password !== confirmPassword) {
-            setError("Les mots de passe doivent correspondre.");
+            setError(t("app.errorPassword","Les mots de passe doivent correspondre."));
             return;
         }
 
@@ -54,7 +56,7 @@ export default function UpdatePassword() {
                 return;
             }
 
-            setSuccess("Mot de passe mis a jour. Redirection en cours...");
+            setSuccess(t("app.resetPasswordSuccess2","Mot de passe mis a jour. Redirection en cours..."));
 
             setTimeout(() => {
                 navigate("/login", { replace: true });
@@ -68,24 +70,24 @@ export default function UpdatePassword() {
 
     return (
         <AuthLayout
-            title="Nouveau mot de passe"
-            subtitle="Ouvre le lien recu par email pour finaliser la mise a jour"
+            title={t("app.resetPwdTitle","Nouveau mot de passe")}
+            subtitle={t("app.resetPwdSubtitle","Ouvre le lien recu par email pour finaliser la mise a jour")}
         >
             <main className="page auth-page">
                 <section className="card auth-card auth-surface">
-                    <p className="eyebrow">Mot de passe</p>
-                    <h1>Nouveau mot de passe</h1>
+                    <p className="eyebrow">{t("app.password","Mot de passe")}</p>
+                    <h1>{t("app.resetPwdTitle","Nouveau mot de passe")}</h1>
                     <p className="hint">
-                        Ouvre le lien recu par email pour definir un nouveau mot de passe.
+                        {t("app.resetPwdSubtitle","Ouvre le lien recu par email pour definir un nouveau mot de passe.")}
                     </p>
 
                     {!ready ? (
-                        <p className="hint">En attente de la session de recuperation...</p>
+                        <p className="hint">{t("app.waitingRecoverySession","En attente de la session de recuperation...")}</p>
                     ) : null}
 
                     <form onSubmit={handleUpdate} className="form auth-form">
                         <label>
-                            Nouveau mot de passe
+                            {t("app.newPassword","Nouveau mot de passe")}
                             <input
                                 type="password"
                                 value={password}
@@ -96,7 +98,7 @@ export default function UpdatePassword() {
                         </label>
 
                         <label>
-                            Confirmer le mot de passe
+                            {t("app.confirmPassword","Confirmer le mot de passe")}
                             <input
                                 type="password"
                                 value={confirmPassword}
@@ -108,11 +110,11 @@ export default function UpdatePassword() {
 
                         <div className="actions auth-actions">
                             <button type="submit" disabled={loading || !ready}>
-                                {loading ? "Mise a jour..." : "Mettre a jour"}
+                                {loading ? t("app.update","Mise a jour...") : t("app.update2","Mettre a jour")}
                             </button>
 
                             <Link to="/login" className="link-pill">
-                                Retour connexion
+                                {t("app.backToLogin","Retour connexion")}
                             </Link>
                         </div>
                     </form>

@@ -5,6 +5,8 @@ import "./index.css";
 
 import { AuthProvider, useAuth } from "./state/AuthContext";
 import { ThemeProvider } from "./state/ThemeContext";
+import { UserCreditsProvider } from "./state/UserCreditsContext";
+import { LanguageProvider } from "./state/LanguageContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import DashboardLayout from "./layouts/DashboardLayout";
 import Login from "./pages/Login";
@@ -15,6 +17,7 @@ import ResetPassword from "./pages/ResetPassword";
 import UpdatePassword from "./pages/UpdatePassword";
 import CaptionsPage from "./pages/CaptionsPage.jsx";
 import AbonnementPage from "./pages/AbonnementPage";
+import SocialPublicationsPage from "./pages/SocialPublicationsPage";
 
 function RootRedirect() {
     const { isAuthenticated, loading } = useAuth();
@@ -34,6 +37,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <React.StrictMode>
         <AuthProvider>
             <ThemeProvider>
+                <UserCreditsProvider>
+                <LanguageProvider>
                 <BrowserRouter>
                     <Routes>
                         <Route path="/" element={<RootRedirect />} />
@@ -52,6 +57,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                             <Route index element={<Dashboard />} />
                             <Route path="reel-generator" element={<DashboardTabPage tabKey="reel-generator" />} />
                             <Route path="reels" element={<ReelsPage />} />
+                            <Route path="social-publications" element={<SocialPublicationsPage />} />
                             <Route path="captions" element={<CaptionsPage />} />
                             <Route path="caption-generator" element={<DashboardTabPage tabKey="caption-generator" />} />
                             <Route path="settings" element={<DashboardTabPage tabKey="settings" />} />
@@ -61,6 +67,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                         <Route path="*" element={<RootRedirect />} />
                     </Routes>
                 </BrowserRouter>
+                </LanguageProvider>
+                </UserCreditsProvider>
             </ThemeProvider>
         </AuthProvider>
     </React.StrictMode>

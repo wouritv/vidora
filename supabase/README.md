@@ -25,5 +25,5 @@ Make sure auth is active in `dashboard/src/state/AuthContext.jsx`.
 ## 5) Notes
 - Generated clips are automatically persisted into Supabase at the end of `/api/process` jobs.
 - Reels are soft-deleted using `deleted_at`.
-- Share uses Upload-Post API credentials already configured in Settings.
+- Share uses connected social accounts configured in `Settings > Connected Networks`.
 

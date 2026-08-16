@@ -85,6 +85,32 @@ def generate_presigned_url(bucket_name, object_key, expiration=3600):
         return None
 
 
+def delete_s3_object(bucket_name, object_key):
+    """Delete one object from S3 bucket."""
+    s3_client = get_s3_client()
+    if not s3_client or not bucket_name or not object_key:
+        return False
+    try:
+        s3_client.delete_object(Bucket=bucket_name, Key=object_key)
+        return True
+    except ClientError:
+        return False
+    except Exception:
+        return False
+
+
+def get_s3_object_size(bucket_name, object_key):
+    """Return object size in bytes, or 0 if unknown."""
+    s3_client = get_s3_client()
+    if not s3_client or not bucket_name or not object_key:
+        return 0
+    try:
+        response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
+        return int(response.get("ContentLength") or 0)
+    except Exception:
+        return 0
+
+
 def upload_job_artifacts(directory, job_id):
     """
     Upload all generated clips and metadata for a job to S3.

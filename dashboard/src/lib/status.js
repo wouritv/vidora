@@ -25,7 +25,7 @@ export function statusClass(status) {
     if (status === 'termine') return 'bg-green-500/10 border-green-500/30 text-green-300';
     if (status === 'en_cours') return 'bg-blue-500/10 border-blue-500/30 text-blue-300';
     if (status === 'echec') return 'bg-red-500/10 border-red-500/30 text-red-300';
-    return 'bg-white/5 border-white/10 text-zinc-300';
+    return 'bg-white/5 border-slate-300 dark:border-white/10 text-slate-700 dark:text-zinc-300';
 }
 
 // ── Dashboard job status (includes Lucide icon reference) ───────────────────

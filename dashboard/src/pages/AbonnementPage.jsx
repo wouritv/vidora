@@ -1,15 +1,17 @@
 import React, {useEffect, useState} from "react";
-import {Check, CreditCardIcon, Star, Crown, Sparkles, Loader2} from "lucide-react";
+import {Check, CreditCardIcon, Star, Crown, Sparkles, Loader2, Coins, Plus, Minus} from "lucide-react";
 import {getApiUrl} from "../config.js";
 import { useAuth } from "../state/AuthContext";
+import { useUserCredits } from "../state/UserCreditsContext";
+import { useTranslation } from "../state/LanguageContext";
 
 const colorStyles = {
     zinc: {
         border: "border-zinc-500/20",
         bg: "bg-zinc-500/10",
-        icon: "text-zinc-300",
-        button: "border-zinc-500/20 bg-zinc-500/10 text-zinc-300 hover:bg-zinc-500/15",
-        check: "text-zinc-400",
+        icon: "text-slate-700 dark:text-zinc-300",
+        button: "border-zinc-500/20 bg-zinc-500/10 text-slate-700 dark:text-zinc-300 hover:bg-zinc-500/15",
+        check: "text-slate-500 dark:text-zinc-400",
     },
     blue: {
         border: "border-blue-500/30",
@@ -34,7 +36,9 @@ const iconMap = {
 };
 
 export default function AbonnementPage() {
+    const { t } = useTranslation();
     const { user } = useAuth();
+    const { credits, refresh: refreshCredits } = useUserCredits();
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -42,13 +46,21 @@ export default function AbonnementPage() {
     const [loadingPlanId, setLoadingPlanId] = useState("");
     const [paymentMessage, setPaymentMessage] = useState("");
 
+    // Buy credits
+    const [buyAmount, setBuyAmount] = useState(10);
+    const [buyLoading, setBuyLoading] = useState(false);
+    const [buyError, setBuyError] = useState("");
+    const CREDIT_RATE = 100;
+    const creditsToAdd = Math.round(buyAmount * CREDIT_RATE);
+
     useEffect(() => {
         const params = new URLSearchParams(globalThis.location.search || "");
         const payment = params.get("payment");
         if (payment === "success") {
-            setPaymentMessage("Paiement confirme. Votre abonnement sera active sous peu.");
+            setPaymentMessage(t("abonnement.paiementOK","Paiement confirme. Votre abonnement sera active sous peu."));
+            refreshCredits();
         } else if (payment === "cancel") {
-            setPaymentMessage("Paiement annule.");
+            setPaymentMessage(t("abonnement.paiementCancel","Paiement annulé"));
         }
     }, []);
 
@@ -71,20 +83,44 @@ export default function AbonnementPage() {
 
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
-                setError(data?.detail || "Impossible de demarrer le paiement Stripe.");
+                setError(data?.detail || t("abonnement.stripeError","Impossible de demarrer le paiement Stripe."));
                 return;
             }
 
             if (!data?.checkout_url) {
-                setError("Aucune URL de paiement n'a ete retournee.");
+                setError(t("abonnement.noCheckoutUrl","Aucune URL de paiement n'a ete retournee."));
                 return;
             }
 
             globalThis.location.href = data.checkout_url;
         } catch (err) {
-            setError(err.message || "Impossible de demarrer le paiement Stripe.");
+            setError(err.message ||  t("abonnement.stripeError","Impossible de demarrer le paiement Stripe."));
         } finally {
             setLoadingPlanId("");
+        }
+    };
+
+    const handleBuyCredits = async () => {
+        if (!user?.id) return;
+        setBuyLoading(true);
+        setBuyError("");
+        try {
+            const res = await fetch(getApiUrl("/api/stripe/buy-credits"), {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-User-Id": user.id,
+                    ...(user?.email ? { "X-User-Email": user.email } : {}),
+                },
+                body: JSON.stringify({ amount_usd: buyAmount }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data?.detail || t("abonnement.paiementError","Erreur lors du paiement"));
+            if (data?.checkout_url) globalThis.location.href = data.checkout_url;
+        } catch (err) {
+            setBuyError(err.message || t("abonnement.stripeError","Impossible de démarrer le paiement."));
+        } finally {
+            setBuyLoading(false);
         }
     };
 
@@ -149,8 +185,8 @@ export default function AbonnementPage() {
         <div className="h-full overflow-y-auto p-8 max-w-5xl mx-auto animate-[fadeIn_0.3s_ease-out]">
             {/* Header */}
             <div className="mb-8">
-                <h1 className="text-3xl font-bold mb-2">Abonnements</h1>
-                <p className="text-zinc-400 text-sm">Découvrez nos formules d'abonnements et choisissez celle qui vous convient</p>
+                <h1 className="text-3xl font-bold mb-2">{t("abonnement.title","Abonnement")}</h1>
+                <p className="text-slate-500 dark:text-zinc-400 text-sm">{t("abonnement.subtitle","Découvrez nos formules d'abonnements et choisissez celle qui vous convient")}</p>
                 {paymentMessage ? <p className="mt-3 text-sm text-green-300">{paymentMessage}</p> : null}
             </div>
 
@@ -159,7 +195,7 @@ export default function AbonnementPage() {
 
                 {loading && (
                     <span className="inline-flex items-center gap-2">
-                        <Loader2 size={14} className="animate-spin" /> Chargement...
+                        <Loader2 size={14} className="animate-spin" /> {t("app.loading","Chargement...")}
                     </span>
                 )}
 
@@ -170,18 +206,18 @@ export default function AbonnementPage() {
                 )}
 
                 {!loading && !error && items.length === 0 && (
-                    <span className="inline-flex items-center gap-2 text-zinc-400">
-                        Aucun abonnement trouve.
+                    <span className="inline-flex items-center gap-2 text-slate-500 dark:text-zinc-400">
+                        {t("abonnement.noSubscriptionHistory","Aucun abonnement trouve.")}
                     </span>
                 )}
 
                 {items.map((plan) => {
                     const styles = colorStyles[plan.color];
                     const Icon = iconMap[plan.icon] || Star; // Default to Star if icon is not found
-                    let buttonLabel = "Choisir";
+                    let buttonLabel = t("abonnement.choisir","Choisir");
 
                     if (souscription && plan.id === souscription.abonnement && plan.ordre < 3) {
-                        buttonLabel = "Upgrade";
+                        buttonLabel = t("abonnement.upgrade","Changer de formule");
                     }
 
                     return (
@@ -193,7 +229,7 @@ export default function AbonnementPage() {
                         >
                             {plan.highlighted && (
                                 <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-blue-500 px-3 py-1 text-xs font-semibold text-white">
-                  Populaire
+                                    {t("abonnement.populaire","Populaire")}
                 </span>
                             )}
 
@@ -208,13 +244,13 @@ export default function AbonnementPage() {
                             {/* Prix */}
                             <div className="mb-6">
                                 <span className="text-3xl font-bold">{plan.price}€</span>
-                                <span className="text-zinc-400 text-sm"> / mois</span>
+                                <span className="text-slate-500 dark:text-zinc-400 text-sm"> / {t("abonnement.mois","mois")}</span>
                             </div>
 
                             {/* Liste des services */}
                             <ul className="flex flex-col gap-3 mb-8 flex-1">
                                 {plan.features.map((feature) => (
-                                    <li key={feature} className="flex items-start gap-2 text-sm text-zinc-300">
+                                    <li key={feature} className="flex items-start gap-2 text-sm text-slate-700 dark:text-zinc-300">
                                         <Check size={16} className={`${styles.check} mt-0.5 shrink-0`} />
                                         <span>{feature}</span>
                                     </li>
@@ -228,12 +264,88 @@ export default function AbonnementPage() {
                                 className={`mt-auto flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition ${styles.button}`}
                             >
                                 {loadingPlanId === plan.id ? <Loader2 size={18} className="animate-spin" /> : <CreditCardIcon size={18} />}
-                                {loadingPlanId === plan.id ? "Redirection..." : buttonLabel}
+                                {loadingPlanId === plan.id ? t("abonnement.redirection","Redirection...") : buttonLabel}
                             </button>
                         </div>
                     );
                 })}
             </div>
+
+            {/* Buy additional credits */}
+            <div className="mt-10 rounded-2xl border border-yellow-500/20 bg-yellow-500/5 p-6">
+                <div className="flex items-center gap-3 mb-4">
+                    <div className="p-2 rounded-lg bg-yellow-500/10">
+                        <Coins size={20} className="text-yellow-400" />
+                    </div>
+                    <div>
+                        <h2 className="text-xl font-semibold">{t("abonnement.fillCredit","Recharger des crédits")}</h2>
+                        <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">
+                            1 EUR = {CREDIT_RATE} {t("abonnement.creditRate","crédits · solde actuel ")} :{" "}
+                            <span className="text-white font-semibold">{credits.toLocaleString()} cr</span>
+                        </p>
+                    </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex gap-2">
+                        {[5, 10, 20, 50].map((amt) => (
+                            <button
+                                key={amt}
+                                onClick={() => setBuyAmount(amt)}
+                                className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition ${
+                                    buyAmount === amt
+                                        ? "border-yellow-400 bg-yellow-400/10 text-yellow-300"
+                                        : "border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300 hover:border-slate-400 dark:border-white/20"
+                                }`}
+                            >
+                                {amt}€
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setBuyAmount(Math.max(1, buyAmount - 1))}
+                            className="p-1.5 rounded-lg bg-white/5 border border-slate-300 dark:border-white/10 hover:bg-white/10 text-slate-700 dark:text-zinc-300"
+                        >
+                            <Minus size={14} />
+                        </button>
+                        <input
+                            type="number"
+                            min="1"
+                            value={buyAmount}
+                            onChange={(e) => setBuyAmount(Math.max(1, Number(e.target.value) || 1))}
+                            className="w-20 px-3 py-1.5 bg-white/10 border border-slate-400 dark:border-white/20 rounded-lg text-white text-sm text-center focus:outline-none focus:border-yellow-500/50"
+                        />
+                        <button
+                            onClick={() => setBuyAmount(buyAmount + 1)}
+                            className="p-1.5 rounded-lg bg-white/5 border border-slate-300 dark:border-white/10 hover:bg-white/10 text-slate-700 dark:text-zinc-300"
+                        >
+                            <Plus size={14} />
+                        </button>
+                        <span className="text-slate-500 dark:text-zinc-400 text-sm">EUR</span>
+                    </div>
+
+                    <div className="ml-auto flex items-center gap-3">
+                        <span className="text-sm text-slate-500 dark:text-zinc-400">
+                            = <span className="text-yellow-300 font-semibold">{creditsToAdd.toLocaleString()} crédits</span>
+                        </span>
+                        <button
+                            onClick={handleBuyCredits}
+                            disabled={buyLoading || !user?.id}
+                            className="flex items-center gap-2 px-4 py-2 bg-yellow-500/20 border border-yellow-500/30 hover:bg-yellow-500/30 disabled:opacity-60 text-yellow-300 rounded-xl text-sm font-semibold transition"
+                        >
+                            {buyLoading ? <Loader2 size={16} className="animate-spin" /> : <CreditCardIcon size={16} />}
+                            {buyLoading ? t("abonnement.redirection","Redirection...") : t("abonnement.payer","Payer")}
+                        </button>
+                    </div>
+                </div>
+
+                {buyError && (
+                    <p className="mt-3 text-xs text-red-300">{buyError}</p>
+                )}
+            </div>
         </div>
     );
 }
+

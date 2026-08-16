@@ -129,7 +129,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
     return (match && match[2].length === 11) ? match[2] : null;
   };
 
-  const containerClasses = `relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl mb-8 group animate-[fadeIn_0.5s_ease-out] transition-all duration-500 
+  const containerClasses = `relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-slate-300 dark:border-white/10 shadow-2xl mb-8 group animate-[fadeIn_0.5s_ease-out] transition-all duration-500 
     ${isComplete && !isSyncedPlaying ? 'grayscale brightness-50' : ''} 
     ${isSyncedPlaying ? 'ring-2 ring-primary ring-offset-2 ring-offset-black shadow-primary/20' : ''}`;
 
@@ -195,7 +195,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       )}
       
       {!isSyncedPlaying && !isComplete && (
-          <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg border border-white/10 text-white/50 text-[10px] font-mono">
+          <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg border border-slate-300 dark:border-white/10 text-white/50 text-[10px] font-mono">
             AI_MODEL: GEMINI-2.5-PRO
           </div>
       )}
@@ -205,7 +205,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
           <div className="absolute inset-0 pointer-events-none z-20 overflow-hidden">
              <div className="absolute top-0 bottom-0 left-[35%] w-[1px] bg-yellow-500/20 border-r border-dashed border-yellow-500/40"></div>
              <div className="absolute top-0 bottom-0 right-[35%] w-[1px] bg-yellow-500/20 border-l border-dashed border-yellow-500/40"></div>
-             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 border border-white/20 rounded-full flex items-center justify-center">
+             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 border border-slate-400 dark:border-white/20 rounded-full flex items-center justify-center">
                 <div className="w-1 h-1 bg-red-500 rounded-full animate-ping"></div>
              </div>
              <div className="absolute bottom-1/3 left-1/2 -translate-x-1/2 flex flex-col items-center justify-center gap-2 opacity-60">
@@ -216,14 +216,14 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
 
        {/* Synced Playing Indicator */}
        {isSyncedPlaying && (
-           <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-red-600/90 backdrop-blur text-white rounded-lg shadow-lg animate-pulse font-bold text-[10px] uppercase tracking-wider border border-white/20">
+           <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-red-600/90 backdrop-blur text-white rounded-lg shadow-lg animate-pulse font-bold text-[10px] uppercase tracking-wider border border-slate-400 dark:border-white/20">
                <Activity size={12} /> Live Sync
            </div>
        )}
       
        {/* Bottom Info Bar */}
       {!isSyncedPlaying && !isComplete && (
-          <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/90 to-transparent z-30 flex justify-between items-end border-t border-white/5">
+          <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/90 to-transparent z-30 flex justify-between items-end border-t border-slate-200 dark:border-white/5">
               <div className="font-mono text-[10px] text-primary/80 space-y-1">
                   <div className="flex items-center gap-2"><Activity size={10} className="animate-bounce" /> <span>&gt; ANALYSIS_THREAD_01: ACTIVE</span></div>
                   <div className="flex items-center gap-2"><Radio size={10} /> <span>&gt; AUDIO_TRANSCRIPT: PROCESSING</span></div>

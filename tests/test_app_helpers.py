@@ -50,7 +50,7 @@ def test_load_clip_segments_from_metadata_filters_and_relativizes():
 
 
 def test_resolve_social_platforms_uses_env_and_deduplicates(monkeypatch):
-    monkeypatch.setenv("UPLOAD_POST_DEFAULT_PLATFORMS", "instagram, youtube,instagram,invalid")
+    monkeypatch.setenv("SOCIAL_DEFAULT_PLATFORMS", "instagram, youtube,instagram,invalid")
     assert app._resolve_social_platforms(None) == ["instagram", "youtube"]
 
 
@@ -278,5 +278,99 @@ def test_translated_segments_to_caption_words_distributes_word_timing():
         {"text": "monde", "startMs": 800, "endMs": 1200},
         {"text": "salut", "startMs": 1200, "endMs": 2000},
     ]
+
+
+def test_encrypt_then_decrypt_token_roundtrip(monkeypatch):
+    monkeypatch.setenv("ENCRYPTION_KEY", "unit-test-key")
+    original = "abc.123.token"
+    encrypted = app._encrypt_token(original)
+    assert encrypted
+    assert encrypted != original
+    assert app._decrypt_token(encrypted) == original
+
+
+def test_extract_token_data_handles_tiktok_nested_shape():
+    token_data = {
+        "data": {
+            "access_token": "tk_access",
+            "refresh_token": "tk_refresh",
+            "expires_in": 7200,
+            "scope": "video.publish user.info.basic",
+        }
+    }
+    parsed = app._extract_token_data("tiktok", token_data)
+    assert parsed["access_token"] == "tk_access"
+    assert parsed["refresh_token"] == "tk_refresh"
+    assert parsed["expires_in"] == 7200
+
+
+def test_is_token_expiring_for_missing_or_invalid_expires_at():
+    assert app._is_token_expiring({}) is True
+    assert app._is_token_expiring({"expires_at": "not-a-date"}) is True
+
+
+def test_enforce_subscription_retention_policy_resets_balances_after_deadline(monkeypatch):
+    user_id = "user-retention"
+    old_end = (app.datetime.now(app.timezone.utc) - app.timedelta(days=10)).isoformat()
+    latest = {"id": "sub-1", "payment_end_date": old_end, "account_disabled_at": None}
+    calls = {"set": 0, "history": 0, "update": 0}
+
+    monkeypatch.setattr(app, "STORAGE_RETENTION_PERIODE_DAYS", 7)
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+
+    async def fake_get_user_abonnement(_user_id):
+        return None
+
+    async def fake_get_latest(_user_id):
+        return latest
+
+    async def fake_get_user_data(_user_id):
+        return {"credit": 120.0, "stockage": 4.5}
+
+    async def fake_set_balance(**_kwargs):
+        calls["set"] += 1
+        return {}
+
+    async def fake_insert_history(**kwargs):
+        calls["history"] += 1
+        assert kwargs["operation_type"] == "subscription_expiration"
+        assert kwargs["credit"] == 120.0
+        assert kwargs["storage"] == 4.5
+        return {}
+
+    async def fake_update_row(_sub_id, updates):
+        calls["update"] += 1
+        assert "retention_deadline_at" in updates
+        return {**latest, **updates}
+
+    monkeypatch.setattr(app, "get_user_abonnement", fake_get_user_abonnement)
+    monkeypatch.setattr(app, "supabase_get_latest_user_paid_subscription", fake_get_latest)
+    monkeypatch.setattr(app, "supabase_get_user_data", fake_get_user_data)
+    monkeypatch.setattr(app, "supabase_set_user_data_balance", fake_set_balance)
+    monkeypatch.setattr(app, "supabase_insert_user_data_history", fake_insert_history)
+    monkeypatch.setattr(app, "supabase_update_souscription_row", fake_update_row)
+
+    result = asyncio.run(app._enforce_subscription_retention_policy(user_id))
+
+    assert result["state"] == "disabled"
+    assert calls == {"set": 1, "history": 1, "update": 1}
+
+
+def test_buy_credits_checkout_requires_active_subscription(monkeypatch):
+    class DummyRequest:
+        headers = {"X-User-Id": "user-1"}
+
+    async def fake_policy(_user_id):
+        return {"state": "no_subscription"}
+
+    monkeypatch.setattr(app, "_require_stripe_ready", lambda: None)
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+    monkeypatch.setattr(app, "_enforce_subscription_retention_policy", fake_policy)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(app.buy_credits_checkout(DummyRequest(), app.BuyCreditsRequest(amount_usd=5)))
+
+    assert exc.value.status_code == 403
+    assert "abonnement actif" in exc.value.detail.lower()
 
 
