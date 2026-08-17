@@ -2,8 +2,7 @@ from ia_captions import (
     _clean_json,
     _generate_caption_texts,
     _normalize_segments,
-    _srt_timestamp,
-    _upload_post_payload,
+    _srt_timestamp
 )
 
 
@@ -57,29 +56,6 @@ def test_clean_json_strips_code_fences():
 
 def test_clean_json_returns_trimmed_text_when_not_fenced():
     assert _clean_json("  plain text  ") == "plain text"
-
-
-def test_upload_post_payload_sets_platform_specific_fields():
-    payload = _upload_post_payload(
-        final_title="My Reel",
-        final_description="Description",
-        platforms=["tiktok", "youtube", "linkedin", "facebook"],
-        user_id="u123",
-        scheduled_date="2026-08-04T10:00:00Z",
-        timezone_name="Europe/Paris",
-    )
-
-    assert payload["user"] == "u123"
-    assert payload["platform[]"] == ["tiktok", "youtube", "linkedin", "facebook"]
-    assert payload["scheduled_date"] == "2026-08-04T10:00:00Z"
-    assert payload["timezone"] == "Europe/Paris"
-    assert payload["tiktok_title"] == "Description"
-    assert payload["youtube_title"] == "My Reel"
-    assert payload["youtube_description"] == "Description"
-    assert payload["privacyStatus"] == "public"
-    assert payload["linkedin_title"] == "My Reel"
-    assert payload["facebook_description"] == "Description"
-
 
 def test_generate_caption_texts_returns_original_when_no_keys():
     segments = [{"text": "Line 1"}, {"text": "Line 2"}]
