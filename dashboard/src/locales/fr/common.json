@@ -48,7 +48,7 @@
     "youtubeUrl": "URL YouTube",
     "uploadFile": "Télécharger un fichier",
     "uploadHint": "Cliquez pour télécharger ou faites glisser et déposer",
-    "uploadDetail": "MP4, MOV jusqu'à 500 Mo",
+    "uploadDetail": "MP4, MOV, AVI (Durée max : 180 min, Taille max : 10 Go)",
     "ack": "Je confirme que je possède ce contenu ou que j'ai les droits de le traiter. Je suis responsable de tout contenu que je soumets. Voir nos",
     "terms": "Conditions & Confidentialité",
     "generateClips": "Générer des clips",
