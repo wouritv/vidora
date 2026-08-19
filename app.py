@@ -3345,11 +3345,14 @@ def _frontend_base_url(request: Request) -> str:
 
 
 @app.post("/api/stripe/checkout-session")
-async def create_stripe_checkout_session(request: Request, payload: StripeCheckoutRequest):
+async def create_stripe_checkout_session(
+    request: Request,
+    payload: StripeCheckoutRequest,
+    user_id: str = Depends(get_user_id_header),   # ✅ ici, dans la signature
+):
     """Create a hosted Stripe Checkout session for a subscription plan."""
     _require_stripe_ready()
 
-    user_id: str = Depends(get_user_id_header)
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase is not configured")
 
