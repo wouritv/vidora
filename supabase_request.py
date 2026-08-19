@@ -623,7 +623,7 @@ async def upsert_user_data_credits(
 	else:
 		payload = {
 			"user_id":  user_id,
-			"credit":   max(0.0, float(credit_delta)),
+			"credit":   int(max(0.0, float(credit_delta))),
 			"stockage": max(0.0, float(storage_delta)),
 		}
 		response = await client.table(SUPABASE_USER_DATA_TABLE).insert(payload).execute()
