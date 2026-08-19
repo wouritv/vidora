@@ -52,7 +52,7 @@ export default function SettingsPage() {
   const { t } = useTranslation();
   const { user } = useAuth();
   const { theme, setTheme } = useTheme();
-  const { credits, aboCosts, refresh: refreshCredits } = useUserCredits();
+  const { credits, creditMax, refresh: refreshCredits } = useUserCredits();
 
   const [displayName, setDisplayName] = useState(user?.user_metadata?.display_name || user?.email?.split('@')[0] || '');
   const [email] = useState(user?.email || '');
@@ -102,6 +102,23 @@ export default function SettingsPage() {
     }
     return next;
   }, [socialAccounts]);
+
+  const planNameById = useMemo(() => {
+    const next = {};
+    for (const plan of subPlans) {
+      if (plan?.id) {
+        next[String(plan.id)] = plan.name || String(plan.id);
+      }
+    }
+    return next;
+  }, [subPlans]);
+
+  const currentPlanLabel = useMemo(() => {
+    if (!subscription) return t('settings.inactive', 'Inactive');
+    if (subscription.abonnement_name) return subscription.abonnement_name;
+    const rawId = String(subscription.abonnement || '').trim();
+    return planNameById[rawId] || rawId || t('settings.active', 'Active');
+  }, [subscription, planNameById, t]);
 
   const syncConnectedNetworksCache = (accounts) => {
     const next = {};
@@ -668,6 +685,11 @@ export default function SettingsPage() {
               <p className="text-slate-700 dark:text-zinc-300">
                 {t('settings.status', 'Status')}: <span className="font-semibold text-white">{subscription ? t('settings.active', 'Active') : t('settings.inactive', 'Inactive')}</span>
               </p>
+              {subscription ? (
+                <p className="text-slate-500 dark:text-zinc-400 mt-1">
+                  {t('settings.currentPlan', 'Current plan')}: <span className="text-white font-medium">{currentPlanLabel}</span>
+                </p>
+              ) : null}
               {subscription?.payment_end_date ? (
                 <p className="text-slate-500 dark:text-zinc-400 mt-1">
                   {t('settings.periodEnd', 'Period end')}: {new Date(subscription.payment_end_date).toLocaleDateString('fr-FR')}
@@ -753,7 +775,7 @@ export default function SettingsPage() {
                       {subscriptionHistory.map((row) => (
                         <tr key={row.id} className="border-b border-slate-200 dark:border-white/5">
                           <td className="px-3 py-2 text-slate-500 dark:text-zinc-400">{row.payment_start_date ? new Date(row.payment_start_date).toLocaleDateString('fr-FR') : '-'}</td>
-                          <td className="px-3 py-2 text-slate-700 dark:text-zinc-300">{row.abonnement || '-'}</td>
+                          <td className="px-3 py-2 text-slate-700 dark:text-zinc-300">{row.abonnement_name || planNameById[String(row.abonnement || '')] || row.abonnement || '-'}</td>
                           <td className="px-3 py-2 text-right text-slate-700 dark:text-zinc-300">{Number(row.payment_amount || 0).toFixed(2)} $</td>
                           <td className="px-3 py-2 text-slate-500 dark:text-zinc-400">{row.payment_status || '-'}</td>
                         </tr>
@@ -775,7 +797,7 @@ export default function SettingsPage() {
           </div>
           <div>
             <h2 className="text-xl font-semibold">Recharger des crédits</h2>
-            <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">1 EUR = {CREDIT_RATE} {t("abonnement.creditRate","crédits · solde actuel ")}: <span className="text-white font-medium">{credits.toLocaleString()} cr</span></p>
+            <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">1 EUR = {CREDIT_RATE} {t("abonnement.creditRate","crédits · solde actuel ")}: <span className="text-white font-medium">{credits.toLocaleString()} / {Number(creditMax || 0).toLocaleString()} cr</span></p>
           </div>
         </div>
 

@@ -206,24 +206,30 @@ async def _reserve_caption_storage_or_raise(user_id: str, required_gb: float) ->
     if required_gb <= 0:
         return ""
     user_data = await supabase_get_user_data(user_id)
-    available_gb = float((user_data or {}).get("stockage") or 0.0)
-    if required_gb <= available_gb:
+    remaining_gb = float((user_data or {}).get("stockage") or 0.0)
+    storage_max_gb = float((user_data or {}).get("stockage_max") or max(remaining_gb, 0.0))
+    if required_gb <= remaining_gb:
         return ""
 
-    if available_gb <= 0:
+    if storage_max_gb <= 0:
         raise HTTPException(status_code=400, detail="Stockage insuffisant pour generer des captions.")
 
-    overage_gb = required_gb - available_gb
-    overage_pct = (overage_gb / available_gb) * 100.0
-    if overage_pct > STORAGE_OVERAGE_TOLERANCE_PERCENT:
+    projected_remaining_gb = remaining_gb - required_gb
+    allowed_negative_gb = storage_max_gb * (STORAGE_OVERAGE_TOLERANCE_PERCENT / 100.0)
+    min_remaining_gb = -allowed_negative_gb
+
+    if projected_remaining_gb < min_remaining_gb:
+        projected_overage_pct = abs(projected_remaining_gb) / storage_max_gb * 100.0
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Stockage insuffisant pour captions. Depassement de {overage_pct:.2f}% "
+                f"Stockage insuffisant pour captions. Depassement de {projected_overage_pct:.2f}% "
                 f"(max autorise {STORAGE_OVERAGE_TOLERANCE_PERCENT:.2f}%)."
             ),
         )
-    return f"Depassement de stockage autorise ({overage_pct:.2f}%)."
+
+    projected_overage_pct = abs(projected_remaining_gb) / storage_max_gb * 100.0
+    return f"Depassement de stockage autorise ({projected_overage_pct:.2f}%)."
 
 
 async def _debit_caption_storage(user_id: str, used_gb: float, operation_id: str) -> None:

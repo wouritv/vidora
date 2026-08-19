@@ -54,6 +54,7 @@ from supabase_request import (
     get_user_data_history as supabase_get_user_data_history,
     get_latest_user_paid_subscription as supabase_get_latest_user_paid_subscription,
     update_souscription_row as supabase_update_souscription_row,
+    list_user_souscriptions as supabase_list_user_souscriptions,
 )
 from billing import (
     usd_to_credits,
@@ -109,6 +110,7 @@ STRIPE_CURRENCY = os.environ.get("STRIPE_CURRENCY", "eur").lower()
 STRIPE_SUCCESS_URL = os.environ.get("STRIPE_SUCCESS_URL", "")
 STRIPE_CANCEL_URL = os.environ.get("STRIPE_CANCEL_URL", "")
 STORAGE_RETENTION_PERIODE_DAYS = max(0, int(os.environ.get("STORAGE_RETENTION_PERIODE", "7") or "7"))
+STORAGE_OVERAGE_TOLERANCE_PERCENT = max(0.0, float(os.environ.get("STORAGE_OVERAGE_TOLERANCE_PERCENT", "10") or "10"))
 PLATFORM_CONFIG = {
     "linkedin": {
         "auth_url": "https://www.linkedin.com/oauth/v2/authorization",
@@ -3509,6 +3511,7 @@ async def _handle_credit_purchase(ctx: dict) -> dict:
     await supabase_upsert_user_data_credits(
         user_id=ctx["user_id"],
         credit_delta=credits_to_add,
+        update_credit_max=True,
     )
     await supabase_insert_user_data_history(
         user_id=ctx["user_id"],
@@ -3535,10 +3538,13 @@ async def _allocate_plan_resources(user_id: str, abonnement: str, payment_refere
     plan_credit = float(plan.get("credit") or 0)
     plan_storage = float(plan.get("stockage") or 0)
 
-    await supabase_upsert_user_data_credits(
+    # A new/changed plan resets monthly allowances and their maxima to the plan limits.
+    await supabase_set_user_data_balance(
         user_id=user_id,
-        credit_delta=plan_credit,
-        storage_delta=plan_storage,
+        credit=plan_credit,
+        storage=plan_storage,
+        credit_max=plan_credit,
+        storage_max=plan_storage,
     )
     await supabase_insert_user_data_history(
         user_id=user_id,
@@ -3631,7 +3637,53 @@ async def get_current_souscription(request: Request) -> Optional[Dict[str, Any]]
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     await _enforce_subscription_retention_policy(user_id)
     subscription = await get_user_abonnement(user_id)
+    if not subscription:
+        return None
+
+    abonnement_id = str(subscription.get("abonnement") or "").strip()
+    if abonnement_id:
+        plan = await supabase_get_abonnement(abonnement_id)
+        if plan:
+            subscription = {
+                **subscription,
+                "abonnement_name": plan.get("name") or abonnement_id,
+                "abonnement_credit": float(plan.get("credit") or 0.0),
+                "abonnement_stockage": float(plan.get("stockage") or 0.0),
+            }
     return subscription
+
+
+@app.get("/api/souscription/history")
+async def get_souscription_history(request: Request, limit: int = Query(50, ge=1, le=200)):
+    """Return subscription history only (excluding one-off credit purchases)."""
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    rows = await supabase_list_user_souscriptions(user_id, limit=limit)
+    plans = await supabase_list_abonnements()
+    plan_name_by_id = {
+        str(plan.get("id")): str(plan.get("name") or "")
+        for plan in (plans or [])
+        if plan.get("id")
+    }
+
+    filtered: List[Dict[str, Any]] = []
+    for row in rows:
+        payment_mode = str(row.get("payment_mode") or "")
+        if payment_mode == "stripe_credits":
+            continue
+        abonnement_id = str(row.get("abonnement") or "").strip()
+        filtered.append(
+            {
+                **row,
+                "abonnement_name": plan_name_by_id.get(abonnement_id) or abonnement_id or "-",
+            }
+        )
+
+    return {"items": filtered}
 
 
 # ---------------------------------------------------------------------------
@@ -3654,6 +3706,9 @@ async def get_user_credits(request: Request):
         return {
             "credit":   0.0,
             "stockage": 0.0,
+            "credit_max": 0.0,
+            "stockage_max": 0.0,
+            "storage_overage_tolerance_percent": STORAGE_OVERAGE_TOLERANCE_PERCENT,
             "has_credits": False,
             "abo_costs": {
                 "credit":  0.0,
@@ -3666,8 +3721,10 @@ async def get_user_credits(request: Request):
             },
         }
 
-    credit  = float(data.get("credit",   0))
-    storage = float(data.get("stockage", 0))
+    credit = float(data.get("credit", 0) or 0.0)
+    storage = float(data.get("stockage", 0) or 0.0)
+    credit_max = float(data.get("credit_max", credit) or 0.0)
+    storage_max = float(data.get("stockage_max", max(storage, 0.0)) or 0.0)
 
     abonnement = await get_user_abonnement(user_id)
     if not abonnement:
@@ -3684,6 +3741,9 @@ async def get_user_credits(request: Request):
     return {
         "credit":   credit,
         "stockage": storage,
+        "credit_max": credit_max,
+        "stockage_max": storage_max,
+        "storage_overage_tolerance_percent": STORAGE_OVERAGE_TOLERANCE_PERCENT,
         "has_credits": credit > 0,
         "abo_costs": abo_costs,
         "default_costs": {

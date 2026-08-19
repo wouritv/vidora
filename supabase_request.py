@@ -597,18 +597,39 @@ async def upsert_user_data_credits(
     user_id: str,
     credit_delta: float,
     storage_delta: float = 0.0,
+	update_credit_max: bool = False,
+	update_stockage_max: bool = False,
 ) -> Dict[str, Any]:
     client = await get_client()
     existing = await get_user_data(user_id)
 
-    if existing:
-        new_credit  = int(max(0.0, float(existing.get("credit", 0)) + float(credit_delta)))
-        new_storage = float(existing.get("stockage", 0)) + float(storage_delta)
+	if existing:
+		current_credit = float(existing.get("credit", 0) or 0.0)
+		current_storage = float(existing.get("stockage", 0) or 0.0)
+		current_credit_max = float(existing.get("credit_max", current_credit) or 0.0)
+		current_stockage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
+
+		new_credit = int(max(0.0, current_credit + float(credit_delta)))
+		new_storage = float(current_storage + float(storage_delta))
+		new_credit_max = max(0.0, current_credit_max)
+		new_stockage_max = max(0.0, current_stockage_max)
+
+		if update_credit_max:
+			# Credit top-ups and subscription allocations can redefine the user's ceiling.
+			new_credit_max = max(0.0, float(new_credit))
+		if update_stockage_max:
+			new_stockage_max = max(0.0, float(new_storage))
+
+		if new_credit > new_credit_max:
+			new_credit_max = float(new_credit)
+
         response = (
             await client.table(SUPABASE_USER_DATA_TABLE)
             .update({
                 "credit":     new_credit,
                 "stockage":   new_storage,
+				"credit_max": new_credit_max,
+				"stockage_max": new_stockage_max,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("user_id", user_id)
@@ -617,10 +638,14 @@ async def upsert_user_data_credits(
         rows = response.data or []
         return rows[0] if rows else existing
     else:
+		initial_credit = int(max(0.0, float(credit_delta)))
+		initial_storage = max(0.0, float(storage_delta))
         payload = {
             "user_id":  user_id,
-            "credit":   int(max(0.0, float(credit_delta))),
-            "stockage": max(0.0, float(storage_delta)),
+			"credit":   initial_credit,
+			"stockage": initial_storage,
+			"credit_max": float(initial_credit),
+			"stockage_max": float(initial_storage),
         }
         response = await client.table(SUPABASE_USER_DATA_TABLE).insert(payload).execute()
         rows = response.data or []
@@ -631,25 +656,41 @@ async def set_user_data_balance(
 	user_id: str,
 	credit: float,
 	storage: float,
+	credit_max: Optional[float] = None,
+	storage_max: Optional[float] = None,
 ) -> Dict[str, Any]:
 	"""Set absolute credit/storage values for a user balance row."""
 	if not user_id:
-		return {"user_id": "", "credit": 0.0, "stockage": 0.0}
+		return {"user_id": "", "credit": 0.0, "stockage": 0.0, "credit_max": 0.0, "stockage_max": 0.0}
 	client = await get_client()
 	now_iso = datetime.now(timezone.utc).isoformat()
+	clamped_credit = max(0.0, float(credit or 0.0))
+	clamped_storage = float(storage or 0.0)
 	payload = {
 		"user_id": user_id,
-		"credit": max(0.0, float(credit or 0.0)),
-		"stockage": max(0.0, float(storage or 0.0)),
+		"credit": clamped_credit,
+		"stockage": clamped_storage,
+		"credit_max": max(0.0, float(credit_max if credit_max is not None else clamped_credit)),
+		"stockage_max": max(0.0, float(storage_max if storage_max is not None else max(clamped_storage, 0.0))),
 		"updated_at": now_iso,
 	}
 	existing = await get_user_data(user_id)
 	if existing:
+		next_credit_max = payload["credit_max"]
+		next_storage_max = payload["stockage_max"]
+		if credit_max is None:
+			next_credit_max = max(0.0, float(existing.get("credit_max", existing.get("credit", 0.0)) or 0.0))
+		if storage_max is None:
+			next_storage_max = max(0.0, float(existing.get("stockage_max", max(existing.get("stockage", 0.0), 0.0)) or 0.0))
+		if clamped_credit > next_credit_max:
+			next_credit_max = clamped_credit
 		response = (
 			await client.table(SUPABASE_USER_DATA_TABLE)
 			.update({
 				"credit": payload["credit"],
 				"stockage": payload["stockage"],
+				"credit_max": next_credit_max,
+				"stockage_max": next_storage_max,
 				"updated_at": now_iso,
 			})
 			.eq("user_id", user_id)

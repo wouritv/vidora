@@ -38,7 +38,7 @@ const iconMap = {
 export default function AbonnementPage() {
     const { t } = useTranslation();
     const { user } = useAuth();
-    const { credits, refresh: refreshCredits } = useUserCredits();
+    const { credits, creditMax, refresh: refreshCredits } = useUserCredits();
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -52,6 +52,7 @@ export default function AbonnementPage() {
     const [buyError, setBuyError] = useState("");
     const CREDIT_RATE = 100;
     const creditsToAdd = Math.round(buyAmount * CREDIT_RATE);
+    const currentPlan = items.find((plan) => String(plan.id) === String(souscription?.abonnement || "")) || null;
 
     useEffect(() => {
         const params = new URLSearchParams(globalThis.location.search || "");
@@ -187,6 +188,11 @@ export default function AbonnementPage() {
             <div className="mb-8">
                 <h1 className="text-3xl font-bold mb-2">{t("abonnement.title","Abonnement")}</h1>
                 <p className="text-slate-500 dark:text-zinc-400 text-sm">{t("abonnement.subtitle","Découvrez nos formules d'abonnements et choisissez celle qui vous convient")}</p>
+                {currentPlan ? (
+                    <p className="mt-2 text-xs text-slate-500 dark:text-zinc-400">
+                        {t("settings.currentPlan", "Current plan")}: <span className="text-white font-medium">{currentPlan.name}</span>
+                    </p>
+                ) : null}
                 {paymentMessage ? <p className="mt-3 text-sm text-green-300">{paymentMessage}</p> : null}
             </div>
 
@@ -302,7 +308,7 @@ export default function AbonnementPage() {
                         <h2 className="text-xl font-semibold">{t("abonnement.fillCredit","Recharger des crédits")}</h2>
                         <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">
                             1 EUR = {CREDIT_RATE} {t("abonnement.creditRate","crédits · solde actuel ")} :{" "}
-                            <span className="text-white font-semibold">{credits.toLocaleString()} cr</span>
+                            <span className="text-white font-semibold">{credits.toLocaleString()} / {Number(creditMax || 0).toLocaleString()} cr</span>
                         </p>
                     </div>
                 </div>
