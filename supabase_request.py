@@ -698,26 +698,26 @@ async def deduct_user_credits(
 
 
 async def insert_user_data_history(
-	user_id: str,
-	credit: float,
-	storage: float,
-	operation: str,        # 'input' or 'output'
-	operation_type: str,   # 'subscription' | 'reels' | 'captions' | 'publications' | 'credit_purchase'
-	operation_id: str = "",
+    user_id: str,
+    credit: float,
+    storage: float,
+    operation: str,        # 'input' or 'output'
+    operation_type: str,   # 'subscription' | 'reels' | 'captions' | 'publications' | 'credit_purchase'
+    operation_id: str = "",
 ) -> Dict[str, Any]:
-	"""Append an entry to the user credit/storage history table."""
-	client = await get_client()
-	payload = {
-		"user_id":        user_id,
-		"credit":         float(credit),
-		"storage":        float(storage),
-		"operation":      operation,
-		"operation_type": operation_type,
-		"operation_id":   operation_id or "",
-	}
-	response = await client.table(SUPABASE_USER_DATA_HISTORY_TABLE).insert(payload).execute()
-	rows = response.data or []
-	return rows[0] if rows else payload
+    """Append an entry to the user credit/storage history table."""
+    client = await get_client()
+    payload = {
+        "user_id":        user_id,
+        "credit":         int(credit),      # ✅ colonne integer côté Supabase
+        "storage":        float(storage),   # reste float/numeric
+        "operation":      operation,
+        "operation_type": operation_type,
+        "operation_id":   operation_id or "",
+    }
+    response = await client.table(SUPABASE_USER_DATA_HISTORY_TABLE).insert(payload).execute()
+    rows = response.data or []
+    return rows[0] if rows else payload
 
 
 async def get_user_data_history(
