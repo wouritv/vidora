@@ -53,7 +53,10 @@
     "terms": "Conditions & Confidentialité",
     "generateClips": "Générer des clips",
     "processing": "Traitement de la vidéo...",
-    "insufficientCredits": "Crédits insuffisants"
+    "insufficientCredits": "Crédits insuffisants",
+    "captions_title": "Captions générés",
+    "captions_subtitle": "Retrouve tes vidéos avec captions IA, adaptés à la plateforme cible, partageables et téléchargeables.",
+    "captions_emptyLabel": "Aucune vidéo IA captions trouvée."
   },
   "settings": {
     "title": "Paramètres",
@@ -122,7 +125,7 @@
   },
   "reels": {
     "title": "Reels générés",
-    "subtitle": "Recherche, filtre, suppression, partage et téléchargement.",
+    "subtitle": "Upload une video et laisse le systeme boosté à l'IA extraire les moments réels.",
     "searchPlaceholder": "Rechercher par titre ou description...",
     "allStatuses": "Tous les statuts",
     "noneFound": "Aucun reel trouvé.",
@@ -317,7 +320,7 @@
   },
   "social": {
     "socialPublications": "Publications sociales",
-    "realTimeTracking": "Suivi en temps réel de vos publications",
+    "realTimeTracking": "Suivi en temps réel de tes publications",
     "loadPost": "Chargement des publications...",
     "noPostFound": "Aucune publication trouvée.",
     "postFailed": "Échec de la publication",
@@ -359,6 +362,12 @@
     "fillCredit": "Recharger des crédits",
     "creditRate": "crédits · solde actuel ",
     "redirection": "Redirection...",
-    "payer": "Payer"
+    "payer": "Payer",
+    "titleOffre": "Toutes nos offres incluent :",
+    "offre1": "Génération de réels",
+    "offre2": "Génération de captions",
+    "offre3": "Publication et suivi sur les réseaux sociaux",
+    "offre4": "Génération des sous titres et hooks viraux",
+    "offre5": "Traduction de texte et sous-titres"
   }
 }

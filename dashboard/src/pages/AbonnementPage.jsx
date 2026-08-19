@@ -271,6 +271,27 @@ export default function AbonnementPage() {
                 })}
             </div>
 
+            {/* Included in all offers */}
+            <div className="mt-10 rounded-2xl border border-blue-500/20 bg-blue-500/5 p-6">
+                <h2 className="text-xl font-semibold mb-4 text-slate-800 dark:text-zinc-100">
+                    {t("abonnement.titleOffre","Toutes nos offres contiennent")}
+                </h2>
+                <ul className="flex flex-col gap-3">
+                    {[
+                        t("abonnement.offre1", "Génération de réels"),
+                        t("abonnement.offre2", "Génération de captions"),
+                        t("abonnement.offre3", "Publication et suivi sur les réseaux sociaux"),
+                        t("abonnement.offre4", "Génération des sous titres et hooks viraux"),
+                        t("abonnement.offre5", "Traduction de texte et sous-titres"),
+                    ].map((item) => (
+                        <li key={item} className="flex items-start gap-2 text-sm text-slate-700 dark:text-zinc-300">
+                            <Check size={16} className="text-blue-400 mt-0.5 shrink-0" />
+                            <span>{item}</span>
+                        </li>
+                    ))}
+                </ul>
+            </div>
+
             {/* Buy additional credits */}
             <div className="mt-10 rounded-2xl border border-yellow-500/20 bg-yellow-500/5 p-6">
                 <div className="flex items-center gap-3 mb-4">
@@ -348,4 +369,3 @@ export default function AbonnementPage() {
         </div>
     );
 }
-

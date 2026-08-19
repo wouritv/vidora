@@ -53,7 +53,10 @@
     "terms": "Terms & Privacy",
     "generateClips": "Generate clips",
     "processing": "Processing video...",
-    "insufficientCredits": "Insufficient credits"
+    "insufficientCredits": "Insufficient credits",
+    "captions_title": "Generated captions",
+    "captions_subtitle": "Find your videos with AI-generated captions—tailored to the target platform, shareable, and downloadable.",
+    "captions_emptyLabel": "No videos with AI captions found."
   },
   "settings": {
     "title": "Settings",
@@ -122,7 +125,7 @@
   },
   "reels": {
     "title": "Generated Reels",
-    "subtitle": "Search, filter, delete, share, and download.",
+    "subtitle": "Upload a video and let the AI-powered system extract the real moments.",
     "searchPlaceholder": "Search by title or description...",
     "allStatuses": "All statuses",
     "noneFound": "No reels found.",
@@ -359,6 +362,12 @@
     "fillCredit": "Top up credits",
     "creditRate": "credits · current balance ",
     "redirection": "Redirecting...",
-    "payer": "Pay"
+    "payer": "Pay",
+    "titleOffre": "All our packages include:",
+    "offre1": "Reels generation",
+    "offre2": "Caption generation",
+    "offre3": "Social media posting and monitoring",
+    "offre4": "Subtitle and viral hook generation",
+    "offre5": "Text and subtitle translation"
   }
 }

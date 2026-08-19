@@ -68,6 +68,17 @@ from billing import (
 )
 from job_manager import JobManager, JobType, calc_elapsed_seconds
 from pipelines import ReelProcessingPipeline
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+import logging
+import os
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "no-reply@tonsite.com")
+SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID = os.getenv("SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID")
 
 load_dotenv()
 
@@ -3265,9 +3276,190 @@ async def create_stripe_checkout_session(request: Request, payload: StripeChecko
     return {"checkout_url": session.url, "session_id": session.id}
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _verify_and_parse_event(payload: bytes, signature: str) -> stripe.Event:
+    """Validate the Stripe signature and return the parsed event."""
+    try:
+        return stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature") from exc
+
+
+def _extract_session_context(session: "stripe.checkout.Session") -> dict:
+    """Pull out everything the handlers need from a checkout session, as plain Python types."""
+    metadata = session.metadata.to_dict() if session.metadata else {}
+    created_ts = session.created
+
+    return {
+        "metadata": metadata,
+        "user_id": metadata.get("userid"),
+        "payment_mode": metadata.get("payment_mode", "stripe"),
+        "amount_total": (session.amount_total or 0) / 100,
+        "payment_reference": session.payment_intent or session.id or "",
+        "payment_date": (
+            datetime.fromtimestamp(int(created_ts), tz=timezone.utc)
+            if created_ts
+            else datetime.now(timezone.utc)
+        ),
+        "session_id": session.id,
+        "customer_email": (
+            (session.customer_details.email if session.customer_details else None)
+            or session.customer_email
+        ),
+    }
+
+
+def _send_payment_confirmation_email(to_email: str, amount_total: float, label: str) -> None:
+    """Send a payment confirmation email via SendGrid. Never raises — a failed email
+    must not fail the webhook (Stripe would retry it forever otherwise)."""
+    if not to_email:
+        logger.warning("Skipping payment confirmation email: no customer email on session")
+        return
+    if not SENDGRID_API_KEY:
+        logger.warning("Skipping payment confirmation email: SENDGRID_API_KEY is not configured")
+        return
+
+    message = Mail(
+        from_email=SENDGRID_FROM_EMAIL,
+        to_emails=to_email,
+        subject="Confirmation de votre paiement",
+        html_content=(
+            f"<p>Bonjour,</p>"
+            f"<p>Nous confirmons la réception de votre paiement de "
+            f"<strong>{amount_total:.2f} €</strong> pour : {label}.</p>"
+            f"<p>Merci pour votre confiance !</p>"
+        ),
+    )
+    if SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID:
+        message.template_id = SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID
+        message.dynamic_template_data = {
+            "amount_total": f"{amount_total:.2f}",
+            "label": label,
+        }
+
+    try:
+        SendGridAPIClient(SENDGRID_API_KEY).send(message)
+    except Exception:
+        # Log and swallow: email failure should never turn a successful payment
+        # into a 500, which would make Stripe retry the whole webhook.
+        logger.exception("Failed to send payment confirmation email to %s", to_email)
+
+
+async def _handle_credit_purchase(ctx: dict) -> dict:
+    """Handle a one-off credit purchase (payment_mode == 'stripe_credits')."""
+    if await supabase_get_souscription_by_reference(ctx["payment_reference"]):
+        return {"received": True, "duplicate": True}
+
+    policy_state = await _enforce_subscription_retention_policy(ctx["user_id"])
+    if policy_state.get("state") != "active":
+        return {
+            "received": True,
+            "ignored": "no_active_subscription",
+            "policy_state": policy_state.get("state"),
+        }
+
+    credits_to_add = float(ctx["metadata"].get("credits_to_add", 0))
+    if credits_to_add <= 0:
+        credits_to_add = usd_to_credits(ctx["amount_total"])
+
+    await supabase_insert_souscription(
+        user_id=ctx["user_id"],
+        abonnement=None,
+        payment_mode="stripe_credits",
+        payment_amount=ctx["amount_total"],
+        payment_reference=ctx["payment_reference"],
+        payment_status="completed",
+        payment_comment=f"Credit purchase {credits_to_add} credits",
+        payment_date=ctx["payment_date"],
+    )
+    await supabase_upsert_user_data_credits(
+        user_id=ctx["user_id"],
+        credit_delta=credits_to_add,
+    )
+    await supabase_insert_user_data_history(
+        user_id=ctx["user_id"],
+        credit=credits_to_add,
+        storage=0.0,
+        operation="input",
+        operation_type="credit_purchase",
+        operation_id=ctx["payment_reference"],
+    )
+    _send_payment_confirmation_email(
+        to_email=ctx["customer_email"],
+        amount_total=ctx["amount_total"],
+        label=f"{credits_to_add:.0f} crédits",
+    )
+    return {"received": True, "credits_added": credits_to_add}
+
+
+async def _allocate_plan_resources(user_id: str, abonnement: str, payment_reference: str, souscription_id: str) -> None:
+    """Credit the user's account with whatever the plan grants (credits + storage)."""
+    plan = await supabase_get_abonnement(abonnement)
+    if not plan:
+        return
+
+    plan_credit = float(plan.get("credit") or 0)
+    plan_storage = float(plan.get("stockage") or 0)
+
+    await supabase_upsert_user_data_credits(
+        user_id=user_id,
+        credit_delta=plan_credit,
+        storage_delta=plan_storage,
+    )
+    await supabase_insert_user_data_history(
+        user_id=user_id,
+        credit=plan_credit,
+        storage=plan_storage,
+        operation="input",
+        operation_type="subscription",
+        operation_id=souscription_id or payment_reference,
+    )
+
+
+async def _handle_subscription_purchase(ctx: dict) -> dict:
+    """Handle a standard plan subscription checkout."""
+    abonnement = ctx["metadata"].get("abonnement")
+    if not abonnement:
+        raise HTTPException(status_code=400, detail="Missing subscription metadata")
+
+    if await supabase_get_souscription_by_reference(ctx["payment_reference"]):
+        return {"received": True, "duplicate": True}
+
+    new_souscription = await supabase_insert_souscription(
+        user_id=ctx["user_id"],
+        abonnement=abonnement,
+        payment_mode="stripe",
+        payment_amount=ctx["amount_total"],
+        payment_reference=ctx["payment_reference"],
+        payment_status="completed",
+        payment_comment=f"Stripe checkout session {ctx['session_id']}".strip(),
+        payment_date=ctx["payment_date"],
+    )
+
+    await _allocate_plan_resources(
+        user_id=ctx["user_id"],
+        abonnement=abonnement,
+        payment_reference=ctx["payment_reference"],
+        souscription_id=str(new_souscription.get("id") or ctx["payment_reference"]),
+    )
+    _send_payment_confirmation_email(
+        to_email=ctx["customer_email"],
+        amount_total=ctx["amount_total"],
+        label=f"l'abonnement {abonnement}",
+    )
+    return {"received": True}
+
+
+# ---------------------------------------------------------------------------
+# Route
+# ---------------------------------------------------------------------------
+
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
-    """Handle Stripe events and persist subscriptions after successful payment."""
+    """Handle Stripe checkout.session.completed events and persist the result."""
     _require_stripe_ready()
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=503, detail="Stripe webhook secret is not configured")
@@ -3276,124 +3468,20 @@ async def stripe_webhook(request: Request):
 
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
+    event = _verify_and_parse_event(payload, signature)
 
-    try:
-        event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
+    if event.type != "checkout.session.completed":
+        return {"received": True, "ignored": event.type}
 
-    event_type = event.type
-
-    if event_type != "checkout.session.completed":
-        return {"received": True, "ignored": event_type}
-
-    session = event.data.object
-
-    # ✅ conversion explicite en dict Python natif
-    metadata = dict(session.metadata) if session.metadata else {}
-    user_id = metadata.get("userid")
-    payment_mode = metadata.get("payment_mode", "stripe")
-
-    if not user_id:
+    ctx = _extract_session_context(event.data.object)
+    if not ctx["user_id"]:
         raise HTTPException(status_code=400, detail="Missing user_id in metadata")
 
-    amount_total = (session.amount_total or 0) / 100
-    payment_reference = session.payment_intent or session.id or ""
-    created_ts = session.created
-    payment_date = datetime.fromtimestamp(int(created_ts), tz=timezone.utc) if created_ts else datetime.now(timezone.utc)
+    if ctx["payment_mode"] == "stripe_credits":
+        return await _handle_credit_purchase(ctx)
 
-    # -----------------------------------------------------------------------
-    # Credit purchase (not a plan subscription)
-    # -----------------------------------------------------------------------
-    if payment_mode == "stripe_credits":
-        existing_purchase = await supabase_get_souscription_by_reference(payment_reference)
-        if existing_purchase:
-            return {"received": True, "duplicate": True}
+    return await _handle_subscription_purchase(ctx)
 
-        policy_state = await _enforce_subscription_retention_policy(user_id)
-        if policy_state.get("state") != "active":
-            return {
-                "received": True,
-                "ignored": "no_active_subscription",
-                "policy_state": policy_state.get("state"),
-            }
-
-        credits_to_add = float(metadata.get("credits_to_add", 0))
-        if credits_to_add <= 0:
-            credits_to_add = usd_to_credits(amount_total)
-
-        # Record as a souscription row for idempotency / audit
-        await supabase_insert_souscription(
-            user_id=user_id,
-            abonnement=null,
-            payment_mode="stripe_credits",
-            payment_amount=amount_total,
-            payment_reference=payment_reference,
-            payment_status="completed",
-            payment_comment=f"Credit purchase {credits_to_add} credits",
-            payment_date=payment_date,
-        )
-
-        await supabase_upsert_user_data_credits(
-            user_id=user_id,
-            credit_delta=credits_to_add,
-        )
-        await supabase_insert_user_data_history(
-            user_id=user_id,
-            credit=credits_to_add,
-            storage=0.0,
-            operation="input",
-            operation_type="credit_purchase",
-            operation_id=payment_reference,
-        )
-        return {"received": True, "credits_added": credits_to_add}
-
-    # -----------------------------------------------------------------------
-    # Standard plan subscription
-    # -----------------------------------------------------------------------
-    abonnement = metadata.get("abonnement")
-    if not abonnement:
-        raise HTTPException(status_code=400, detail="Missing subscription metadata")
-
-    comment = f"Stripe checkout session {session.id}".strip()
-
-    existing_subscription = await supabase_get_souscription_by_reference(payment_reference)
-    if existing_subscription:
-        return {"received": True, "duplicate": True}
-
-    new_souscription = await supabase_insert_souscription(
-        user_id=user_id,
-        abonnement=abonnement,
-        payment_mode="stripe",
-        payment_amount=amount_total,
-        payment_reference=payment_reference,
-        payment_status="completed",
-        payment_comment=comment,
-        payment_date=payment_date,
-    )
-
-    # --- Credit & storage allocation after successful subscription ---
-    plan = await supabase_get_abonnement(abonnement)
-    if plan:
-        plan_credit  = float(plan.get("credit")   or 0)
-        plan_storage = float(plan.get("stockage")  or 0)
-        souscription_id = str(new_souscription.get("id") or payment_reference)
-
-        await supabase_upsert_user_data_credits(
-            user_id=user_id,
-            credit_delta=plan_credit,
-            storage_delta=plan_storage,
-        )
-        await supabase_insert_user_data_history(
-            user_id=user_id,
-            credit=plan_credit,
-            storage=plan_storage,
-            operation="input",
-            operation_type="subscription",
-            operation_id=souscription_id,
-        )
-
-    return {"received": True}
 
 @app.get("/api/abonnements")
 async def list_abonnements():
