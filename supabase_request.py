@@ -336,25 +336,25 @@ async def get_souscription_by_reference(payment_reference: str) -> Optional[Dict
 	return rows[0]
 
 async def get_user_abonnement(user_id: str) -> Optional[Dict[str, Any]]:
-    """Récupère l'abonnement actif d'un utilisateur."""
-    client = await get_client()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    response = (
-        await client.table(SUPABASE_SOUSCRIPTION_TABLE)
-        .select(SOUSCRIPTION_COLUMNS)
-        .eq("userid", user_id)
+	"""Récupère l'abonnement actif d'un utilisateur."""
+	client = await get_client()
+	now_iso = datetime.now(timezone.utc).isoformat()
+	response = (
+		await client.table(SUPABASE_SOUSCRIPTION_TABLE)
+		.select(SOUSCRIPTION_COLUMNS)
+		.eq("userid", user_id)
 		.eq("payment_status", "completed")
 		.neq("payment_mode", "stripe_credits")
 		.not_.is_("abonnement", "null")
 		.is_("account_disabled_at", "null")
-        .gte("payment_end_date", now_iso)
-        .limit(1)
-        .execute()
-    )
+		.gte("payment_end_date", now_iso)
+		.limit(1)
+		.execute()
+	)
 
 	rows = response.data
-    if not rows:
-        return None
+	if not rows:
+		return None
 	row = dict(rows[0])
 
 	# Resolve plan priority from the abonnement table; default to 1 when unknown.
