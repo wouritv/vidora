@@ -44,6 +44,7 @@ STORAGE_OVERAGE_TOLERANCE_PERCENT = float(os.environ.get("STORAGE_OVERAGE_TOLERA
 
 caption_sessions: Dict[str, Dict[str, Any]] = {}
 caption_job_manager = JobManager(queue_name="captions")
+DEFAULT_JOB_PRIORITY = 1
 
 PLATFORM_GUIDES: Dict[str, str] = {
     "tiktok": "Punchy, short, energetic phrasing with strong hooks.",
@@ -178,6 +179,26 @@ async def _ensure_caption_subscription_active(user_id: str) -> None:
         raise HTTPException(status_code=403, detail="Compte desactive. Reactivez votre abonnement.")
     if active.get("paused_at"):
         raise HTTPException(status_code=403, detail="Abonnement en pause. Reprenez votre abonnement pour continuer.")
+
+
+def _clamp_job_priority(value: Any) -> int:
+    try:
+        raw = int(value)
+    except Exception:
+        raw = DEFAULT_JOB_PRIORITY
+    return max(1, min(3, raw))
+
+
+async def _resolve_caption_job_priority(user_id: str) -> int:
+    if not user_id or not is_supabase_configured():
+        return DEFAULT_JOB_PRIORITY
+    try:
+        active = await get_user_abonnement(user_id)
+        if not active:
+            return DEFAULT_JOB_PRIORITY
+        return _clamp_job_priority(active.get("priorite"))
+    except Exception:
+        return DEFAULT_JOB_PRIORITY
 
 
 async def _reserve_caption_storage_or_raise(user_id: str, required_gb: float) -> str:
@@ -503,6 +524,7 @@ async def captions_analyze(
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
 
     await _ensure_caption_subscription_active(user_id)
+    job_priority = await _resolve_caption_job_priority(user_id)
 
     # --- Credit pre-check ---
     if is_supabase_configured():
@@ -528,6 +550,7 @@ async def captions_analyze(
             "remove_silences": bool(req.remove_silences),
         },
         max_attempts=1,
+        priority=job_priority,
     )
     job_id = job_row.get("id")
     pipeline = CaptionProcessingPipeline(caption_job_manager, job_id)
@@ -601,6 +624,7 @@ async def captions_render(request: Request, req: RenderRequest):
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
 
     await _ensure_caption_subscription_active(user_id)
+    job_priority = await _resolve_caption_job_priority(user_id)
 
     job_row = await caption_job_manager.create_job(
         user_id=user_id,
@@ -611,6 +635,7 @@ async def captions_render(request: Request, req: RenderRequest):
             "platform": req.platform,
         },
         max_attempts=1,
+        priority=job_priority,
     )
     job_id = job_row.get("id")
     pipeline = CaptionProcessingPipeline(caption_job_manager, job_id)

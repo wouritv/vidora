@@ -1,0 +1,7 @@
+## Update
+- la table abonnement dispose a present d'un champ de type int "priorite" qui va de 1 a 3, 1 etant la plus basse et 3 la plus haute
+- l'executation des taches dans la work queue se fait maintenant en fonction de la priorite, les taches avec une priorite plus haute sont executees avant celles avec une priorite plus basse
+- Des lors qu'un user lance une tache, une priorité dois lui être attribuée en accord avec la priorite de son abonnement, par defaut la priorite est de 1 si l'utilisateur n'a pas d'abonnement
+- Si une tache d'une priorite plus basse est en cours d'execution et qu'une tache d'une priorite plus haute est ajoutée a la work queue, la tache en cours d'execution doit etre interrompue et mise en pause pour laisser la tache de priorite plus haute s'executer. La tache interrompue sera remise dans la work queue pour etre executee plus tard.
+- au niveau de l'interface utilisateur, il ne dois pas y avoir de changement visible, la priorite est un parametre interne qui ne doit pas etre modifie par l'utilisateur. Sa tache mettra juste un peu plus de temps a s'executer si elle est interrompue par une tache de priorite plus haute.
+- il faudrait eventuellement mettre a jour les tables de jobs (jobs et publish_jobs) pour y ajouter un champ de priorite afin de pouvoir suivre l'historique des priorites des taches executees. (propose le script a ajoute dans supabase pour ajouter le champ de priorite dans les tables jobs et publish_jobs)

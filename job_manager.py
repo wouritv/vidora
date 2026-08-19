@@ -44,6 +44,7 @@ class JobManager:
         max_attempts: int = 2,
         reserved_quota: float = 0.0,
         estimated_cost_usd: float = 0.0,
+        priority: int = 1,
     ) -> Dict[str, Any]:
         job_id = job_id or str(uuid.uuid4())
         row = await create_job_record(
@@ -57,10 +58,18 @@ class JobManager:
             max_attempts=max_attempts,
             reserved_quota=reserved_quota,
             estimated_cost_usd=estimated_cost_usd,
+            priority=max(1, min(3, int(priority or 1))),
         )
         if runtime_data:
-            self.runtime_jobs[job_id] = runtime_data
-        await append_job_log(job_id, "INFO", "Job created", {"job_type": job_type})
+            runtime_copy = dict(runtime_data)
+            runtime_copy["priority"] = max(1, min(3, int(priority or 1)))
+            self.runtime_jobs[job_id] = runtime_copy
+        await append_job_log(
+            job_id,
+            "INFO",
+            "Job created",
+            {"job_type": job_type, "priority": max(1, min(3, int(priority or 1)))},
+        )
         return row
 
     async def enqueue_job(self, job_id: str) -> None:
@@ -212,6 +221,7 @@ class JobManager:
             "logs": logs,
             "attempts": row.get("attempts"),
             "max_attempts": row.get("max_attempts"),
+            "priority": row.get("priority"),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
         }

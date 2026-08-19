@@ -9,6 +9,7 @@ import shutil
 import glob
 import time
 import asyncio
+import itertools
 import secrets
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -154,13 +155,19 @@ if stripe and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
 # Application State
-job_queue = asyncio.Queue()
+job_queue: asyncio.PriorityQueue[tuple[int, int, str]] = asyncio.PriorityQueue()
+job_queue_seq = itertools.count()
+JOB_PRIORITY_MIN = 1
+JOB_PRIORITY_MAX = 3
+DEFAULT_JOB_PRIORITY = 1
 jobs: Dict[str, Dict] = {}
 thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
 concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 reel_job_manager = JobManager(queue_name="reels")
+running_reel_jobs: Dict[str, Dict[str, Any]] = {}
+running_reel_jobs_lock = asyncio.Lock()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
@@ -283,6 +290,90 @@ def _parse_iso_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _clamp_job_priority(value: Any) -> int:
+    try:
+        raw = int(value)
+    except Exception:
+        raw = DEFAULT_JOB_PRIORITY
+    return max(JOB_PRIORITY_MIN, min(JOB_PRIORITY_MAX, raw))
+
+
+async def _resolve_user_job_priority(user_id: str) -> int:
+    if not user_id or not is_supabase_configured():
+        return DEFAULT_JOB_PRIORITY
+    try:
+        active = await get_user_abonnement(user_id)
+        if not active:
+            return DEFAULT_JOB_PRIORITY
+        return _clamp_job_priority(active.get("priorite"))
+    except Exception:
+        return DEFAULT_JOB_PRIORITY
+
+
+async def _maybe_preempt_lower_priority_running_job(incoming_priority: int, incoming_job_id: str) -> None:
+    incoming_priority = _clamp_job_priority(incoming_priority)
+    async with running_reel_jobs_lock:
+        if not running_reel_jobs:
+            return
+
+        if len(running_reel_jobs) < MAX_CONCURRENT_JOBS:
+            return
+
+        candidate_job_id = ""
+        candidate_priority = JOB_PRIORITY_MAX
+        candidate_started_at = float("inf")
+        for running_job_id, ctx in running_reel_jobs.items():
+            running_priority = _clamp_job_priority(ctx.get("priority", DEFAULT_JOB_PRIORITY))
+            started_at = float(ctx.get("started_at", 0.0) or 0.0)
+            if (
+                running_priority < candidate_priority
+                or (running_priority == candidate_priority and started_at < candidate_started_at)
+            ):
+                candidate_job_id = running_job_id
+                candidate_priority = running_priority
+                candidate_started_at = started_at
+
+        if not candidate_job_id or incoming_priority <= candidate_priority:
+            return
+
+        ctx = running_reel_jobs.get(candidate_job_id) or {}
+        ctx["preempt_requested"] = True
+        process = ctx.get("process")
+
+        if candidate_job_id in jobs:
+            jobs[candidate_job_id]["logs"].append(
+                f"Preemption requested by higher-priority job {incoming_job_id} (priority {incoming_priority})."
+            )
+
+        if process and process.poll() is None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+
+
+async def enqueue_reel_job(job_id: str, priority: Optional[int] = None) -> None:
+    runtime_job = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id) or {}
+    final_priority = _clamp_job_priority(
+        priority if priority is not None else runtime_job.get("priority", DEFAULT_JOB_PRIORITY)
+    )
+    runtime_job["priority"] = final_priority
+    if job_id in reel_job_manager.runtime_jobs:
+        reel_job_manager.runtime_jobs[job_id]["priority"] = final_priority
+    if job_id in jobs:
+        jobs[job_id]["priority"] = final_priority
+
+    await _maybe_preempt_lower_priority_running_job(final_priority, job_id)
+    await job_queue.put((-final_priority, next(job_queue_seq), job_id))
+
+
+async def _schedule_reel_retry(job_id: str, delay_seconds: int) -> None:
+    await asyncio.sleep(max(0, int(delay_seconds)))
+    await reel_job_manager.retry_job(job_id)
+    runtime = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id) or {}
+    await enqueue_reel_job(job_id, priority=runtime.get("priority", DEFAULT_JOB_PRIORITY))
 
 
 async def _enforce_subscription_retention_policy(user_id: str) -> Dict[str, Any]:
@@ -770,28 +861,42 @@ async def process_queue(worker_name: str):
     while True:
         try:
             # Wait for a job
-            job_id = await job_queue.get()
-            
+            queue_item = await job_queue.get()
+            _, _, job_id = queue_item
+            runtime_job = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id) or {}
+            job_priority = _clamp_job_priority(runtime_job.get("priority", DEFAULT_JOB_PRIORITY))
+
             # Acquire semaphore slot (waits if max jobs are running)
             await concurrency_semaphore.acquire()
-            print(f"🔄 [{worker_name}] Acquired slot for job: {job_id}")
+            print(f"🔄 [{worker_name}] Acquired slot for job: {job_id} (priority={job_priority})")
 
             # Process in background task to not block the loop (allowing other slots to fill)
-            asyncio.create_task(run_job_wrapper(job_id))
-            
+            asyncio.create_task(run_job_wrapper(job_id, job_priority))
+
         except Exception as e:
             print(f"❌ Queue dispatch error: {e}")
             await asyncio.sleep(1)
 
-async def run_job_wrapper(job_id):
+async def run_job_wrapper(job_id: str, job_priority: int):
     """Wrapper to run job and release semaphore"""
+    execution_ctx: Dict[str, Any] = {
+        "process": None,
+        "preempt_requested": False,
+        "priority": _clamp_job_priority(job_priority),
+        "started_at": time.time(),
+    }
+    async with running_reel_jobs_lock:
+        running_reel_jobs[job_id] = execution_ctx
     try:
         job = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id)
         if job:
-            await run_job(job_id, job)
+            job["priority"] = execution_ctx["priority"]
+            await run_job(job_id, job, execution_ctx=execution_ctx)
     except Exception as e:
          print(f"❌ Job wrapper error {job_id}: {e}")
     finally:
+        async with running_reel_jobs_lock:
+            running_reel_jobs.pop(job_id, None)
         # Always release semaphore and mark queue task done
         concurrency_semaphore.release()
         job_queue.task_done()
@@ -894,7 +999,7 @@ async def proxy_media(request: Request, url: str):
         background=BackgroundTask(_close_proxy_stream, upstream, client),
     )
 
-async def run_job(job_id, job_data):
+async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = None):
     """Executes the subprocess for a specific job."""
     
     cmd = job_data['cmd']
@@ -903,9 +1008,11 @@ async def run_job(job_id, job_data):
     user_id = job_data.get("user_id")
     input_path = job_data.get("input_path")
     pipeline = ReelProcessingPipeline(reel_job_manager, job_id)
+    job_priority = _clamp_job_priority(job_data.get("priority", DEFAULT_JOB_PRIORITY))
     start_ts = time.time()
 
     jobs[job_id]['status'] = 'processing'
+    jobs[job_id]['priority'] = job_priority
     jobs[job_id]['logs'].append("Job started by worker.")
     await reel_job_manager.start_job(job_id)
     await pipeline.starting()
@@ -919,7 +1026,9 @@ async def run_job(job_id, job_data):
             env=env,
             cwd=os.getcwd()
         )
-        
+        if execution_ctx is not None:
+            execution_ctx["process"] = process
+
         # We need to capture logs in a thread because Popen isn't async
         t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
         t_log.daemon = True
@@ -928,6 +1037,11 @@ async def run_job(job_id, job_data):
         # Async wait for process with incremental updates
         start_wait = time.time()
         while process.poll() is None:
+            if execution_ctx and execution_ctx.get("preempt_requested"):
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
             await asyncio.sleep(2)
             
             # Check for partial results every 2 seconds
@@ -966,7 +1080,15 @@ async def run_job(job_id, job_data):
                 pass
 
         returncode = process.returncode
-        
+        preempted = bool(execution_ctx and execution_ctx.get("preempt_requested"))
+
+        if preempted:
+            jobs[job_id]['status'] = 'queued'
+            jobs[job_id]['logs'].append("Job preempted by a higher-priority task and re-queued.")
+            await reel_job_manager.enqueue_job(job_id)
+            await enqueue_reel_job(job_id, priority=job_priority)
+            return
+
         if returncode == 0:
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['logs'].append("Process finished successfully.")
@@ -1051,20 +1173,20 @@ async def run_job(job_id, job_data):
                  jobs[job_id]['logs'].append("No metadata file generated.")
                  result = await reel_job_manager.fail_job(job_id, "No metadata file generated", error_code="METADATA_NOT_FOUND", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
                  if result.get("retry"):
-                     asyncio.create_task(reel_job_manager.schedule_retry_after(job_queue, job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                     asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
             result = await reel_job_manager.fail_job(job_id, f"Process failed with exit code {returncode}", error_code="PROCESS_EXIT", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
             if result.get("retry"):
-                asyncio.create_task(reel_job_manager.schedule_retry_after(job_queue, job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
 
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
         result = await reel_job_manager.fail_job(job_id, f"Execution error: {str(e)}", error_code="EXECUTION_ERROR", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
         if result.get("retry"):
-            asyncio.create_task(reel_job_manager.schedule_retry_after(job_queue, job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+            asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
     finally:
         # Keep generated artifacts in output/ until the periodic output sweep runs.
         if input_path and os.path.exists(input_path):
@@ -1297,6 +1419,8 @@ async def process_endpoint(
         "source": "url" if url else "file",
     }
 
+    job_priority = await _resolve_user_job_priority(user_id)
+
     job_id = str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
@@ -1351,6 +1475,7 @@ async def process_endpoint(
         'input_path': input_path,
         'attestation': attestation,
         'user_id': user_id,
+        'priority': job_priority,
     }
 
     jobs[job_id] = dict(runtime_payload)
@@ -1375,11 +1500,12 @@ async def process_endpoint(
         runtime_data=dict(runtime_payload),
         max_attempts=REEL_JOB_MAX_ATTEMPTS,
         reserved_quota=1.0,
+        priority=job_priority,
     )
     await reel_job_manager.enqueue_job(job_id)
     await ReelProcessingPipeline(reel_job_manager, job_id).queued()
 
-    await job_queue.put(job_id)
+    await enqueue_reel_job(job_id, priority=job_priority)
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -2722,6 +2848,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
         
     selected_platforms = _resolve_social_platforms(req.platforms)
     user_id = _resolve_request_user_id(req.user_id, request)
+    publish_priority = await _resolve_user_job_priority(user_id)
 
     try:
         clip = job['result']['clips'][req.clip_index]
@@ -2762,7 +2889,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
 
             platform_result = await publish_post(account, publish_payload)
             external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done")
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
             results[platform_name] = {
                 "success": True,
                 "result": platform_result,
@@ -2770,7 +2897,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
         except Exception as exc:
             overall_success = False
             err_msg = str(exc)
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg)
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg, priority=publish_priority)
             results[platform_name] = {
                 "success": False,
                 "error": err_msg,
@@ -3161,7 +3288,8 @@ async def thumbnail_publish(
             publish_jobs[publish_id]["status"] = "done"
             publish_jobs[publish_id]["result"] = result
             external_id = str(result.get("video_id") or result.get("id") or "n/a")
-            asyncio.run(_insert_publish_job(user_id=user_id, platform="youtube", external_id=external_id, status="done"))
+            publish_priority = asyncio.run(_resolve_user_job_priority(user_id))
+            asyncio.run(_insert_publish_job(user_id=user_id, platform="youtube", external_id=external_id, status="done", priority=publish_priority))
 
         except Exception as e:
             err = str(e)
@@ -3744,6 +3872,7 @@ async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Dep
     final_title = payload.title or row.get("reel_title") or "Vireel"
     final_description = payload.description or row.get("reel_description") or ""
     selected_platforms = _resolve_social_platforms(payload.platforms)
+    publish_priority = await _resolve_user_job_priority(user_id)
 
     results: Dict[str, Any] = {}
     overall_success = True
@@ -3763,7 +3892,7 @@ async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Dep
             )
             platform_result = await publish_post(account, publish_payload)
             external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done")
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
             results[platform_name] = {
                 "success": True,
                 "result": platform_result,
@@ -3771,7 +3900,7 @@ async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Dep
         except Exception as exc:
             overall_success = False
             err_msg = str(exc)
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg)
+            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg, priority=publish_priority)
             results[platform_name] = {
                 "success": False,
                 "error": err_msg,
@@ -4026,13 +4155,21 @@ async def _upsert_social_account(
         await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE).insert(payload).execute()
 
 
-async def _insert_publish_job(user_id: str, platform: str, external_id: str, status: str, error_message: Optional[str] = None) -> None:
+async def _insert_publish_job(
+    user_id: str,
+    platform: str,
+    external_id: str,
+    status: str,
+    error_message: Optional[str] = None,
+    priority: int = DEFAULT_JOB_PRIORITY,
+) -> None:
     client = await supabase_get_client()
     payload: Dict[str, Any] = {
         "user_id": user_id,
         "platform": platform,
         "external_id": external_id,
         "status": status,
+        "priority": _clamp_job_priority(priority),
     }
     if error_message:
         payload["error_message"] = error_message

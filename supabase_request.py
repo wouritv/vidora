@@ -352,10 +352,25 @@ async def get_user_abonnement(user_id: str) -> Optional[Dict[str, Any]]:
         .execute()
     )
 
-    rows = response.data
+	rows = response.data
     if not rows:
         return None
-    return rows[0]
+	row = dict(rows[0])
+
+	# Resolve plan priority from the abonnement table; default to 1 when unknown.
+	priority = 1
+	try:
+		abonnement_id = row.get("abonnement")
+		if abonnement_id:
+			abonnement = await get_abonnement(str(abonnement_id))
+			raw_priority = (abonnement or {}).get("priorite")
+			if raw_priority is not None:
+				priority = int(raw_priority)
+	except Exception:
+		priority = 1
+
+	row["priorite"] = max(1, min(3, int(priority or 1)))
+	return row
 
 
 async def get_latest_user_souscription(user_id: str) -> Optional[Dict[str, Any]]:
@@ -434,7 +449,7 @@ async def update_souscription_row(subscription_id: str, updates: Dict[str, Any])
 JOB_COLUMNS = (
 	"id, created_at, updated_at, user_id, job_type, status, attempts, max_attempts, "
 	"progress, current_step, error_code, error_message, queue_name, pipeline_name, "
-	"reserved_quota, consumed_quota, estimated_cost_usd, actual_cost_usd, job_data, result_data"
+	"reserved_quota, consumed_quota, estimated_cost_usd, actual_cost_usd, priority, job_data, result_data"
 )
 
 
@@ -449,6 +464,7 @@ async def create_job_record(
 	max_attempts: int = 2,
 	reserved_quota: float = 0.0,
 	estimated_cost_usd: float = 0.0,
+	priority: int = 1,
 ) -> Dict[str, Any]:
 	client = await get_client()
 	now_iso = datetime.now(timezone.utc).isoformat()
@@ -467,6 +483,7 @@ async def create_job_record(
 		"consumed_quota": 0.0,
 		"estimated_cost_usd": float(estimated_cost_usd),
 		"actual_cost_usd": 0.0,
+		"priority": max(1, min(3, int(priority or 1))),
 		"job_data": job_data or {},
 		"result_data": {},
 		"created_at": now_iso,
