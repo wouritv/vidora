@@ -594,41 +594,37 @@ async def get_user_data(user_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def upsert_user_data_credits(
-	user_id: str,
-	credit_delta: float,
-	storage_delta: float = 0.0,
+    user_id: str,
+    credit_delta: float,
+    storage_delta: float = 0.0,
 ) -> Dict[str, Any]:
-	"""Create or increment the credit/storage balance for a user.
+    client = await get_client()
+    existing = await get_user_data(user_id)
 
-	``credit_delta`` and ``storage_delta`` are additive (can be negative).
-	"""
-	client = await get_client()
-	existing = await get_user_data(user_id)
-
-	if existing:
-		new_credit  = max(0.0, float(existing.get("credit",   0)) + float(credit_delta))
-		new_storage = float(existing.get("stockage", 0)) + float(storage_delta)
-		response = (
-			await client.table(SUPABASE_USER_DATA_TABLE)
-			.update({
-				"credit":     new_credit,
-				"stockage":   new_storage,
-				"updated_at": datetime.now(timezone.utc).isoformat(),
-			})
-			.eq("user_id", user_id)
-			.execute()
-		)
-		rows = response.data or []
-		return rows[0] if rows else existing
-	else:
-		payload = {
-			"user_id":  user_id,
-			"credit":   int(max(0.0, float(credit_delta))),
-			"stockage": max(0.0, float(storage_delta)),
-		}
-		response = await client.table(SUPABASE_USER_DATA_TABLE).insert(payload).execute()
-		rows = response.data or []
-		return rows[0] if rows else payload
+    if existing:
+        new_credit  = int(max(0.0, float(existing.get("credit", 0)) + float(credit_delta)))
+        new_storage = float(existing.get("stockage", 0)) + float(storage_delta)
+        response = (
+            await client.table(SUPABASE_USER_DATA_TABLE)
+            .update({
+                "credit":     new_credit,
+                "stockage":   new_storage,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            .eq("user_id", user_id)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else existing
+    else:
+        payload = {
+            "user_id":  user_id,
+            "credit":   int(max(0.0, float(credit_delta))),
+            "stockage": max(0.0, float(storage_delta)),
+        }
+        response = await client.table(SUPABASE_USER_DATA_TABLE).insert(payload).execute()
+        rows = response.data or []
+        return rows[0] if rows else payload
 
 
 async def set_user_data_balance(
