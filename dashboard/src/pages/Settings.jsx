@@ -687,7 +687,7 @@ export default function SettingsPage() {
               </p>
               {subscription ? (
                 <p className="text-slate-500 dark:text-zinc-400 mt-1">
-                  {t('settings.currentPlan', 'Current plan')}: <span className="text-white font-medium">{currentPlanLabel}</span>
+                  {t('abonnement.currentPlan', 'Current plan')}: <span className="text-white font-medium">{currentPlanLabel}</span>
                 </p>
               ) : null}
               {subscription?.payment_end_date ? (
