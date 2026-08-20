@@ -1359,10 +1359,12 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     storage_bytes=total_reel_size_bytes,
                 )
                 debit_applied = False
+                logger.info(f"Billing info for job {job_id}: {billing}")
                 if is_supabase_configured() and user_id and (
                     billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0
                 ):
                     try:
+                        logger.info(f"Debiting credits for job {job_id}")
                         debit_applied = await reel_job_manager.debit_credits_for_job(
                             job_id=job_id,
                             user_id=user_id,
@@ -1371,6 +1373,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                             operation_type="reels",
                         )
                     except Exception as billing_error:
+                        logger.error(f"Billing update failed: {billing_error}")
                         jobs[job_id]['logs'].append(f"Billing update failed: {billing_error}")
 
                 result_payload = {

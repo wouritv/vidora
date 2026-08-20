@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timezone
 import calendar
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import acreate_client, AsyncClient
@@ -30,6 +31,10 @@ def is_supabase_configured() -> bool:
 # Client singleton (à réutiliser plutôt que d'en recréer un à chaque appel)
 # --------------------------------------------------------------------------
 _client: Optional[AsyncClient] = None
+
+
+def _ceil_credit(value: float) -> int:
+	return int(max(0, math.ceil(float(value or 0.0))))
 
 
 async def get_client() -> AsyncClient:
@@ -624,7 +629,7 @@ async def upsert_user_data_credits(
 		current_credit_max = float(existing.get("credit_max", current_credit) or 0.0)
 		current_stockage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
 
-		new_credit = int(max(0.0, current_credit + float(credit_delta)))
+		new_credit = _ceil_credit(current_credit + float(credit_delta))
 		new_storage = float(current_storage + float(storage_delta))
 		new_credit_max = max(0.0, current_credit_max)
 		new_stockage_max = max(0.0, current_stockage_max)
@@ -653,7 +658,7 @@ async def upsert_user_data_credits(
 		rows = response.data or []
 		return rows[0] if rows else existing
 	else:
-		initial_credit = int(max(0.0, float(credit_delta)))
+		initial_credit = _ceil_credit(credit_delta)
 		initial_storage = max(0.0, float(storage_delta))
 		payload = {
 			"user_id":  user_id,
@@ -679,13 +684,13 @@ async def set_user_data_balance(
 		return {"user_id": "", "credit": 0.0, "stockage": 0.0, "credit_max": 0.0, "stockage_max": 0.0}
 	client = await get_client()
 	now_iso = datetime.now(timezone.utc).isoformat()
-	clamped_credit = max(0.0, float(credit or 0.0))
+	clamped_credit = _ceil_credit(credit)
 	clamped_storage = float(storage or 0.0)
 	payload = {
 		"user_id": user_id,
 		"credit": clamped_credit,
 		"stockage": clamped_storage,
-		"credit_max": max(0.0, float(credit_max if credit_max is not None else clamped_credit)),
+		"credit_max": _ceil_credit(credit_max if credit_max is not None else clamped_credit),
 		"stockage_max": max(0.0, float(storage_max if storage_max is not None else max(clamped_storage, 0.0))),
 		"updated_at": now_iso,
 	}
@@ -694,7 +699,7 @@ async def set_user_data_balance(
 		next_credit_max = payload["credit_max"]
 		next_storage_max = payload["stockage_max"]
 		if credit_max is None:
-			next_credit_max = max(0.0, float(existing.get("credit_max", existing.get("credit", 0.0)) or 0.0))
+			next_credit_max = _ceil_credit(existing.get("credit_max", existing.get("credit", 0.0)) or 0.0)
 		if storage_max is None:
 			next_storage_max = max(0.0, float(existing.get("stockage_max", max(existing.get("stockage", 0.0), 0.0)) or 0.0))
 		if clamped_credit > next_credit_max:
@@ -754,26 +759,27 @@ async def deduct_user_credits(
 
 
 async def insert_user_data_history(
-    user_id: str,
-    credit: float,
-    storage: float,
-    operation: str,        # 'input' or 'output'
-    operation_type: str,   # 'subscription' | 'reels' | 'captions' | 'publications' | 'credit_purchase'
-    operation_id: str = "",
+	user_id: str,
+	credit: float,
+	storage: float,
+	operation: str,        # 'input' or 'output'
+	operation_type: str,   # 'subscription' | 'reels' | 'captions' | 'publications' | 'credit_purchase'
+	operation_id: str = "",
 ) -> Dict[str, Any]:
-    """Append an entry to the user credit/storage history table."""
-    client = await get_client()
-    payload = {
-        "user_id":        user_id,
-        "credit":         int(credit),      # ✅ colonne integer côté Supabase
-        "storage":        float(storage),   # reste float/numeric
-        "operation":      operation,
-        "operation_type": operation_type,
-        "operation_id":   operation_id or "",
-    }
-    response = await client.table(SUPABASE_USER_DATA_HISTORY_TABLE).insert(payload).execute()
-    rows = response.data or []
-    return rows[0] if rows else payload
+	"""Append an entry to the user credit/storage history table."""
+	client = await get_client()
+	rounded_credit = _ceil_credit(credit)
+	payload = {
+		"user_id":        user_id,
+		"credit":         rounded_credit,
+		"storage":        float(storage),   # reste float/numeric
+		"operation":      operation,
+		"operation_type": operation_type,
+		"operation_id":   operation_id or "",
+	}
+	response = await client.table(SUPABASE_USER_DATA_HISTORY_TABLE).insert(payload).execute()
+	rows = response.data or []
+	return rows[0] if rows else payload
 
 
 async def get_user_data_history(

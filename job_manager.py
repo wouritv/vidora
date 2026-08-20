@@ -1,6 +1,8 @@
 import asyncio
 import time
 import uuid
+import logging
+import math
 from typing import Any, Dict, Optional
 
 from supabase_request import (
@@ -14,6 +16,11 @@ from supabase_request import (
     get_user_data as supabase_get_user_data,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _ceil_credit(value: float) -> int:
+    return int(max(0, math.ceil(float(value or 0.0))))
 
 class JobType:
     TRANSCRIBE = "TRANSCRIBE"
@@ -114,6 +121,7 @@ class JobManager:
         consumed_quota: float = 1.0,
         cost_breakdown: Optional[Dict[str, Any]] = None,
     ) -> None:
+        billed_credit = _ceil_credit(actual_credit)
         await update_job_record(
             job_id,
             {
@@ -122,7 +130,7 @@ class JobManager:
                 "current_step": "completed",
                 "result_data": result_data or {},
                 "actual_cost_usd": float(actual_cost_usd),
-                "actual_credit": float(actual_credit),
+                "actual_credit": billed_credit,
                 "actual_storage_gb": float(max(0.0, actual_storage_gb)),
                 "cost_breakdown": cost_breakdown or {},
                 # Consume reserved quota only when success is confirmed.
@@ -144,7 +152,7 @@ class JobManager:
 
         Returns ``True`` if the deduction succeeded, ``False`` if insufficient funds.
         """
-        normalized_credits = max(0.0, float(credits or 0.0))
+        normalized_credits = _ceil_credit(credits)
         normalized_storage_gb = abs(float(storage_delta or 0.0))
         if normalized_credits <= 0 and normalized_storage_gb <= 0:
             return True
@@ -212,7 +220,7 @@ class JobManager:
         if actual_cost_usd is not None:
             updates["actual_cost_usd"] = float(max(0.0, actual_cost_usd))
         if actual_credit is not None:
-            updates["actual_credit"] = float(max(0.0, actual_credit))
+            updates["actual_credit"] = _ceil_credit(actual_credit)
         if actual_storage_gb is not None:
             updates["actual_storage_gb"] = float(max(0.0, actual_storage_gb))
         if consumed_quota is not None:
