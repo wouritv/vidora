@@ -431,11 +431,16 @@ async def update_souscription_row(subscription_id: str, updates: Dict[str, Any])
 	if not subscription_id:
 		return None
 	client = await get_client()
-	response = (
-		await client.table(SUPABASE_SOUSCRIPTION_TABLE)
+	await (
+		client.table(SUPABASE_SOUSCRIPTION_TABLE)
 		.update(dict(updates or {}))
 		.eq("id", subscription_id)
+		.execute()
+	)
+	response = (
+		await client.table(SUPABASE_SOUSCRIPTION_TABLE)
 		.select(SOUSCRIPTION_COLUMNS)
+		.eq("id", subscription_id)
 		.limit(1)
 		.execute()
 	)
@@ -449,7 +454,8 @@ async def update_souscription_row(subscription_id: str, updates: Dict[str, Any])
 JOB_COLUMNS = (
 	"id, created_at, updated_at, user_id, job_type, status, attempts, max_attempts, "
 	"progress, current_step, error_code, error_message, queue_name, pipeline_name, "
-	"reserved_quota, consumed_quota, estimated_cost_usd, actual_cost_usd, priority, job_data, result_data"
+	"reserved_quota, consumed_quota, estimated_cost_usd, estimated_credit, actual_cost_usd, actual_credit, "
+	"actual_storage_gb, cost_breakdown, priority, job_data, result_data"
 )
 
 
@@ -482,7 +488,11 @@ async def create_job_record(
 		"reserved_quota": float(reserved_quota),
 		"consumed_quota": 0.0,
 		"estimated_cost_usd": float(estimated_cost_usd),
+		"estimated_credit": 0.0,
 		"actual_cost_usd": 0.0,
+		"actual_credit": 0.0,
+		"actual_storage_gb": 0.0,
+		"cost_breakdown": {},
 		"priority": max(1, min(3, int(priority or 1))),
 		"job_data": job_data or {},
 		"result_data": {},
@@ -500,11 +510,16 @@ async def update_job_record(job_id: str, updates: Dict[str, Any]) -> Optional[Di
 	client = await get_client()
 	payload = dict(updates or {})
 	payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-	response = (
-		await client.table(SUPABASE_JOBS_TABLE)
+	await (
+		client.table(SUPABASE_JOBS_TABLE)
 		.update(payload)
 		.eq("id", job_id)
+		.execute()
+	)
+	response = (
+		await client.table(SUPABASE_JOBS_TABLE)
 		.select(JOB_COLUMNS)
+		.eq("id", job_id)
 		.limit(1)
 		.execute()
 	)

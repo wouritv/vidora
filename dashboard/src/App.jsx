@@ -54,15 +54,26 @@ const getVisibleClips = (status, results, partialClips) => {
   return partialClips;
 };
 
+const normalizeLogLine = (line) => {
+  if (typeof line === 'string') return line;
+  if (line == null) return '';
+  try {
+    return JSON.stringify(line);
+  } catch {
+    return String(line);
+  }
+};
+
 const getHighestClipMention = (logs) => logs.reduce((max, line) => {
-  const matches = [...line.matchAll(/clip\s+(\d+)/ig)];
+  const textLine = normalizeLogLine(line);
+  const matches = Array.from(textLine.matchAll(/clip\s+(\d+)/ig));
   if (!matches.length) return max;
   return Math.max(max, ...matches.map((match) => Number(match[1]) || 0));
 }, 0);
 
-const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) => {
+const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia, t }) => {
   status = normalizeStatus(status);
-  const hasLog = (regex) => logs.some((line) => regex.test(line));
+  const hasLog = (regex) => logs.some((line) => regex.test(normalizeLogLine(line)));
   const highestClipMention = getHighestClipMention(logs);
   const generatedCount = visibleClips.length;
   const detectedCount = Math.max(highestClipMention, generatedCount);
@@ -78,7 +89,7 @@ const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) =
       key: 'started',
       label: t('common.processStarted','Processus demarré'),
       description: processStarted ? t('common.workflowStarted','Le workflow a bien ete lance.') : t('common.processWait','En attente de lancement.'),
-      state: processStarted ? t('common.processOk','done') : t('common.processQueued','pending'),
+      state: processStarted ? 'done' : 'pending',
     },
     {
       key: 'source',
@@ -86,7 +97,7 @@ const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) =
       description: sourceReady
         ? t('common.processReady','La source est prete pour le traitement.')
         : t('common.processGo','Preparation de la source en cours.'),
-      state: sourceReady ? t('common.processOk','done') : processStarted ? t('common.processActive','active') : t('common.processQueued','pending'),
+      state: sourceReady ? 'done' : processStarted ? 'active' : 'pending',
     },
     {
       key: 'transcript',
@@ -94,7 +105,7 @@ const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) =
       description: transcriptReady
         ? t('common.processTranscriptOk','La transcription est disponible pour l’analyse.')
         : t('common.processTranscriptPending','Transcription audio en cours.'),
-      state: transcriptReady ? t('common.processOk','done') : sourceReady && status === 'processing' ? t('common.processActive','active') : t('common.processQueued','pending'),
+      state: transcriptReady ? 'done' : sourceReady && status === 'processing' ? 'active' : 'pending',
     },
     {
       key: 'detect',
@@ -102,7 +113,7 @@ const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) =
       description: reelsDetected
         ? `${detectedCount || generatedCount} ${t('common.processReelCreate','reel(s) identifies pour la generation.')}`
         : t('common.processReelText','L’IA determine encore les meilleurs moments.'),
-      state: reelsDetected ? t('common.processOk','done') : transcriptReady && status === 'processing' ? t('common.processActive','active') : t('common.processQueued','pending'),
+      state: reelsDetected ? 'done' : transcriptReady && status === 'processing' ? 'active' : 'pending',
     },
     {
       key: 'create',
@@ -113,12 +124,12 @@ const buildProcessingSteps = ({ status, logs, visibleClips, processingMedia }) =
           ? `${generatedCount} ${t('common.processReelCurrent','reel(s) deja generes.')}`
           : t('common.processReelPending','Generation des reels en cours.'),
       state: status === 'complete'
-        ? t('common.processOk','done')
+        ? 'done'
         : status === 'error'
-          ? t('common.processError','error')
+          ? 'error'
           : reelsDetected && status === 'processing'
-            ? t('common.processActive','active')
-            : t('common.processQueued','pending'),
+            ? 'active'
+            : 'pending',
     },
   ];
 };
@@ -131,7 +142,8 @@ const StepStatusIcon = ({ state }) => {
 };
 
 const ProcessingChecklist = ({ status, logs, visibleClips, processingMedia }) => {
-  const steps = buildProcessingSteps({ status, logs, visibleClips, processingMedia });
+  const { t } = useTranslation();
+  const steps = buildProcessingSteps({ status, logs, visibleClips, processingMedia, t });
   const doneCount = steps.filter((step) => step.state === 'done').length;
   const totalCount = steps.length;
   const progressPercent = Math.round((doneCount / totalCount) * 100);
@@ -181,6 +193,7 @@ const ProcessingChecklist = ({ status, logs, visibleClips, processingMedia }) =>
 };
 
 const GeneratedClipsList = ({ clips, status }) => {
+  const { t } = useTranslation();
   if (!clips.length) {
     return <EmptyResultsState status={status} />;
   }
@@ -230,6 +243,7 @@ const GeneratedClipsList = ({ clips, status }) => {
 };
 
 const EmptyResultsState = ({ status }) => {
+  const { t } = useTranslation();
   if (status === 'processing') {
     return (
         <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 dark:border-white/10 bg-black/20 px-6 py-10 text-slate-400 dark:text-zinc-500 space-y-4">

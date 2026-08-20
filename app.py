@@ -55,6 +55,7 @@ from supabase_request import (
     get_latest_user_paid_subscription as supabase_get_latest_user_paid_subscription,
     update_souscription_row as supabase_update_souscription_row,
     list_user_souscriptions as supabase_list_user_souscriptions,
+    update_job_record as supabase_update_job_record,
 )
 from billing import (
     usd_to_credits,
@@ -645,6 +646,202 @@ def _reel_thumbnail_url_from_s3_key(s3_key: str) -> str:
     return generate_presigned_url(bucket, s3_key, expiration=7200) or ""
 
 
+def _job_uses_remote_source(job_data: Optional[Dict[str, Any]]) -> bool:
+    payload = job_data or {}
+    source_type = str(
+        payload.get("source_type")
+        or ((payload.get("attestation") or {}).get("source"))
+        or ""
+    ).strip().lower()
+    return source_type == "url"
+
+
+def _collect_reel_job_output_snapshot(job_id: str, output_dir: str) -> Dict[str, Any]:
+    metadata_path = _resolve_job_metadata_path(job_id)
+    metadata: Dict[str, Any] = {}
+    shorts: List[Dict[str, Any]] = []
+    cost_analysis = None
+    base_name = ""
+
+    if metadata_path and os.path.exists(metadata_path) and os.path.getsize(metadata_path) > 0:
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f) or {}
+        except Exception:
+            metadata = {}
+        shorts = metadata.get("shorts") or []
+        cost_analysis = metadata.get("cost_analysis")
+        base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+
+    ready_entries: List[Dict[str, Any]] = []
+    if base_name and shorts:
+        for index, clip in enumerate(shorts, start=1):
+            clip_filename = f"{base_name}_clip_{index}.mp4"
+            clip_path = os.path.join(output_dir, clip_filename)
+            if not os.path.exists(clip_path) or os.path.getsize(clip_path) <= 0:
+                continue
+            ready_entries.append(
+                {
+                    "filename": clip_filename,
+                    "path": clip_path,
+                    "size_bytes": int(os.path.getsize(clip_path) or 0),
+                    "clip": dict(clip or {}),
+                }
+            )
+
+    if not ready_entries and os.path.isdir(output_dir):
+        fallback_files = sorted(
+            file_name
+            for file_name in os.listdir(output_dir)
+            if file_name.endswith(".mp4") and not file_name.startswith("temp_")
+        )
+        for file_name in fallback_files:
+            clip_path = os.path.join(output_dir, file_name)
+            ready_entries.append(
+                {
+                    "filename": file_name,
+                    "path": clip_path,
+                    "size_bytes": int(os.path.getsize(clip_path) or 0),
+                    "clip": {},
+                }
+            )
+
+    partial_clips: List[Dict[str, Any]] = []
+    for idx, entry in enumerate(ready_entries, start=1):
+        clip_payload = dict(entry.get("clip") or {})
+        clip_payload["video_url"] = f"/videos/{job_id}/{entry['filename']}"
+        clip_payload.setdefault("title", f"Clip {idx}")
+        partial_clips.append(clip_payload)
+
+    expected_clips = len(shorts) if shorts else len(ready_entries)
+    total_size_bytes = sum(int(entry.get("size_bytes") or 0) for entry in ready_entries)
+    result_data: Dict[str, Any] = {}
+    if partial_clips:
+        result_data["clips"] = partial_clips
+    if cost_analysis is not None:
+        result_data["cost_analysis"] = cost_analysis
+
+    return {
+        "metadata_path": metadata_path,
+        "expected_clips": expected_clips,
+        "processed_clips": len(ready_entries),
+        "total_size_bytes": total_size_bytes,
+        "result_data": result_data,
+    }
+
+
+def _estimate_reel_job_consumption(
+    *,
+    elapsed_seconds: float,
+    uses_youtube: bool,
+    processed_clips: int,
+    expected_clips: int,
+    storage_bytes: int,
+) -> Dict[str, Any]:
+    processed_count = max(0, int(processed_clips or 0))
+    expected_count = max(0, int(expected_clips or 0))
+    if processed_count <= 0:
+        return {
+            "processing_ratio": 0.0,
+            "actual_cost_usd": 0.0,
+            "actual_credit": 0.0,
+            "actual_storage_gb": 0.0,
+            "cost_breakdown": {},
+        }
+
+    processing_ratio = 1.0 if expected_count <= 0 else min(1.0, processed_count / expected_count)
+    actual_storage_gb = _bytes_to_gb(storage_bytes)
+    billed_video_size_gb = max(actual_storage_gb, 0.5)
+    breakdown = estimate_reel_cost_usd(
+        duration_minutes=max(float(elapsed_seconds or 0.0) / 60.0, 1.0),
+        video_size_gb=billed_video_size_gb,
+        uses_youtube_download=uses_youtube,
+        youtube_download_gb=0.3 if uses_youtube else 0.0,
+        uses_openai=True,
+        uses_assembly=True,
+    )
+    credit_info = calculate_credits_for_operation(breakdown)
+    return {
+        "processing_ratio": round(processing_ratio, 4),
+        "actual_cost_usd": round(float(breakdown.get("total_usd") or 0.0) * processing_ratio, 6),
+        "actual_credit": round(float(credit_info.get("final_credits") or 0.0) * processing_ratio, 2),
+        "actual_storage_gb": round(actual_storage_gb, 6),
+        "cost_breakdown": credit_info,
+    }
+
+
+async def _finalize_failed_reel_job(
+    *,
+    job_id: str,
+    user_id: Optional[str],
+    output_dir: str,
+    job_data: Optional[Dict[str, Any]],
+    start_ts: float,
+    error_message: str,
+    error_code: str,
+    retry_delay_seconds: int,
+) -> Dict[str, Any]:
+    elapsed = round(calc_elapsed_seconds(start_ts), 3)
+    snapshot = _collect_reel_job_output_snapshot(job_id, output_dir)
+    consumption = _estimate_reel_job_consumption(
+        elapsed_seconds=elapsed,
+        uses_youtube=_job_uses_remote_source(job_data),
+        processed_clips=snapshot.get("processed_clips", 0),
+        expected_clips=snapshot.get("expected_clips", 0),
+        storage_bytes=0,
+    )
+    result_data = dict(snapshot.get("result_data") or {})
+    result_data["duration_seconds"] = elapsed
+    result_data["billing"] = {
+        "actual_cost_usd": consumption["actual_cost_usd"],
+        "actual_credit": consumption["actual_credit"],
+        "actual_storage_gb": 0.0,
+        "processing_ratio": consumption["processing_ratio"],
+        "debit_applied": False,
+        "partial_failure": True,
+    }
+
+    fail_result = await reel_job_manager.fail_job(
+        job_id,
+        error_message,
+        error_code=error_code,
+        retry_delay_seconds=retry_delay_seconds,
+        actual_cost_usd=consumption["actual_cost_usd"],
+        actual_credit=consumption["actual_credit"],
+        actual_storage_gb=0.0,
+        consumed_quota=consumption["processing_ratio"],
+        result_data=result_data,
+        cost_breakdown=consumption["cost_breakdown"],
+    )
+
+    debit_applied = False
+    if not fail_result.get("retry") and user_id and consumption["actual_credit"] > 0:
+        try:
+            debit_applied = await reel_job_manager.debit_credits_for_job(
+                job_id=job_id,
+                user_id=user_id,
+                credits=consumption["actual_credit"],
+                storage_delta=0.0,
+                operation_type="reels",
+            )
+        except Exception as billing_error:
+            jobs[job_id]["logs"].append(f"Partial billing failed: {billing_error}")
+
+    result_data["billing"]["debit_applied"] = bool(debit_applied)
+    await supabase_update_job_record(
+        job_id,
+        {
+            "result_data": result_data,
+            "cost_breakdown": consumption["cost_breakdown"],
+        },
+    )
+
+    if result_data.get("clips"):
+        jobs[job_id]["result"] = result_data
+    jobs[job_id]["status"] = fail_result.get("status") or "failed"
+    return fail_result
+
+
 def _extract_s3_key_from_thumbnail_ref(thumbnail_ref: str) -> str:
     """Accept raw S3 keys or s3://bucket/key refs and return object key only."""
     ref = (thumbnail_ref or "").strip()
@@ -794,6 +991,7 @@ async def _persist_reels_for_job(
                 "reel_updated_at": now_iso,
                 "reel_user_id": user_id,
                 "reel_status": "termine",
+                "reel_size_bytes": int(os.path.getsize(clip_path) or 0),
                 "reel_s3_key": s3_key,
                 "reel_job_id": job_id,
                 "reel_clip_index": i - 1,
@@ -1009,6 +1207,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
     output_dir = job_data['output_dir']
     user_id = job_data.get("user_id")
     input_path = job_data.get("input_path")
+    source_is_url = _job_uses_remote_source(job_data)
     pipeline = ReelProcessingPipeline(reel_job_manager, job_id)
     job_priority = _clamp_job_priority(job_data.get("priority", DEFAULT_JOB_PRIORITY))
     start_ts = time.time()
@@ -1122,7 +1321,18 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 except Exception as persist_error:
                     jobs[job_id]['status'] = 'failed'
                     jobs[job_id]['logs'].append(f"Supabase persistence failed: {persist_error}")
-                    jobs[job_id]['result'] = None
+                    fail_result = await _finalize_failed_reel_job(
+                        job_id=job_id,
+                        user_id=user_id,
+                        output_dir=output_dir,
+                        job_data=job_data,
+                        start_ts=start_ts,
+                        error_message=f"Supabase persistence failed: {persist_error}",
+                        error_code="REEL_PERSISTENCE_FAILED",
+                        retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+                    )
+                    if fail_result.get("retry"):
+                        asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
                     return
 
                 enriched_clips: List[Dict[str, Any]] = []
@@ -1140,53 +1350,95 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 }
                 await pipeline.finalizing()
                 elapsed = round(calc_elapsed_seconds(start_ts), 3)
-                await reel_job_manager.complete_job(
-                    job_id,
-                    {
-                        'clips': enriched_clips,
-                        'cost_analysis': cost_analysis,
-                        'reels': saved_rows,
-                        'duration_seconds': elapsed,
-                    },
+                total_reel_size_bytes = sum(int(row.get("reel_size_bytes") or 0) for row in saved_rows)
+                billing = _estimate_reel_job_consumption(
+                    elapsed_seconds=elapsed,
+                    uses_youtube=source_is_url,
+                    processed_clips=len(saved_rows),
+                    expected_clips=len(clips),
+                    storage_bytes=total_reel_size_bytes,
                 )
-                # Debit credits for the completed reel job (best-effort)
-                if is_supabase_configured():
-                    _runtime = reel_job_manager.runtime_jobs.get(job_id, {})
-                    _job_user_id = _runtime.get("user_id") or (jobs.get(job_id) or {}).get("user_id")
-                    if _job_user_id:
-                        _uses_yt = (jobs.get(job_id) or {}).get("url") is not None
-                        _reel_bd = estimate_reel_cost_usd(
-                            duration_minutes=max(elapsed / 60.0, 1.0),
-                            video_size_gb=0.5,
-                            uses_youtube_download=_uses_yt,
-                            youtube_download_gb=0.3 if _uses_yt else 0.0,
-                            uses_openai=True,
-                            uses_assembly=True,
-                        )
-                        _reel_cr = calculate_credits_for_operation(_reel_bd)["final_credits"]
-                        await reel_job_manager.debit_credits_for_job(
+                debit_applied = False
+                if is_supabase_configured() and user_id and (
+                    billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0
+                ):
+                    try:
+                        debit_applied = await reel_job_manager.debit_credits_for_job(
                             job_id=job_id,
-                            user_id=_job_user_id,
-                            credits=_reel_cr,
+                            user_id=user_id,
+                            credits=billing["actual_credit"],
+                            storage_delta=-billing["actual_storage_gb"],
                             operation_type="reels",
                         )
+                    except Exception as billing_error:
+                        jobs[job_id]['logs'].append(f"Billing update failed: {billing_error}")
+
+                result_payload = {
+                    'clips': enriched_clips,
+                    'cost_analysis': cost_analysis,
+                    'reels': saved_rows,
+                    'duration_seconds': elapsed,
+                    'billing': {
+                        'actual_cost_usd': billing['actual_cost_usd'],
+                        'actual_credit': billing['actual_credit'],
+                        'actual_storage_gb': billing['actual_storage_gb'],
+                        'processing_ratio': billing['processing_ratio'],
+                        'debit_applied': bool(debit_applied),
+                    },
+                }
+                await reel_job_manager.complete_job(
+                    job_id,
+                    result_payload,
+                    actual_cost_usd=billing['actual_cost_usd'],
+                    actual_credit=billing['actual_credit'],
+                    actual_storage_gb=billing['actual_storage_gb'],
+                    consumed_quota=billing['processing_ratio'],
+                    cost_breakdown=billing['cost_breakdown'],
+                )
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
-                 result = await reel_job_manager.fail_job(job_id, "No metadata file generated", error_code="METADATA_NOT_FOUND", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
+                 result = await _finalize_failed_reel_job(
+                     job_id=job_id,
+                     user_id=user_id,
+                     output_dir=output_dir,
+                     job_data=job_data,
+                     start_ts=start_ts,
+                     error_message="No metadata file generated",
+                     error_code="METADATA_NOT_FOUND",
+                     retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+                 )
                  if result.get("retry"):
                      asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
-            result = await reel_job_manager.fail_job(job_id, f"Process failed with exit code {returncode}", error_code="PROCESS_EXIT", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
+            result = await _finalize_failed_reel_job(
+                job_id=job_id,
+                user_id=user_id,
+                output_dir=output_dir,
+                job_data=job_data,
+                start_ts=start_ts,
+                error_message=f"Process failed with exit code {returncode}",
+                error_code="PROCESS_EXIT",
+                retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+            )
             if result.get("retry"):
                 asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
 
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
-        result = await reel_job_manager.fail_job(job_id, f"Execution error: {str(e)}", error_code="EXECUTION_ERROR", retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS)
+        result = await _finalize_failed_reel_job(
+            job_id=job_id,
+            user_id=user_id,
+            output_dir=output_dir,
+            job_data=job_data,
+            start_ts=start_ts,
+            error_message=f"Execution error: {str(e)}",
+            error_code="EXECUTION_ERROR",
+            retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+        )
         if result.get("retry"):
             asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
     finally:
@@ -1350,14 +1602,13 @@ async def process_endpoint(
     request: Request,
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
-    acknowledged: Optional[str] = Form(None)
+    acknowledged: Optional[str] = Form(None),
+    user_id: str = Depends(get_user_id_header),
 ):
     # Determine API Key: Use .env configuration (GEMINI_API_KEY or OPENAI_API_KEY as fallback)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
-
-    user_id: str = Depends(get_user_id_header)
 
     # --- Credit pre-check ---
     if is_supabase_configured():
@@ -1475,6 +1726,8 @@ async def process_endpoint(
         'env': env,
         'output_dir': job_output_dir,
         'input_path': input_path,
+        'source_type': 'url' if url else 'file',
+        'source_value': url if url else (file.filename if file else ''),
         'attestation': attestation,
         'user_id': user_id,
         'priority': job_priority,
@@ -1642,15 +1895,14 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 async def edit_clip(
     request: Request,
     req: EditRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    user_id: str = Depends(get_user_id_header),
 ):
     # Determine API Key
     final_api_key = req.api_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
     
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
-
-    user_id: str = Depends(get_user_id_header)
 
     # Credit pre-check for reel auto-edit customization
     edit_required_credits = 0.0
@@ -3888,9 +4140,7 @@ async def reel_thumbnail_url(reel_id: str, user_id: str = Depends(get_user_id_he
 
 
 @app.get("/api/reels/{reel_id}/preview-url")
-async def reel_preview_url(request: Request, reel_id: str):
-    user_id: str = Depends(get_user_id_header)
-
+async def reel_preview_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="Reel not found")
@@ -4364,12 +4614,14 @@ async def list_publish_jobs(
 
 
 @app.post("/api/auth/facebook/select-page")
-async def facebook_select_page(request: Request, payload: FacebookPageSelectionRequest):
+async def facebook_select_page(
+    payload: FacebookPageSelectionRequest,
+    user_id: str = Depends(get_user_id_header),
+):
     """
     L'utilisateur a sélectionné une page Facebook à connecter.
     Stocke le page_id + page_access_token (pas le token utilisateur).
     """
-    user_id: str = Depends(get_user_id_header)
 
     if not payload.page_access_token:
         raise HTTPException(status_code=400, detail="Missing page_access_token")
