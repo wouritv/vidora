@@ -135,7 +135,10 @@ PLATFORM_CONFIG = {
         "client_secret": os.getenv("INSTAGRAM_APP_SECRET"),
         "scopes": [
             "instagram_business_basic",
+            "instagram_business_manage_messages",
+            "instagram_business_manage_comments",
             "instagram_business_content_publish",
+            "instagram_business_manage_insights",
         ],
     },
     "youtube": {
@@ -4343,13 +4346,31 @@ def _oauth_popup_response(success: bool, platform: str, message: Optional[str] =
 
 
 
+def _public_request_base_url(request: Request) -> str:
+    """Build public base URL from proxy headers when available."""
+    xf_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    xf_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    if xf_proto and xf_host:
+        return f"{xf_proto}://{xf_host}".rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
 def _oauth_redirect_uri(platform: str, request: Optional[Request] = None) -> str:
     if SOCIAL_BASE_URL:
         return f"{SOCIAL_BASE_URL}/api/auth/{platform}/callback"
     if request:
-        base = str(request.base_url).rstrip("/")
+        base = _public_request_base_url(request)
         return f"{base}/api/auth/{platform}/callback"
     return f"http://localhost:8000/api/auth/{platform}/callback"
+
+
+def generate_pkce_pair() -> tuple[str, str]:
+    """Generate a PKCE verifier/challenge pair (S256) for OAuth providers like TikTok."""
+    # token_urlsafe already produces URL-safe chars; trim to stay within PKCE recommended bounds.
+    verifier = secrets.token_urlsafe(64)[:128]
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
 
 async def fetch_facebook_granted_scopes(access_token: str) -> List[str]:
     async with httpx.AsyncClient(timeout=20.0) as client:
