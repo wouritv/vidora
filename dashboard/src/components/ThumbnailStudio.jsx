@@ -8,10 +8,16 @@ import {
   Wand2,
 } from 'lucide-react';
 import { getApiUrl } from '../config';
+import { COLOR_PRESETS, FONT_OPTIONS } from '../lib/subtitleOptions';
 import { useUserCredits } from '../state/UserCreditsContext';
 import { useTranslation } from '../state/LanguageContext';
 
 const SUPPORTED_PLATFORMS = ['tiktok', 'youtube', 'linkedin', 'facebook', 'instagram'];
+const TEXT_CASE_OPTIONS = [
+  { value: 'none', label: 'Normal' },
+  { value: 'uppercase', label: 'MAJ' },
+  { value: 'lowercase', label: 'min' },
+];
 
 function StepIndicator({ step, labels }) {
   return (
@@ -70,6 +76,13 @@ export default function ThumbnailStudio({ geminiApiKey, appUserId }) {
     border_width: 2,
     bg_color: '#000000',
     bg_opacity: 0,
+    text_shadow_color: '#000000',
+    shadow_blur: 6,
+    shadow_offset_x: 0,
+    shadow_offset_y: 2,
+    bold: true,
+    italic: false,
+    text_case: 'none',
     position: 'bottom',
   });
 
@@ -333,6 +346,21 @@ export default function ThumbnailStudio({ geminiApiKey, appUserId }) {
 
               <div className="glass-panel p-5 space-y-3">
                 <h2 className="title-contrast text-sm font-semibold">{t('thumbnailStudio.captionStyle', 'Caption style')}</h2>
+                <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.fontFamily', 'Font family')}</label>
+                <select
+                  value={style.font_name}
+                  onChange={(e) => setStyle((prev) => ({ ...prev, font_name: e.target.value }))}
+                  className="input-field text-sm"
+                >
+                  {[...new Set(FONT_OPTIONS.map((option) => option.category))].map((category) => (
+                    <optgroup key={category} label={category}>
+                      {FONT_OPTIONS.filter((option) => option.category === category).map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+
                 <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.fontSize', 'Font size')}</label>
                 <input
                   type="number"
@@ -342,6 +370,46 @@ export default function ThumbnailStudio({ geminiApiKey, appUserId }) {
                   onChange={(e) => setStyle((prev) => ({ ...prev, font_size: Number(e.target.value) || 16 }))}
                   className="input-field text-sm"
                 />
+
+                <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.textStyle', 'Text style')}</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setStyle((prev) => ({ ...prev, bold: !prev.bold }))}
+                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${style.bold
+                      ? 'border-primary bg-primary/20 text-primary'
+                      : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    {t('thumbnailStudio.bold', 'Bold')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStyle((prev) => ({ ...prev, italic: !prev.italic }))}
+                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${style.italic
+                      ? 'border-primary bg-primary/20 text-primary'
+                      : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    {t('thumbnailStudio.italic', 'Italic')}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  {TEXT_CASE_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setStyle((prev) => ({ ...prev, text_case: option.value }))}
+                      className={`rounded-lg border px-2 py-2 text-xs ${style.text_case === option.value
+                        ? 'border-primary bg-primary/20 text-primary'
+                        : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
 
                 <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.position', 'Position')}</label>
                 <select
@@ -355,12 +423,30 @@ export default function ThumbnailStudio({ geminiApiKey, appUserId }) {
                 </select>
 
                 <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.textColor', 'Text color')}</label>
-                <input
-                  type="color"
-                  value={style.font_color}
-                  onChange={(e) => setStyle((prev) => ({ ...prev, font_color: e.target.value }))}
-                  className="w-full h-10 rounded-lg border border-slate-300 dark:border-white/10 bg-black/30"
-                />
+                <div className="flex flex-wrap gap-2">
+                  {COLOR_PRESETS.map((preset) => (
+                    <button
+                      key={preset.color}
+                      type="button"
+                      onClick={() => setStyle((prev) => ({ ...prev, font_color: preset.color }))}
+                      className={`w-7 h-7 rounded-full border-2 transition-all ${style.font_color === preset.color
+                        ? 'border-white scale-110'
+                        : 'border-slate-400 dark:border-white/20 hover:border-slate-200 dark:hover:border-white/50'
+                      }`}
+                      style={{ backgroundColor: preset.color }}
+                      title={preset.label}
+                    />
+                  ))}
+                  <label className="w-7 h-7 rounded-full border-2 border-dashed border-slate-400 dark:border-white/20 cursor-pointer flex items-center justify-center hover:border-slate-200 dark:hover:border-white/50 transition-all overflow-hidden relative" title={t('thumbnailStudio.customColor', 'Custom color')}>
+                    <span className="text-[10px] text-slate-500 dark:text-zinc-400">+</span>
+                    <input
+                      type="color"
+                      value={style.font_color}
+                      onChange={(e) => setStyle((prev) => ({ ...prev, font_color: e.target.value }))}
+                      className="absolute inset-0 opacity-0 cursor-pointer"
+                    />
+                  </label>
+                </div>
 
                 <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.borderColor', 'Border color')}</label>
                 <input
@@ -369,6 +455,90 @@ export default function ThumbnailStudio({ geminiApiKey, appUserId }) {
                   onChange={(e) => setStyle((prev) => ({ ...prev, border_color: e.target.value }))}
                   className="w-full h-10 rounded-lg border border-slate-300 dark:border-white/10 bg-black/30"
                 />
+
+                <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.borderWidth', 'Border width')}</label>
+                <input
+                  type="range"
+                  min={0}
+                  max={8}
+                  value={style.border_width}
+                  onChange={(e) => setStyle((prev) => ({ ...prev, border_width: Number(e.target.value) || 0 }))}
+                  className="w-full accent-primary"
+                />
+
+                <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.shadowColor', 'Shadow color')}</label>
+                <input
+                  type="color"
+                  value={style.text_shadow_color}
+                  onChange={(e) => setStyle((prev) => ({ ...prev, text_shadow_color: e.target.value }))}
+                  className="w-full h-10 rounded-lg border border-slate-300 dark:border-white/10 bg-black/30"
+                />
+
+                <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.shadowBlur', 'Shadow blur')}</label>
+                <input
+                  type="range"
+                  min={0}
+                  max={24}
+                  value={style.shadow_blur}
+                  onChange={(e) => setStyle((prev) => ({ ...prev, shadow_blur: Number(e.target.value) || 0 }))}
+                  className="w-full accent-primary"
+                />
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.shadowOffsetX', 'Shadow offset X')}</label>
+                    <input
+                      type="number"
+                      min={-20}
+                      max={20}
+                      value={style.shadow_offset_x}
+                      onChange={(e) => setStyle((prev) => ({ ...prev, shadow_offset_x: Number(e.target.value) || 0 }))}
+                      className="input-field text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.shadowOffsetY', 'Shadow offset Y')}</label>
+                    <input
+                      type="number"
+                      min={-20}
+                      max={20}
+                      value={style.shadow_offset_y}
+                      onChange={(e) => setStyle((prev) => ({ ...prev, shadow_offset_y: Number(e.target.value) || 0 }))}
+                      className="input-field text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.backgroundBox', 'Background box')}</label>
+                  <input
+                    type="checkbox"
+                    checked={style.bg_opacity > 0}
+                    onChange={(e) => setStyle((prev) => ({ ...prev, bg_opacity: e.target.checked ? 0.5 : 0 }))}
+                  />
+                </div>
+
+                {style.bg_opacity > 0 && (
+                  <>
+                    <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.backgroundColor', 'Background color')}</label>
+                    <input
+                      type="color"
+                      value={style.bg_color}
+                      onChange={(e) => setStyle((prev) => ({ ...prev, bg_color: e.target.value }))}
+                      className="w-full h-10 rounded-lg border border-slate-300 dark:border-white/10 bg-black/30"
+                    />
+
+                    <label className="text-xs text-slate-500 dark:text-zinc-400 block">{t('thumbnailStudio.backgroundOpacity', 'Background opacity')}</label>
+                    <input
+                      type="range"
+                      min={10}
+                      max={100}
+                      value={Math.round((style.bg_opacity || 0) * 100)}
+                      onChange={(e) => setStyle((prev) => ({ ...prev, bg_opacity: (Number(e.target.value) || 0) / 100 }))}
+                      className="w-full accent-primary"
+                    />
+                  </>
+                )}
 
                 <button
                   onClick={handleRender}

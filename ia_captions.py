@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from s3_uploader import generate_presigned_url, delete_s3_object
-from subtitles import burn_subtitles, transcribe_audio
+from subtitles import SubtitleStyleOptions, burn_subtitles, transcribe_audio
 from supabase_request import (
     is_supabase_configured,
     get_user_abonnement,
@@ -67,6 +67,13 @@ class CaptionStyle(BaseModel):
     border_width: int = 2
     bg_color: str = "#000000"
     bg_opacity: float = 0.0
+    text_shadow_color: str = "#000000"
+    shadow_blur: int = 6
+    shadow_offset_x: int = 0
+    shadow_offset_y: int = 2
+    bold: bool = True
+    italic: bool = False
+    text_case: str = "none"
     position: str = "bottom"
 
 
@@ -681,12 +688,21 @@ async def captions_render(request: Request, req: RenderRequest):
         output_path=output_path,
         alignment=style.position,
         fontsize=style.font_size,
-        font_name=style.font_name,
-        font_color=style.font_color,
-        border_color=style.border_color,
-        border_width=style.border_width,
-        bg_color=style.bg_color,
-        bg_opacity=style.bg_opacity,
+        style_options=SubtitleStyleOptions(
+            font_name=style.font_name,
+            font_color=style.font_color,
+            border_color=style.border_color,
+            border_width=style.border_width,
+            bg_color=style.bg_color,
+            bg_opacity=style.bg_opacity,
+            text_shadow_color=style.text_shadow_color,
+            shadow_blur=style.shadow_blur,
+            shadow_offset_x=style.shadow_offset_x,
+            shadow_offset_y=style.shadow_offset_y,
+            bold=style.bold,
+            italic=style.italic,
+            text_case=style.text_case,
+        ),
     )
 
     if not is_supabase_configured():
