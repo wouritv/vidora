@@ -4705,6 +4705,7 @@ def connect(platform: str, request: Request, user_id: str = Query(...)):
         params.pop("client_id", None)  # TikTok utilise client_key, pas client_id
         params["code_challenge"] = code_challenge
         params["code_challenge_method"] = "S256"
+        params["scope"] = ",".join(config["scopes"])  # TikTok utilise scope séparé par des espaces
 
     # Signe le payload → devient le state envoyé à la plateforme
     state = _oauth_serializer.dumps(state_payload)
