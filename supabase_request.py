@@ -7,6 +7,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from supabase import acreate_client, AsyncClient
 from supabase.lib.client_options import AsyncClientOptions
 
+import logging
+import os
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_REELS_TABLE = os.environ.get("SUPABASE_REELS_TABLE", "reels")
@@ -629,19 +635,23 @@ async def upsert_user_data_credits(
 		current_credit_max = float(existing.get("credit_max", current_credit) or 0.0)
 		current_stockage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
 
-		new_credit = _ceil_credit(current_credit + float(credit_delta))
+		logger.info(f"Current user data for {user_id}: credit={current_credit}, stockage={current_storage}, credit_max={current_credit_max}, stockage_max={current_stockage_max}")
+
+		new_credit = float(_ceil_credit(current_credit + float(credit_delta)))
 		new_storage = float(current_storage + float(storage_delta))
 		new_credit_max = max(0.0, current_credit_max)
 		new_stockage_max = max(0.0, current_stockage_max)
 
 		if update_credit_max:
 			# Credit top-ups and subscription allocations can redefine the user's ceiling.
-			new_credit_max = max(0.0, float(new_credit))
+			new_credit_max = float(_ceil_credit(current_credit_max + float(credit_delta)))
 		if update_stockage_max:
-			new_stockage_max = max(0.0, float(new_storage))
+			new_stockage_max = float(current_stockage_max + float(storage_delta))
 
 		if new_credit > new_credit_max:
 			new_credit_max = float(new_credit)
+
+		logger.info(f"Updating user data for {user_id}: credit={new_credit}, stockage={new_storage}, credit_max={new_credit_max}, stockage_max={new_stockage_max}")
 
 		response = (
 			await client.table(SUPABASE_USER_DATA_TABLE)

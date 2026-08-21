@@ -4094,6 +4094,7 @@ async def buy_credits_checkout(request: Request, payload: BuyCreditsRequest):
                         "product_data": {
                             "name": f"{credits_to_add} Vireel Credits",
                             "description": f"Achat de {credits_to_add} crédits Vireel",
+                            "tax_code": "txcd_10103001"
                         },
                     },
                 }
