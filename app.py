@@ -153,7 +153,7 @@ PLATFORM_CONFIG = {
         "token_url": "https://open.tiktokapis.com/v2/oauth/token/",
         "client_id": os.getenv("TIKTOK_CLIENT_KEY"),
         "client_secret": os.getenv("TIKTOK_CLIENT_SECRET"),
-        "scopes": ["video.publish", "user.info.basic"],
+        "scopes": ["video.upload", "user.info.basic"],
     },
 }
 
@@ -4760,7 +4760,7 @@ async def callback(platform: str, code: Optional[str] = None, state: str = "", e
                 config, raw_token_data["access_token"]
             )
 
-        token_data = _extract_token_data(key, response.json())
+        token_data = await _extract_token_data(key, raw_token_data)
 
         # Facebook : récupère les pages et affiche la sélection
         if key == "facebook":
@@ -4943,7 +4943,7 @@ async def get_valid_token(account: Dict[str, Any]) -> str:
         )
     response.raise_for_status()
 
-    new_tokens = _extract_token_data(platform, response.json())
+    new_tokens = await _extract_token_data(platform, response.json())
     refreshed_access_token = new_tokens["access_token"]
     refreshed_refresh_token = new_tokens.get("refresh_token") or refresh_token
     expires_in = int(new_tokens.get("expires_in") or 3600)
