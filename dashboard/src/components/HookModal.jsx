@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Sparkles, Loader2, Maximize, MoveVertical, Zap } from 'lucide-react';
 import RemotionPreview from './RemotionPreview';
+import { useTranslation } from '../state/LanguageContext';
 
 const ENTRANCE_OPTIONS = [
     { value: 'spring', label: 'Bounce' },
@@ -10,7 +11,8 @@ const ENTRANCE_OPTIONS = [
 ];
 
 export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles }) {
-    const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
+    const { t } = useTranslation();
+    const [text, setText] = useState(initialText || t('hookModal.defaultText', 'POV: You are using the viral hook feature'));
     const [position, setPosition] = useState('top');
     const [size, setSize] = useState('M');
     const [entranceAnimation, setEntranceAnimation] = useState('spring');
@@ -20,7 +22,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
     // Build hook config for Remotion preview
     const hookConfig = {
-        text: text || 'Enter your text...',
+        text: text || t('hookModal.textPlaceholder', 'Enter text that will stop the scroll...'),
         position,
         size,
         entranceAnimation,
@@ -82,7 +84,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                         paddingRight: '12px'
                                     }}
                                 >
-                                    {text || "Enter your text..."}
+                                    {text || t('hookModal.textPlaceholder', 'Enter text that will stop the scroll...')}
                                 </div>
                             </div>
                         </>
@@ -92,19 +94,19 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                 {/* Right: Controls */}
                 <div className="w-full md:w-80 flex flex-col">
                     <h3 className="title-contrast text-xl font-bold mb-6 flex items-center gap-2">
-                        <Sparkles className="text-yellow-400" /> Viral Hook
+                        <Sparkles className="text-yellow-400" /> {t('hookModal.title', 'Viral Hook')}
                     </h3>
 
                     <div className="space-y-6 flex-1 overflow-y-auto custom-scrollbar pr-2">
                         {/* Text Input */}
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-3 block">Text</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-3 block">{t('hookModal.text', 'Text')}</label>
                             <textarea
                                 value={text}
                                 onChange={(e) => setText(e.target.value)}
                                 rows={4}
                                 className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-xl p-3 text-white placeholder-zinc-600 focus:outline-none focus:border-yellow-500/50 resize-none font-serif"
-                                placeholder="Enter text that will stop the scroll..."
+                                placeholder={t('hookModal.textPlaceholder', 'Enter text that will stop the scroll...')}
                             />
                         </div>
 
@@ -123,7 +125,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                             : 'bg-white/5 text-slate-500 dark:text-zinc-400 border-slate-200 dark:border-white/5 hover:bg-white/10'
                                             }`}
                                     >
-                                        {pos}
+                                        {t(`hookModal.position.${pos}`, pos)}
                                     </button>
                                 ))}
                             </div>
@@ -144,7 +146,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                             : 'bg-white/5 text-slate-500 dark:text-zinc-400 border-slate-200 dark:border-white/5 hover:bg-white/10'
                                             }`}
                                     >
-                                        {sz === 'S' ? 'Small' : sz === 'M' ? 'Medium' : 'Large'}
+                                        {sz === 'S' ? t('hookModal.size.small', 'Small') : sz === 'M' ? t('hookModal.size.medium', 'Medium') : t('hookModal.size.large', 'Large')}
                                     </button>
                                 ))}
                             </div>
@@ -173,7 +175,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
                         {/* Display Duration (new) */}
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Duration: {displayDuration}s</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('hookModal.duration', 'Duration')}: {displayDuration}s</label>
                             <input
                                 type="range"
                                 min="2"
@@ -189,7 +191,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div className="p-3 bg-white/5 rounded-lg border border-slate-200 dark:border-white/5 text-[11px] text-slate-500 dark:text-zinc-400">
-                            <strong>Tip:</strong> Keep it short and punchy. Using "POV:" or specific questions works best for retention.
+                            <strong>{t('hookModal.tip', 'Tip')}:</strong> {t('hookModal.tipText', 'Keep it short and punchy. Using "POV:" or specific questions works best for retention.')}
                         </div>
                     </div>
 
@@ -203,7 +205,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         className="w-full py-4 mt-4 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black font-bold rounded-xl shadow-lg shadow-amber-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
-                        {isProcessing ? 'Generating...' : 'Add Hook'}
+                        {isProcessing ? t('hookModal.generating', 'Generating...') : t('hookModal.addHook', 'Add Hook')}
                     </button>
                 </div>
             </div>

@@ -1,7 +1,6 @@
 import {
     CreditCardIcon,
     Home,
-    Image,
     LayoutGrid,
     Settings,
     Share2,
@@ -43,18 +42,6 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         badge: "Monitoring",
         category: "service",
         path: "/dashboard/social-publications",
-    },
-    {
-        key: "caption-generator",
-        title: "Captions",
-        sidebarLabel: "Captions",
-        icon: Image,
-        activeClassName: "bg-yellow-500/10 text-yellow-400",
-        inactiveClassName: "text-slate-500 dark:text-zinc-400 hover:text-white hover:bg-white/5",
-        description: "Upload une video, choisis la plateforme cible, ajuste les captions puis rends la version finale.",
-        badge: "Gallery",
-        category: "service",
-        path: "/dashboard/captions",
     },
     {
         key: "abonnements",

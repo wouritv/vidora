@@ -32,7 +32,6 @@ from s3_uploader import (
     upload_file_to_s3,
     generate_presigned_url,
 )
-from ia_captions import router as ia_captions_router
 from supabase_request import (
     insert_reels as supabase_insert_reels,
     list_reels as supabase_list_reels,
@@ -1120,7 +1119,6 @@ async def lifespan(app: FastAPI):
     cleanup_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
-app.include_router(ia_captions_router)
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -2133,6 +2131,96 @@ async def get_clip_transcript(job_id: str, clip_index: int):
     }
 
 
+@app.post("/api/reels/{job_id}/{clip_index}/captions/persist")
+async def persist_captioned_reel(
+    job_id: str,
+    clip_index: int,
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_user_id_header),
+):
+    caption_required_credits = 0.0
+    if is_supabase_configured():
+        caption_breakdown = estimate_caption_cost_usd(
+            duration_minutes=3.0,
+            video_size_gb=0.2,
+            uses_assembly=True,
+            uses_openai=True,
+            uses_gemini=False,
+        )
+        caption_required_credits = calculate_credits_for_operation(caption_breakdown)["final_credits"]
+        user_data = await supabase_get_user_data(user_id)
+        available = float(user_data.get("credit", 0)) if user_data else 0.0
+        if available < caption_required_credits:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {caption_required_credits} cr, disponible : {available} cr.",
+            )
+
+    if not file:
+        raise HTTPException(status_code=400, detail="Missing rendered video file")
+
+    content_type = str(file.content_type or "").lower()
+    if content_type and not content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="Invalid rendered video content type")
+
+    metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
+    if not metadata_path or not data:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    clips = data.get('shorts', [])
+    if clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    upload_name = str(file.filename or "captioned.mp4")
+    ext = os.path.splitext(upload_name)[1].lower()
+    if ext not in {".mp4", ".mov", ".webm", ".mkv"}:
+        ext = ".mp4"
+
+    output_filename = f"captioned_{clip_index}_{int(time.time())}{ext}"
+    output_path = os.path.join(output_dir, output_filename)
+
+    try:
+        with open(output_path, "wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+    finally:
+        await file.close()
+
+    new_video_url = f"/videos/{job_id}/{output_filename}"
+
+    job = jobs.get(job_id)
+    if job and clip_index < len(job.get('result', {}).get('clips', [])):
+        job['result']['clips'][clip_index]['video_url'] = new_video_url
+
+    clips[clip_index]['video_url'] = new_video_url
+    data['shorts'] = clips
+    _persist_metadata_json(metadata_path, data)
+
+    if is_supabase_configured() and caption_required_credits > 0:
+        debited = await supabase_deduct_user_credits(user_id, caption_required_credits)
+        if not debited:
+            raise HTTPException(status_code=500, detail="Failed to debit credits for captions")
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=caption_required_credits,
+            storage=0.0,
+            operation="output",
+            operation_type="reels",
+            operation_id=f"{job_id}:captions:{clip_index}",
+        )
+
+    return {
+        "success": True,
+        "new_video_url": new_video_url,
+        "persisted": True,
+        "job_id": job_id,
+        "clip_index": clip_index,
+        "user_id": user_id,
+    }
+
+
 # --- Remotion Render Proxy ---
 RENDER_SERVICE_URL = os.getenv("RENDER_SERVICE_URL", "http://renderer:3100")
 
@@ -2988,18 +3076,21 @@ async def translate_clip(req: TranslateRequest):
         output_path = os.path.join(output_dir, output_filename)
 
         def run_burn():
+            style_options = SubtitleStyleOptions(
+                font_name=req.font_name,
+                font_color=req.font_color,
+                border_color=req.border_color,
+                border_width=req.border_width,
+                bg_color=req.bg_color,
+                bg_opacity=req.bg_opacity,
+            )
             burn_subtitles(
                 input_path,
                 srt_path,
                 output_path,
                 alignment=req.position,
                 fontsize=req.font_size,
-                font_name=req.font_name,
-                font_color=req.font_color,
-                border_color=req.border_color,
-                border_width=req.border_width,
-                bg_color=req.bg_color,
-                bg_opacity=req.bg_opacity
+                style_options=style_options,
             )
 
         await loop.run_in_executor(None, run_burn)

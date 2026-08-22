@@ -76,7 +76,19 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
 
   const currentTimeMs = blockStartMs + (frame / fps) * 1000;
   const activeIndex = getActiveWordIndex(block.words, currentTimeMs);
-  const fontStack = getFontStack(style.fontFamily);
+  const firstWord = block.words[0];
+  const blockFontFamily = String(firstWord?.lineFontFamily || style.fontFamily || "Arial");
+  const fontStack = getFontStack(blockFontFamily);
+  const blockPositionX = Number.isFinite(Number(firstWord?.linePositionX))
+    ? Number(firstWord?.linePositionX)
+    : style.positionX;
+  const blockPositionY = Number.isFinite(Number(firstWord?.linePositionY))
+    ? Number(firstWord?.linePositionY)
+    : style.positionY;
+  const blockFontSize = Number.isFinite(Number(firstWord?.lineFontSize))
+    ? Number(firstWord?.lineFontSize)
+    : style.fontSize;
+  const blockEmoji = typeof firstWord?.lineEmoji === "string" ? firstWord.lineEmoji.trim() : "";
 
   const hasBg = style.bgOpacity > 0;
   const bgStyle: React.CSSProperties = hasBg
@@ -93,8 +105,8 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
     <div
       style={{
         position: "absolute",
-        left: `${style.positionX}%`,
-        top: `${style.positionY}%`,
+        left: `${blockPositionX}%`,
+        top: `${blockPositionY}%`,
         transform: "translate(-50%, -50%)",
         display: "flex",
         justifyContent: "center",
@@ -110,12 +122,26 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           ...bgStyle,
         }}
       >
+        {blockEmoji ? (
+          <span
+            style={{
+              fontSize: Math.max(42, blockFontSize * 0.95),
+              lineHeight: 1,
+              marginRight: 6,
+              filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.5))",
+            }}
+          >
+            {blockEmoji}
+          </span>
+        ) : null}
         {block.words.map((word, i) => (
           <WordSpan
             key={`${word.startMs}-${word.endMs}-${word.text}-${i}`}
+            wordColor={word.color}
             word={word.text}
             isActive={i === activeIndex}
             style={style}
+            fontSize={blockFontSize}
             fontStack={fontStack}
             animation={style.animation}
             frame={frame}
@@ -130,9 +156,11 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
 };
 
 interface WordSpanProps {
+  wordColor?: string;
   word: string;
   isActive: boolean;
   style: SubtitleConfig["style"];
+  fontSize: number;
   fontStack: string;
   animation: SubtitleConfig["style"]["animation"];
   frame: number;
@@ -142,9 +170,11 @@ interface WordSpanProps {
 }
 
 const WordSpan: React.FC<WordSpanProps> = ({
+  wordColor,
   word,
   isActive,
   style,
+  fontSize,
   fontStack,
   animation,
   frame,
@@ -174,7 +204,7 @@ const WordSpan: React.FC<WordSpanProps> = ({
   });
 
   let transform = "";
-  let color = style.fontColor;
+  let color = wordColor || style.fontColor;
   let extraStyle: React.CSSProperties = {};
   let opacity = 1;
   let displayWord = word;
@@ -186,7 +216,9 @@ const WordSpan: React.FC<WordSpanProps> = ({
   }
 
   if (isActive) {
-    color = style.highlightColor;
+    if (!wordColor) {
+      color = style.highlightColor;
+    }
 
     switch (animation) {
       case "pop": {
@@ -302,10 +334,10 @@ const WordSpan: React.FC<WordSpanProps> = ({
           style={{
             position: "absolute",
             left: "50%",
-            top: -style.fontSize * 1.15,
+            top: -fontSize * 1.15,
             transform: `translateX(-50%) translateY(${emojiRise}px) scale(${emojiScale})`,
             opacity: emojiOpacity,
-            fontSize: Math.max(70, style.fontSize * 1.6),
+            fontSize: Math.max(70, fontSize * 1.6),
             lineHeight: 1,
             filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.5))",
             pointerEvents: "none",
@@ -317,7 +349,7 @@ const WordSpan: React.FC<WordSpanProps> = ({
       <span
         style={{
           fontFamily: fontStack,
-          fontSize: style.fontSize,
+          fontSize,
           fontWeight: style.bold ? 700 : 500,
           fontStyle: style.italic ? "italic" : "normal",
           color: animation === "karaoke" && isActive ? undefined : color,

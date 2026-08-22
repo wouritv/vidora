@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Wand2, Type } from 'lucide-react';
+import { Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Wand2, Type, MessageSquareText } from 'lucide-react';
 import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
+import CaptionsModal from './CaptionsModal';
 import HookModal from './HookModal';
 import SharePostModal from './SharePostModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
@@ -35,6 +36,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
+    const [showCaptionsModal, setShowCaptionsModal] = useState(false);
     const videoRef = React.useRef(null);
     const originalVideoUrl = rawVideoUrl ? getApiUrl(rawVideoUrl) : '';
     const [currentVideoUrl, setCurrentVideoUrl] = useState(originalVideoUrl);
@@ -56,6 +58,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
+    const [isCaptioning, setIsCaptioning] = useState(false);
+    const [captionsCreditBlocked, setCaptionsCreditBlocked] = useState(false);
+    const [captionsCreditError, setCaptionsCreditError] = useState('');
     const [isHooking, setIsHooking] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [editError, setEditError] = useState(null);
@@ -67,7 +72,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
 
     // Accumulate Remotion layers across operations
-    const [activeLayers, setActiveLayers] = useState({ subtitles: null, hook: null, effects: null });
+    const [activeLayers, setActiveLayers] = useState({ subtitles: null, captions: null, hook: null, effects: null });
+
+    const resolveTextLayer = (layers) => layers?.captions || layers?.subtitles || null;
 
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
@@ -90,6 +97,13 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         videoRef.current.pause();
         videoRef.current.load();
     }, [currentVideoUrl]);
+
+    useEffect(() => {
+        if (showCaptionsModal) {
+            setCaptionsCreditBlocked(false);
+            setCaptionsCreditError('');
+        }
+    }, [showCaptionsModal]);
 
     // Release generated object URLs to avoid leaking browser memory.
     useEffect(() => () => {
@@ -164,7 +178,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     const blobUrl = await renderInBrowser({
                         videoUrl: originalVideoUrl,
                         durationInSeconds: clipDuration,
-                        subtitles: newLayers.subtitles,
+                        subtitles: resolveTextLayer(newLayers),
                         hook: newLayers.hook,
                         effects: newLayers.effects,
                     });
@@ -270,13 +284,13 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     ...options.remotion,
                     captions: nextCaptions,
                 };
-                const newLayers = { ...activeLayers, subtitles: subtitleLayer };
+                const newLayers = { ...activeLayers, subtitles: subtitleLayer, captions: null };
                 setActiveLayers(newLayers);
                 setClipDuration(nextDurationSec);
                 const blobUrl = await renderInBrowser({
                     videoUrl: originalVideoUrl,
                     durationInSeconds: nextDurationSec,
-                    subtitles: newLayers.subtitles,
+                    subtitles: resolveTextLayer(newLayers),
                     hook: newLayers.hook,
                     effects: newLayers.effects,
                 });
@@ -337,6 +351,92 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         }
     };
 
+    const handleCaptions = async (options) => {
+        if (!canCustomize) {
+            setEditError(insufficientCreditsMessage(reelCostEstimate));
+            setTimeout(() => setEditError(null), 5000);
+            return;
+        }
+        if (!hasClipContext) {
+            setEditError(t("reels.noActionAvailable", "Actions indisponibles: ce reel est detache de son job original."));
+            setTimeout(() => setEditError(null), 5000);
+            return;
+        }
+
+        setIsCaptioning(true);
+        setEditError(null);
+        setCaptionsCreditBlocked(false);
+        setCaptionsCreditError('');
+        try {
+            const nextDurationSec = Number.isFinite(Number(options.previewDurationSec)) && Number(options.previewDurationSec) > 0
+                ? Number(options.previewDurationSec)
+                : clipDuration;
+            const captionLayer = options.remotion || null;
+            if (!captionLayer || !Array.isArray(captionLayer.captions) || captionLayer.captions.length === 0) {
+                throw new Error(t('captionsModal.noCaptions', 'No captions available for this clip.'));
+            }
+
+            const newLayers = { ...activeLayers, captions: captionLayer, subtitles: null };
+            setActiveLayers(newLayers);
+            setClipDuration(nextDurationSec);
+            const blobUrl = await renderInBrowser({
+                videoUrl: originalVideoUrl,
+                durationInSeconds: nextDurationSec,
+                subtitles: resolveTextLayer(newLayers),
+                hook: newLayers.hook,
+                effects: newLayers.effects,
+            });
+            setCurrentVideoUrl(blobUrl);
+            if (videoRef.current) videoRef.current.load();
+
+            const renderedBlob = await fetch(blobUrl).then((res) => res.blob());
+            const formData = new FormData();
+            formData.append('file', renderedBlob, `captioned_${jobId}_${clipIndexForApi}.mp4`);
+
+            const persistRes = await fetch(getApiUrl(`/api/reels/${jobId}/${clipIndexForApi}/captions/persist`), {
+                method: 'POST',
+                headers: {
+                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                },
+                body: formData,
+            });
+
+            if (!persistRes.ok) {
+                const status = persistRes.status;
+                const raw = await persistRes.text();
+                let detail = raw;
+                try {
+                    const parsed = JSON.parse(raw);
+                    detail = parsed?.detail || raw;
+                } catch {
+                    // Keep raw fallback.
+                }
+                if (status === 402) {
+                    const creditMsg = detail || t('captionsModal.insufficientCredits', 'Insufficient credits to generate captions for this reel.');
+                    setCaptionsCreditBlocked(true);
+                    setCaptionsCreditError(creditMsg);
+                    throw new Error(creditMsg);
+                }
+                throw new Error(detail || 'Caption persistence failed');
+            }
+
+            const persistData = await persistRes.json();
+            if (persistData.new_video_url) {
+                if (blobUrl.startsWith('blob:')) {
+                    URL.revokeObjectURL(blobUrl);
+                }
+                setCurrentVideoUrl(getApiUrl(persistData.new_video_url));
+                if (videoRef.current) videoRef.current.load();
+            }
+            setShowCaptionsModal(false);
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsCaptioning(false);
+        }
+    };
+
     const handleHook = async (hookData) => {
         if (!canCustomize) {
             setEditError(insufficientCreditsMessage(reelCostEstimate));
@@ -359,7 +459,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 const blobUrl = await renderInBrowser({
                     videoUrl: originalVideoUrl,
                     durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
+                        subtitles: resolveTextLayer(newLayers),
                     hook: newLayers.hook,
                     effects: newLayers.effects,
                 });
@@ -573,7 +673,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 )}
 
                 {/* Actions Footer */}
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-auto pt-4 border-t border-slate-200 dark:border-white/5">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-auto pt-4 border-t border-slate-200 dark:border-white/5">
                     <button
                         onClick={handleAutoEdit}
                         disabled={isEditing || !hasClipContext || !canCustomize}
@@ -602,6 +702,16 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     >
                         {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
                         {!compactActions ? (isHooking ? t("common.adding", "Adding...") : t("common.viralhook", "Viral Hook")) : null}
+                    </button>
+
+                    <button
+                        onClick={() => setShowCaptionsModal(true)}
+                        disabled={isCaptioning || !hasClipContext || !canCustomize}
+                        title={t('common.captions', 'Captions')}
+                        className={`col-span-1 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
+                    >
+                        {isCaptioning ? <Loader2 size={14} className="animate-spin" /> : <MessageSquareText size={14} />}
+                        {!compactActions ? (isCaptioning ? t("common.adding", "Adding...") : t('common.captions', 'Captions')) : null}
                     </button>
 
                     <button
@@ -647,6 +757,20 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 existingEffects={activeLayers.effects}
             />
 
+            <CaptionsModal
+                isOpen={showCaptionsModal}
+                onClose={() => setShowCaptionsModal(false)}
+                onGenerate={handleCaptions}
+                isProcessing={isCaptioning}
+                creditBlocked={captionsCreditBlocked}
+                creditError={captionsCreditError}
+                videoUrl={originalVideoUrl}
+                jobId={jobId}
+                clipIndex={clipIndexForApi}
+                existingHook={activeLayers.hook}
+                existingEffects={activeLayers.effects}
+            />
+
             <HookModal
                 isOpen={showHookModal}
                 onClose={() => setShowHookModal(false)}
@@ -655,7 +779,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 videoUrl={originalVideoUrl}
                 initialText={safeClip.viral_hook_text}
                 durationInSeconds={Math.max(1, clipEnd - clipStart)}
-                existingSubtitles={activeLayers.subtitles}
+                existingSubtitles={resolveTextLayer(activeLayers)}
             />
 
 

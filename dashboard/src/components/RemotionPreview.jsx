@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
 import { Player } from '@remotion/player';
 import { ShortVideo } from '../remotion/compositions/ShortVideo';
 import { toBrowserSafeMediaUrl } from '../lib/clips';
@@ -15,15 +15,16 @@ import { toBrowserSafeMediaUrl } from '../lib/clips';
  * @param {object|null} props.effects - EffectsConfig or null
  * @param {string} [props.className] - Additional CSS classes
  */
-export default function RemotionPreview({
+const RemotionPreview = forwardRef(function RemotionPreview({
     videoUrl,
     durationInSeconds = 30,
     subtitles = null,
     hook = null,
     effects = null,
     className = '',
-}) {
+}, ref) {
     const fps = 30;
+    const playerRef = useRef(null);
     const durationInFrames = Math.max(1, Math.round(durationInSeconds * fps));
     const browserSafeVideoUrl = toBrowserSafeMediaUrl(videoUrl);
 
@@ -41,9 +42,24 @@ export default function RemotionPreview({
         [browserSafeVideoUrl, durationInFrames, subtitles, hook, effects]
     );
 
+    useImperativeHandle(ref, () => ({
+        seekToMs(ms) {
+            const frame = Math.max(0, Math.floor((Number(ms) || 0) * fps / 1000));
+            playerRef.current?.seekTo?.(frame);
+        },
+    }), [fps]);
+
+    const playerKey = useMemo(() => JSON.stringify({
+        durationInFrames,
+        style: subtitles?.style || null,
+        words: Array.isArray(subtitles?.captions) ? subtitles.captions.length : 0,
+    }), [durationInFrames, subtitles]);
+
     return (
         <div className={`w-full h-full ${className}`}>
             <Player
+                key={playerKey}
+                ref={playerRef}
                 component={ShortVideo}
                 inputProps={inputProps}
                 durationInFrames={durationInFrames}
@@ -60,4 +76,6 @@ export default function RemotionPreview({
             />
         </div>
     );
-}
+});
+
+export default RemotionPreview;

@@ -6,7 +6,6 @@ import {
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
-import ThumbnailStudio from './components/ThumbnailStudio';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import { getApiUrl } from './config';
 import { useLocation, useNavigate } from "react-router-dom";
@@ -573,33 +572,6 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
              </div>
           )}
 
-          {currentTab === 'caption-generator' && (
-              <div className="h-16 border-b border-slate-200 dark:border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
-                <div className="flex items-center gap-4">
-                  <div>
-                    <h1 className="text-3xl font-black tracking-tight">{t('app.captions', 'Captions')}</h1>
-                  </div>
-                </div>
-
-                <button
-                    type="button"
-                    onClick={() => {
-                      navigate("/dashboard/captions");
-                    }}
-                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
-                >
-                  <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
-                    <ArrowLeft size={16} />
-                  </div>
-                  <div className="hidden lg:block overflow-hidden">
-                    <p className="text-sm font-bold text-white leading-none mb-0.5">{t('app.backToList', 'Back to list')}</p>
-                  </div>
-                </button>
-
-              </div>
-          )}
-
-
         </header>
 
         {/* Main Workspace */}
@@ -610,11 +582,6 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
               <SettingsPage />
           )}
 
-
-           {/* View: Thumbnails */}
-           {currentTab === 'caption-generator' && (
-               <ThumbnailStudio appUserId={user?.id} />
-           )}
 
           {/* View: Dashboard (Idle) */}
           {currentTab === 'reel-generator' && uiStatus === 'idle' && (

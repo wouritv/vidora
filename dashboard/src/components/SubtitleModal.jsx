@@ -3,6 +3,7 @@ import { X, Type, Loader2, Languages, Globe } from 'lucide-react';
 import { getApiUrl } from '../config';
 import RemotionPreview from './RemotionPreview';
 import { ANIMATION_OPTIONS, COLOR_PRESETS, DEFAULT_SUBTITLE_FORM_STYLE, FONT_OPTIONS, HIGHLIGHT_COLOR_PRESETS } from '../lib/subtitleOptions';
+import { useTranslation } from '../state/LanguageContext';
 
 const LANGUAGES = {
     es: 'Spanish',
@@ -39,6 +40,7 @@ const LANGUAGES = {
 };
 
 export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, jobId, clipIndex, existingHook, existingEffects }) {
+    const { t } = useTranslation();
     const previewCacheRef = useRef({});
     const [positionX, setPositionX] = useState(DEFAULT_SUBTITLE_FORM_STYLE.positionX);
     const [positionY, setPositionY] = useState(DEFAULT_SUBTITLE_FORM_STYLE.positionY);
@@ -316,7 +318,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                     {captionsLoading ? (
                         <div className="flex items-center gap-2 text-slate-500 dark:text-zinc-400">
                             <Loader2 size={16} className="animate-spin" />
-                            <span className="text-sm">Loading preview...</span>
+                            <span className="text-sm">{t('subtitleModal.loadingPreview', 'Loading preview...')}</span>
                         </div>
                     ) : useRemotionPreview ? (
                         <RemotionPreview
@@ -345,7 +347,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 {/* Right: Controls */}
                 <div className="w-full md:w-80 flex flex-col">
                     <h3 className="title-contrast text-xl font-bold mb-4 flex items-center gap-2 shrink-0">
-                        <Type className="text-primary" /> Auto Subtitles
+                        <Type className="text-primary" /> {t('subtitleModal.title', 'Auto Subtitles')}
                     </h3>
 
                     <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar pr-1">
@@ -355,9 +357,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 <div>
                                     <p className="text-xs font-bold text-slate-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-2">
                                         <Languages size={14} className="text-emerald-400" />
-                                        Activer la traduction
+                                        {t('subtitleModal.enableTranslation', 'Enable translation')}
                                     </p>
-                                    <p className="text-[11px] text-slate-400 dark:text-zinc-500 mt-1">Conserve les memes styles/animations avec preview en direct.</p>
+                                    <p className="text-[11px] text-slate-400 dark:text-zinc-500 mt-1">{t('subtitleModal.translationHint', 'Keep the same styles/animations with live preview.')}</p>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input
@@ -384,7 +386,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <div>
                                         <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2">
                                             <Globe size={12} className="inline mr-1" />
-                                            Language
+                                            {t('subtitleModal.language', 'Language')}
                                         </label>
                                         <select
                                             value={targetLanguage}
@@ -403,7 +405,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     {isPreviewTranslating ? (
                                         <div className="text-xs text-emerald-300 flex items-center gap-2">
                                             <Loader2 size={12} className="animate-spin" />
-                                            Updating translated preview...
+                                            {t('subtitleModal.updatingPreview', 'Updating translated preview...')}
                                         </div>
                                     ) : null}
                                     {previewError ? (
@@ -421,7 +423,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Position libre (X/Y)</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('subtitleModal.freePosition', 'Free position (X/Y)')}</label>
                             <div className="space-y-3 rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] p-3">
                                 <div>
                                     <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-zinc-400 mb-1">
@@ -455,28 +457,28 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Style du texte</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('subtitleModal.textStyle', 'Text style')}</label>
                             <div className="grid grid-cols-2 gap-2">
                                 <button
                                     type="button"
                                     onClick={() => setBold((v) => !v)}
                                     className={`rounded-lg border px-3 py-2 text-xs font-semibold ${bold ? 'border-primary bg-primary/20 text-white' : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-500 dark:text-zinc-400'}`}
                                 >
-                                    Gras
+                                    {t('subtitleModal.bold', 'Bold')}
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => setItalic((v) => !v)}
                                     className={`rounded-lg border px-3 py-2 text-xs font-semibold ${italic ? 'border-primary bg-primary/20 text-white' : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-500 dark:text-zinc-400'}`}
                                 >
-                                    Italique
+                                    {t('subtitleModal.italic', 'Italic')}
                                 </button>
                             </div>
                             <div className="grid grid-cols-3 gap-2 mt-2">
                                 {[
-                                    { value: 'none', label: 'Normal' },
-                                    { value: 'uppercase', label: 'MAJ' },
-                                    { value: 'lowercase', label: 'min' },
+                                    { value: 'none', label: t('subtitleModal.case.normal', 'Normal') },
+                                    { value: 'uppercase', label: t('subtitleModal.case.upper', 'UPPER') },
+                                    { value: 'lowercase', label: t('subtitleModal.case.lower', 'lower') },
                                 ].map((opt) => (
                                     <button
                                         key={opt.value}
@@ -492,7 +494,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Animation Style (new) */}
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Animation</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('subtitleModal.animation', 'Animation')}</label>
                             <div className="grid grid-cols-2 gap-2">
                                 {ANIMATION_OPTIONS.map((opt) => (
                                     <button
@@ -516,7 +518,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     onClick={() => setShowTextEditor(!showTextEditor)}
                                     className="w-full flex items-center justify-between text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2"
                                 >
-                                    <span>Edit Text ({captions.length} words)</span>
+                                    <span>{t('subtitleModal.editText', 'Edit text')} ({captions.length} {t('subtitleModal.words', 'words')})</span>
                                     <span className={`transition-transform ${showTextEditor ? 'rotate-180' : ''}`}>▾</span>
                                 </button>
                                 {showTextEditor && (
@@ -525,7 +527,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         onChange={(e) => handleTextEdit(e.target.value)}
                                         rows={5}
                                         className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-primary/50 resize-none leading-relaxed animate-[fadeIn_0.15s_ease-out]"
-                                        placeholder="Edit subtitle text..."
+                                        placeholder={t('subtitleModal.editPlaceholder', 'Edit subtitle text...')}
                                     />
                                 )}
                             </div>
@@ -534,7 +536,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         {/* Font Family */}
                         <div>
                             <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
-                                Police — <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal" style={{ fontFamily: fontName }}>{fontName}</span>
+                                {t('subtitleModal.fontFamily', 'Font family')} — <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal" style={{ fontFamily: fontName }}>{fontName}</span>
                             </label>
                             <div className="max-h-52 overflow-y-auto custom-scrollbar pr-1 space-y-2">
                                 {[...new Set(FONT_OPTIONS.map(f => f.category))].map(cat => (
@@ -561,7 +563,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         {/* Font Size */}
                         <div>
                             <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
-                                Taille du texte <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal">({fontSize}px)</span>
+                                {t('subtitleModal.fontSize', 'Text size')} <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal">({fontSize}px)</span>
                             </label>
                             <input
                                 type="range"
@@ -572,14 +574,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 className="w-full accent-primary"
                             />
                             <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500 mt-1">
-                                <span>Petit</span>
-                                <span>Grand</span>
+                                <span>{t('subtitleModal.small', 'Small')}</span>
+                                <span>{t('subtitleModal.large', 'Large')}</span>
                             </div>
                         </div>
 
                         {/* Text Color */}
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Text Color</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('subtitleModal.textColor', 'Text color')}</label>
                             <div className="flex flex-wrap gap-2">
                                 {COLOR_PRESETS.map((c) => (
                                     <button
@@ -590,7 +592,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         title={c.label}
                                     />
                                 ))}
-                                <label className="w-7 h-7 rounded-full border-2 border-dashed border-slate-400 dark:border-white/20 cursor-pointer flex items-center justify-center hover:border-slate-200 dark:border-white/50 transition-all overflow-hidden relative" title="Custom color">
+                                <label className="w-7 h-7 rounded-full border-2 border-dashed border-slate-400 dark:border-white/20 cursor-pointer flex items-center justify-center hover:border-slate-200 dark:border-white/50 transition-all overflow-hidden relative" title={t('subtitleModal.customColor', 'Custom color')}>
                                     <span className="text-[10px] text-slate-500 dark:text-zinc-400">+</span>
                                     <input type="color" value={fontColor} onChange={(e) => setFontColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                 </label>
@@ -599,7 +601,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Highlight Color (new) */}
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Highlight Color</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('subtitleModal.highlightColor', 'Highlight color')}</label>
                             <div className="flex flex-wrap gap-2">
                                 {HIGHLIGHT_COLOR_PRESETS.map((c) => (
                                     <button
@@ -614,7 +616,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Couleur de l'ombre</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('subtitleModal.shadowColor', 'Shadow color')}</label>
                             <div className="flex items-center gap-3 rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] p-3">
                                 <label className="relative w-8 h-8 rounded-lg border border-slate-300 dark:border-white/10 cursor-pointer overflow-hidden shrink-0" title="Shadow color">
                                     <div className="w-full h-full" style={{ backgroundColor: textShadowColor }} />
@@ -622,15 +624,15 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 </label>
                                 <div className="flex-1 grid grid-cols-3 gap-2 text-[10px] text-slate-400 dark:text-zinc-500">
                                     <div>
-                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">Blur {shadowBlur}px</div>
+                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">{t('subtitleModal.blur', 'Blur')} {shadowBlur}px</div>
                                         <input type="range" min="0" max="24" value={shadowBlur} onChange={(e) => setShadowBlur(Number(e.target.value))} className="w-full accent-primary" />
                                     </div>
                                     <div>
-                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">Offset X {shadowOffsetX}px</div>
+                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">{t('subtitleModal.offsetX', 'Offset X')} {shadowOffsetX}px</div>
                                         <input type="range" min="-20" max="20" value={shadowOffsetX} onChange={(e) => setShadowOffsetX(Number(e.target.value))} className="w-full accent-primary" />
                                     </div>
                                     <div>
-                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">Offset Y {shadowOffsetY}px</div>
+                                        <div className="mb-1 text-slate-500 dark:text-zinc-400">{t('subtitleModal.offsetY', 'Offset Y')} {shadowOffsetY}px</div>
                                         <input type="range" min="-20" max="20" value={shadowOffsetY} onChange={(e) => setShadowOffsetY(Number(e.target.value))} className="w-full accent-primary" />
                                     </div>
                                 </div>
@@ -639,7 +641,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Border / Outline */}
                         <div>
-                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">Border</label>
+                            <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('subtitleModal.border', 'Border')}</label>
                             <div className="flex items-center gap-3">
                                 <label className="relative w-8 h-8 rounded-lg border border-slate-300 dark:border-white/10 cursor-pointer overflow-hidden shrink-0" title="Border color">
                                     <div className="w-full h-full" style={{ backgroundColor: borderColor }} />
@@ -655,8 +657,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         className="w-full accent-primary"
                                     />
                                     <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500">
-                                        <span>None</span>
-                                        <span>Thick</span>
+                                        <span>{t('subtitleModal.none', 'None')}</span>
+                                        <span>{t('subtitleModal.thick', 'Thick')}</span>
                                     </div>
                                 </div>
                             </div>
@@ -664,7 +666,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         <div>
                             <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
-                                Mots par ligne <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal">({wordsPerLine})</span>
+                                {t('subtitleModal.wordsPerLine', 'Words per line')} <span className="text-slate-400 dark:text-zinc-500 normal-case font-normal">({wordsPerLine})</span>
                             </label>
                             <input
                                 type="range"
@@ -683,7 +685,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         {/* Background Box */}
                         <div>
                             <div className="flex items-center justify-between mb-2">
-                                <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Background Box</label>
+                                <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">{t('subtitleModal.backgroundBox', 'Background box')}</label>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input type="checkbox" checked={bgOpacity > 0} onChange={(e) => setBgOpacity(e.target.checked ? 0.5 : 0)} className="sr-only peer" />
                                     <div className="w-8 h-4 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[0px] after:left-[0px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
@@ -706,7 +708,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                                 className="w-full accent-primary"
                                             />
                                             <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500">
-                                                <span>Transparent</span>
+                                                <span>{t('subtitleModal.transparent', 'Transparent')}</span>
                                                 <span>{Math.round(bgOpacity * 100)}%</span>
                                             </div>
                                         </div>
@@ -732,7 +734,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         className="w-full py-3 mt-4 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 shrink-0"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Type size={20} />}
-                        {isProcessing ? 'Generating...' : 'Generate Subtitles'}
+                        {isProcessing ? t('subtitleModal.generating', 'Generating...') : t('subtitleModal.generate', 'Generate Subtitles')}
                     </button>
                 </div>
             </div>

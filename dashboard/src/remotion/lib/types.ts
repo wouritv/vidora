@@ -5,6 +5,13 @@ export interface CaptionWord {
   text: string;
   startMs: number;
   endMs: number;
+  color?: string;
+  lineId?: string;
+  lineEmoji?: string;
+  linePositionX?: number;
+  linePositionY?: number;
+  lineFontSize?: number;
+  lineFontFamily?: string;
 }
 
 // --- Subtitle config ---
@@ -93,6 +100,13 @@ export const captionWordSchema = z.object({
   text: z.string(),
   startMs: z.number(),
   endMs: z.number(),
+  color: z.string().optional(),
+  lineId: z.string().optional(),
+  lineEmoji: z.string().optional(),
+  linePositionX: z.number().optional(),
+  linePositionY: z.number().optional(),
+  lineFontSize: z.number().optional(),
+  lineFontFamily: z.string().optional(),
 });
 
 export const subtitleStyleSchema = z.object({

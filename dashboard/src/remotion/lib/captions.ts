@@ -27,11 +27,13 @@ export function groupCaptionsIntoBlocks(
   const blocks: CaptionBlock[] = [];
   let currentWords: CaptionWord[] = [];
   let blockStartMs = 0;
+  let currentLineId: string | null = null;
 
   for (const word of captions) {
     if (currentWords.length === 0) {
       currentWords.push(word);
       blockStartMs = word.startMs;
+      currentLineId = word.lineId ?? null;
       continue;
     }
 
@@ -42,6 +44,7 @@ export function groupCaptionsIntoBlocks(
     const duration = word.endMs - blockStartMs;
 
     if (
+      (currentLineId && word.lineId && word.lineId !== currentLineId) ||
       currentWords.length >= maxWords ||
       currentTextLen + word.text.length > maxChars ||
       duration > maxDurationMs
@@ -57,6 +60,7 @@ export function groupCaptionsIntoBlocks(
 
       currentWords = [word];
       blockStartMs = word.startMs;
+      currentLineId = word.lineId ?? null;
     } else {
       currentWords.push(word);
     }
