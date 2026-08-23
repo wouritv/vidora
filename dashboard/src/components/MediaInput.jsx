@@ -7,6 +7,7 @@ export default function MediaInput({
     onProcess,
     isProcessing,
     isCreditBlocked = false,
+    disableActions = false,
     creditWarning = "",
     localOnly = false,
     submitLabel = "",
@@ -60,22 +61,26 @@ export default function MediaInput({
             <div className="flex gap-4 mb-6 border-b border-slate-200 dark:border-white/5 pb-4">
                 {youtubeUrlEnabled && !localOnly && (
                     <button
+                        type="button"
                         onClick={() => setMode('url')}
+                        disabled={disableActions}
                         className={`flex items-center gap-2 pb-2 px-2 transition-all ${mode === 'url'
                             ? 'text-primary border-b-2 border-primary -mb-[17px]'
                             : 'text-slate-500 dark:text-zinc-400 hover:text-white'
-                            }`}
+                            } disabled:opacity-40 disabled:cursor-not-allowed`}
                     >
                         <Youtube size={18} />
                         {t('mediaInput.youtubeUrl', 'YouTube URL')}
                     </button>
                 )}
                 <button
+                    type="button"
                     onClick={() => setMode('file')}
+                    disabled={disableActions}
                     className={`flex items-center gap-2 pb-2 px-2 transition-all ${(mode === 'file' || localOnly)
                         ? 'text-primary border-b-2 border-primary -mb-[17px]'
                         : 'text-slate-500 dark:text-zinc-400 hover:text-white'
-                        }`}
+                        } disabled:opacity-40 disabled:cursor-not-allowed`}
                 >
                     <Upload size={18} />
                     {t('mediaInput.uploadFile', 'Upload File')}
@@ -97,9 +102,15 @@ export default function MediaInput({
                 ) : (
                     <div
                         className={`border-2 border-dashed rounded-xl p-8 text-center transition-all ${file ? 'border-primary/50 bg-primary/5' : 'border-zinc-700 hover:border-zinc-500 bg-white/5'
-                            }`}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={handleDrop}
+                            } ${disableActions ? 'opacity-60 pointer-events-none' : ''}`}
+                        onDragOver={(e) => {
+                            if (disableActions) return;
+                            e.preventDefault();
+                        }}
+                        onDrop={(e) => {
+                            if (disableActions) return;
+                            handleDrop(e);
+                        }}
                     >
                         {file ? (
                             <div className="flex items-center justify-center gap-3 text-white">
@@ -108,6 +119,7 @@ export default function MediaInput({
                                 <button
                                     type="button"
                                     onClick={() => setFile(null)}
+                                    disabled={disableActions}
                                     className="p-1 hover:bg-white/10 rounded-full"
                                 >
                                     <X size={16} />
@@ -118,6 +130,7 @@ export default function MediaInput({
                                 <input
                                     type="file"
                                     accept="video/*"
+                                    disabled={disableActions}
                                     onChange={(e) => setFile(e.target.files?.[0] || null)}
                                     className="hidden"
                                 />
@@ -139,6 +152,7 @@ export default function MediaInput({
                     <input
                         type="checkbox"
                         checked={acknowledged}
+                        disabled={disableActions}
                         onChange={(e) => setAcknowledged(e.target.checked)}
                         className="mt-0.5 accent-primary cursor-pointer"
                     />
@@ -149,7 +163,7 @@ export default function MediaInput({
 
                 <button
                     type="submit"
-                    disabled={isProcessing || isCreditBlocked || !acknowledged || ((mode === 'url' && !localOnly) && !url) || (mode === 'file' && !file)}
+                    disabled={disableActions || isProcessing || isCreditBlocked || !acknowledged || ((mode === 'url' && !localOnly) && !url) || (mode === 'file' && !file)}
                     className="w-full btn-primary mt-4 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     {isProcessing ? (

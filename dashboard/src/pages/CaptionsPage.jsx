@@ -67,6 +67,7 @@ export default function CaptionsPage() {
 
     const publicationCostEstimate = Number(defaultCosts?.publication || 1);
     const canShareCaption = credits >= publicationCostEstimate;
+    const canCreateCaption = Number(credits || 0) > 0;
 
     useEffect(() => {
         let active = true;
@@ -306,8 +307,12 @@ export default function CaptionsPage() {
 
                 <button
                     type="button"
-                    onClick={() => navigate("/dashboard/captions/new")}
-                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
+                    onClick={() => {
+                        if (!canCreateCaption) return;
+                        navigate("/dashboard/captions/new");
+                    }}
+                    disabled={!canCreateCaption}
+                    className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                     <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
                         <Plus size={16} />
@@ -319,6 +324,11 @@ export default function CaptionsPage() {
             </div>
 
             <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
+                {!canCreateCaption ? (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                        {t("common.insufficientCreditsStart", "Insufficient credits to start this operation.")}
+                    </div>
+                ) : null}
                 {shareResult ? (
                     <div className={`rounded-lg border px-3 py-2 text-xs ${shareResult.success ? "border-green-500/30 bg-green-500/10 text-green-300" : "border-red-500/30 bg-red-500/10 text-red-300"}`}>
                         {shareResult.msg}
@@ -460,7 +470,7 @@ export default function CaptionsPage() {
                 </div>
 
                 <div className="flex items-center justify-between border-t border-slate-300 dark:border-white/10 pt-4 text-sm">
-                    <p className="text-slate-500 dark:text-zinc-400">{total} {t("reels.reelCount", "reel(s)")}</p>
+                    <p className="text-slate-500 dark:text-zinc-400">{total} {t("reels.reelCount2", "sous-titre(s)")}</p>
                     <div className="flex items-center gap-2">
                         <button
                             type="button"

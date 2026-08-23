@@ -15,7 +15,7 @@ function normalizeStatus(status) {
 
 export default function NewCaptionPage() {
     const { user } = useAuth();
-    const { credits, defaultCosts } = useUserCredits();
+    const { credits } = useUserCredits();
     const { t } = useTranslation();
     const navigate = useNavigate();
 
@@ -24,8 +24,7 @@ export default function NewCaptionPage() {
     const [error, setError] = useState("");
     const lastLoggedCountRef = useRef(0);
 
-    const captionCostEstimate = Number(defaultCosts?.caption || 1);
-    const hasEnoughForCaption = captionCostEstimate <= 0 ? true : credits >= captionCostEstimate;
+    const hasCreditsForCaption = Number(credits || 0) > 0;
 
     const processSteps = useMemo(() => {
         const s = normalizeStatus(status);
@@ -101,8 +100,10 @@ export default function NewCaptionPage() {
             setError("Authentication required. Please reconnect your session.");
             return;
         }
-        if (!hasEnoughForCaption) {
-            setError(`Credits insuffisants. Requis: ${captionCostEstimate.toFixed(0)} cr, disponible: ${Number(credits || 0).toFixed(0)} cr.`);
+        if (!hasCreditsForCaption) {
+            const message = t("common.insufficientCreditsStart", "Crédits insuffisants pour initier cette opération.");
+            setError(message);
+            globalThis.alert(message);
             return;
         }
         if (data.type !== "file") {
@@ -135,6 +136,9 @@ export default function NewCaptionPage() {
                 }
                 setError(detail || "Subtitle generation failed");
                 setStatus("error");
+                if (response.status === 402) {
+                    globalThis.alert(detail || "Credits insuffisants pour initier cette opération.");
+                }
                 return;
             }
 
@@ -173,12 +177,18 @@ export default function NewCaptionPage() {
                         {error}
                     </div>
                 ) : null}
+                {!hasCreditsForCaption ? (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                        {t("common.insufficientCreditsStart", "Insufficient credits to start this operation.")}
+                    </div>
+                ) : null}
 
                 <MediaInput
                     onProcess={handleProcess}
                     isProcessing={isProcessing}
-                    isCreditBlocked={!hasEnoughForCaption}
-                    creditWarning={!hasEnoughForCaption ? t("reels.insufficentCredit", "Crédit insuffisant pour initier l'opération") : ""}
+                    isCreditBlocked={!hasCreditsForCaption}
+                    disableActions={!hasCreditsForCaption}
+                    creditWarning={!hasCreditsForCaption ? t("common.insufficientCreditsStart", "Crédits insuffisants pour initier cette opération.") : ""}
                     localOnly
                     submitLabel={t("captionsModal.generateSubtitles", "Generate subtitles")}
                     processingLabel={t("mediaInput.processing", "Processing Video...")}
@@ -188,7 +198,7 @@ export default function NewCaptionPage() {
             {jobId ? (
                 <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
                     <div className="flex items-center justify-between">
-                        <p className="text-sm text-slate-400">Job: <span className="font-mono text-zinc-300">{jobId}</span></p>
+                        <p className="text-sm text-slate-400">{t("common.processingProgress", "Progression du traitement")}</p>
                         <div className="inline-flex items-center gap-2 rounded-full border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-1 text-xs text-zinc-300">
                             <Activity size={14} className={isProcessing ? "animate-pulse text-primary" : "text-slate-400"} />
                             {normalizeStatus(status)}

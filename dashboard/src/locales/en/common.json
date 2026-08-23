@@ -166,6 +166,7 @@
     "tableReel": "Reel",
     "previewUnavailable": "Preview unavailable",
     "reelCount": "reel(s)",
+    "reelCount2": "subtitle(s)",
     "previewTitle": "Reel preview",
     "previewSubtitle": "Preview with the same actions as generated clips.",
     "noActionAvailable": "Actions unavailable: this reel is detached from its original job.",
@@ -270,6 +271,7 @@
     "processWait": "Waiting to start.",
     "processOk": "Completed",
     "processQueued": "Queued",
+    "insufficientCreditsStart": "Insufficient credits to start this operation.",
     "fileReceived": "Video received",
     "fileDownloaded": "Video downloaded",
     "processReady": "Source is ready for processing.",
@@ -464,7 +466,7 @@
     "reelgenerator": "Generate reels",
     "reelgeneratorSubtitle": "Upload a video and let AI extract key reel moments.",
     "captionGenerator": "Generate Captions",
-    "captionGeneratorSubtitle": "Upload a video, choose target platform, adjust captions, and render the final version."
+    "captionGeneratorSubtitle": "Upload a video and let AI assist you in adding subtitles."
   },
   "social": {
     "socialPublications": "Social posts",

@@ -1,4 +1,4 @@
-import { ArrowRight, Sparkles } from "lucide-react";
+import { ArrowRight, MessageSquareText, Sparkles } from "lucide-react";
 import { useAuth } from "../state/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
@@ -135,7 +135,7 @@ export default function Dashboard() {
                     <h3 className="mt-2 text-xl font-bold">{t("dashboard.generationJourney","Parcours de generation")}</h3>
                 </div>
 
-                <div className="grid gap-4 md:grid-cols-1">
+                <div className="grid gap-4 md:grid-cols-2">
                     <button
                         onClick={() => navigate("/dashboard/reel-generator")}
                         className="group rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-5 text-left hover:bg-white/10 transition"
@@ -149,7 +149,25 @@ export default function Dashboard() {
                         <h4 className="title-contrast mt-5 text-lg font-semibold">{t("dashboard.reelgenerator","Générer des reels")}</h4>
                         <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-zinc-400">{t("dashboard.reelgeneratorSubtitle","Upload une video et laisse le systeme boosté à l'IA extraire les moments réels.")}</p>
                     </button>
+
+                    <button
+                        onClick={() => navigate("/dashboard/captions/new")}
+                        className="group rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-5 text-left hover:bg-white/10 transition"
+                    >
+                        <div className="flex items-center justify-between">
+                            <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400">
+                                <MessageSquareText size={18} />
+                            </span>
+                            <ArrowRight size={16} className="text-slate-400 dark:text-zinc-500 group-hover:text-white" />
+                        </div>
+                        <h4 className="title-contrast mt-5 text-lg font-semibold">{t("dashboard.captionGenerator","Générer des sous-titres")}</h4>
+                        <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-zinc-400">{t("dashboard.captionGeneratorSubtitle","Upload une vidéo locale puis génère automatiquement les sous-titres.")}</p>
+                    </button>
+
+
                 </div>
+
+
             </section>
 
 

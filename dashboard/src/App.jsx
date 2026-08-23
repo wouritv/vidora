@@ -310,7 +310,7 @@ const pollJob = async (jobId) => {
 function App({ activeTab = "reel-generator", embedded = false } = {}) {
 
   const { user } = useAuth();
-  const { credits, defaultCosts } = useUserCredits();
+  const { credits } = useUserCredits();
   const { t } = useTranslation();
 
   const [jobId, setJobId] = useState(null);
@@ -331,8 +331,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
   const actionReadyClips = visibleClips.filter((clip) => typeof clip?.video_url === 'string' && clip.video_url.length > 0);
   const pendingClips = visibleClips.filter((clip) => !clip?.video_url);
 
-  const reelEstimatedCost = Number(defaultCosts?.reel || 0);
-  const hasEnoughForReel = reelEstimatedCost <= 0 ? true : credits >= reelEstimatedCost;
+  const hasAnyReelCredit = Number(credits || 0) > 0;
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -470,9 +469,11 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       setLogs(["Authentication required. Please reconnect your session."]);
       return;
     }
-    if (!hasEnoughForReel) {
+    if (!hasAnyReelCredit) {
       setStatus('idle');
-      setLogs([`Credits insuffisants. Requis: ${reelEstimatedCost.toFixed(0)} cr, disponible: ${Number(credits || 0).toFixed(0)} cr.`]);
+      const message = t("common.insufficientCreditsStart", "Crédits insuffisants pour initier cette opération.");
+      setLogs([message]);
+      globalThis.alert(message);
       return;
     }
 
@@ -511,7 +512,11 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
           // Keep raw text when response is not JSON.
         }
         if (res.status === 402) {
-          throw new Error("Crédits insuffisants pour lancer cette opération.");
+          const creditMessage = errDetail || t('reels.shareDisabledInsufficient', 'Insufficient credits. Sharing is disabled.');
+          setStatus('idle');
+          setLogs([creditMessage]);
+          globalThis.alert(creditMessage);
+          return;
         }
         throw new Error(errDetail);
       }
@@ -588,8 +593,9 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                   <MediaInput
                     onProcess={handleProcess}
                     isProcessing={uiStatus === 'processing'}
-                    isCreditBlocked={!hasEnoughForReel}
-                    creditWarning={!hasEnoughForReel ? t("reels.insufficentCredit","Crédit insuffisant pour initier l'opération") : ""}
+                    isCreditBlocked={!hasAnyReelCredit}
+                    disableActions={!hasAnyReelCredit}
+                    creditWarning={!hasAnyReelCredit ? t("common.insufficientCreditsStart", "Crédits insuffisants pour initier cette opération.") : ""}
                   />
                   <div className="flex items-center justify-center gap-8 text-slate-400 dark:text-zinc-500 text-sm">
                     <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>

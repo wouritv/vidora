@@ -52,15 +52,17 @@ class JobManager:
         reserved_quota: float = 0.0,
         estimated_cost_usd: float = 0.0,
         priority: int = 1,
+        queue_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         job_id = job_id or str(uuid.uuid4())
+        effective_queue_name = str(queue_name or self.queue_name)
         row = await create_job_record(
             job_id=job_id,
             user_id=user_id,
             job_type=job_type,
             status="created",
             job_data=job_data,
-            queue_name=self.queue_name,
+            queue_name=effective_queue_name,
             pipeline_name=pipeline_name,
             max_attempts=max_attempts,
             reserved_quota=reserved_quota,

@@ -990,9 +990,11 @@ async def _persist_reels_for_job(
         uploaded = upload_file_to_s3(clip_path, bucket, s3_key)
         if not uploaded:
             raise RuntimeError(f"Failed to upload clip to S3: {clip_filename}")
+        clip_size_bytes = int(os.path.getsize(clip_path) or 0)
 
         media_url = _reel_media_url_from_s3_key(s3_key)
         source_thumbnail = clip.get("thumbnail_url") or ""
+        generated_thumbnail_locally = False
         if not source_thumbnail:
             source_thumbnail = _generate_reel_thumbnail_from_video(
                 clip_path,
@@ -1000,6 +1002,7 @@ async def _persist_reels_for_job(
                 job_id,
                 i - 1,
             )
+            generated_thumbnail_locally = bool(source_thumbnail)
 
         print("🖼️ Uploading thumbnail for clip", i, "from source:", source_thumbnail)
 
@@ -1028,12 +1031,25 @@ async def _persist_reels_for_job(
                 "reel_updated_at": now_iso,
                 "reel_user_id": user_id,
                 "reel_status": "termine",
-                "reel_size_bytes": int(os.path.getsize(clip_path) or 0),
+                "reel_size_bytes": clip_size_bytes,
                 "reel_s3_key": s3_key,
                 "reel_job_id": job_id,
                 "reel_clip_index": i - 1,
             }
         )
+
+        # Keep only transient local outputs once the canonical media is stored on S3.
+        try:
+            if os.path.exists(clip_path):
+                os.remove(clip_path)
+        except Exception:
+            pass
+        if generated_thumbnail_locally and source_thumbnail:
+            try:
+                if os.path.exists(source_thumbnail):
+                    os.remove(source_thumbnail)
+            except Exception:
+                pass
 
     if not rows:
         raise RuntimeError("No generated clips were available for Supabase persistence")
@@ -1551,19 +1567,26 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
         _persist_metadata_json(metadata_path, metadata)
 
         bucket = os.environ.get("AWS_S3_BUCKET", "")
+        if not bucket:
+            raise RuntimeError("AWS_S3_BUCKET is required for caption persistence")
         caption_s3_key = ""
         media_url = local_video_ref
         thumbnail_ref = ""
-        if bucket:
-            caption_s3_key = f"captions/{user_id}/{job_id}/{os.path.basename(input_path)}"
-            if upload_file_to_s3(input_path, bucket, caption_s3_key):
-                media_url = _caption_media_url_from_s3_key(caption_s3_key) or local_video_ref
+        caption_s3_key = f"captions/{user_id}/{job_id}/{os.path.basename(input_path)}"
+        if not upload_file_to_s3(input_path, bucket, caption_s3_key):
+            raise RuntimeError("Failed to upload caption source video to S3")
+        media_url = _caption_media_url_from_s3_key(caption_s3_key) or local_video_ref
 
-            thumb_local = _generate_reel_thumbnail_from_video(input_path, OUTPUT_DIR, job_id, 0)
-            if thumb_local:
-                thumb_key = f"captions/{user_id}/{job_id}/thumbnail.jpg"
-                if upload_file_to_s3(thumb_local, bucket, thumb_key):
-                    thumbnail_ref = thumb_key
+        thumb_local = _generate_reel_thumbnail_from_video(input_path, OUTPUT_DIR, job_id, 0)
+        if thumb_local:
+            thumb_key = f"captions/{user_id}/{job_id}/thumbnail.jpg"
+            if upload_file_to_s3(thumb_local, bucket, thumb_key):
+                thumbnail_ref = thumb_key
+            try:
+                if os.path.exists(thumb_local):
+                    os.remove(thumb_local)
+            except Exception:
+                pass
 
         now_iso = datetime.now(timezone.utc).isoformat()
         row_payload: Dict[str, Any] = {
@@ -1630,6 +1653,13 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             error_code="CAPTION_JOB_FAILED",
             retry_delay_seconds=0,
         )
+    finally:
+        # Keep caption sources local only during processing.
+        if input_path and os.path.exists(input_path):
+            try:
+                os.remove(input_path)
+            except Exception:
+                pass
 
 @app.get("/api/config")
 async def get_config():
@@ -1784,6 +1814,64 @@ def _validate_caption_source_constraints(duration_seconds: float, size_bytes: fl
                 f"Maximum autorise: {CAPTION_MAX_DURATION_MINUTES:.2f} min."
             ),
         )
+
+
+def _estimate_reel_required_credits(
+    duration_seconds: float,
+    size_bytes: float,
+    uses_youtube_source: bool,
+    *,
+    uses_openai: bool = True,
+    uses_assembly: bool = True,
+    uses_gemini: bool = False,
+) -> float:
+    duration_minutes = max(1.0, float(duration_seconds or 0.0) / 60.0)
+    video_size_gb = max(0.0, _bytes_to_gb(float(size_bytes or 0.0)))
+    youtube_download_gb = video_size_gb if uses_youtube_source else 0.0
+    breakdown = estimate_reel_cost_usd(
+        duration_minutes=duration_minutes,
+        video_size_gb=video_size_gb,
+        uses_youtube_download=uses_youtube_source,
+        youtube_download_gb=youtube_download_gb,
+        uses_openai=uses_openai,
+        uses_assembly=uses_assembly,
+        uses_gemini=uses_gemini,
+    )
+    return float(calculate_credits_for_operation(breakdown)["final_credits"])
+
+
+def _estimate_caption_required_credits(
+    duration_seconds: float,
+    size_bytes: float,
+    *,
+    uses_assembly: bool = True,
+    uses_openai: bool = True,
+    uses_gemini: bool = False,
+) -> float:
+    duration_minutes = max(1.0, float(duration_seconds or 0.0) / 60.0)
+    video_size_gb = max(0.0, _bytes_to_gb(float(size_bytes or 0.0)))
+    breakdown = estimate_caption_cost_usd(
+        duration_minutes=duration_minutes,
+        video_size_gb=video_size_gb,
+        uses_assembly=uses_assembly,
+        uses_openai=uses_openai,
+        uses_gemini=uses_gemini,
+    )
+    return float(calculate_credits_for_operation(breakdown)["final_credits"])
+
+
+async def _assert_user_has_required_credits(user_id: str, required_credits: float) -> float:
+    if not is_supabase_configured() or required_credits <= 0:
+        return float(required_credits)
+
+    user_data = await supabase_get_user_data(user_id)
+    available = float(user_data.get("credit", 0)) if user_data else 0.0
+    if available < required_credits:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Crédits insuffisants. Requis : {required_credits} cr, disponible : {available} cr.",
+        )
+    return float(required_credits)
 
 
 def _allowed_video_formats() -> List[str]:
@@ -2342,28 +2430,6 @@ async def process_endpoint(
     if not api_key:
         raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
 
-    # --- Credit pre-check ---
-    if is_supabase_configured():
-        uses_youtube = bool(url)
-        _reel_cost_breakdown = estimate_reel_cost_usd(
-            duration_minutes=10.0,
-            video_size_gb=1.0,
-            uses_youtube_download=uses_youtube,
-            youtube_download_gb=0.5 if uses_youtube else 0.0,
-            uses_openai=True,
-            uses_assembly=True,
-            uses_gemini=False,
-        )
-        _reel_credit_info = calculate_credits_for_operation(_reel_cost_breakdown)
-        _required_credits = _reel_credit_info["final_credits"]
-        _user_data = await supabase_get_user_data(user_id)
-        _user_credits = float(_user_data.get("credit", 0)) if _user_data else 0.0
-        if _user_credits < _required_credits:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {_required_credits} cr, disponible : {_user_credits} cr.",
-            )
-
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
 
     # Handle JSON body manually for URL payload
@@ -2381,14 +2447,6 @@ async def process_endpoint(
 
     if url and DISABLE_YOUTUBE_URL:
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
-
-    if url:
-        remote_meta = _probe_remote_video_metadata(url)
-        _validate_reel_source_constraints(
-            duration_seconds=float(remote_meta.get("duration_seconds") or 0.0),
-            size_bytes=float(remote_meta.get("size_bytes") or 0.0),
-            source_label="url",
-        )
 
     # Capture attestation context for legal record (IP + timestamp + UA)
     client_ip = request.client.host if request.client else "unknown"
@@ -2410,6 +2468,9 @@ async def process_endpoint(
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
     input_path = None
+    reel_required_credits = 0.0
+    source_type = "url" if url else "file"
+    source_value = url if url else (file.filename if file else "")
 
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
@@ -2417,7 +2478,41 @@ async def process_endpoint(
     env["GEMINI_API_KEY"] = api_key # Override with key from request
 
     if url:
-        cmd.extend(["-u", url])
+        remote_meta = _probe_remote_video_metadata(url)
+        duration_seconds = float(remote_meta.get("duration_seconds") or 0.0)
+        size_bytes = float(remote_meta.get("size_bytes") or 0.0)
+
+        # If remote metadata is incomplete, download once and validate from local probe.
+        if duration_seconds <= 0.0 or size_bytes <= 0.0:
+            input_path, _ = _download_input_url_to_job_dir(url, job_id)
+            duration_seconds = _probe_local_video_duration_seconds(input_path)
+            try:
+                size_bytes = float(os.path.getsize(input_path))
+            except Exception:
+                size_bytes = 0.0
+
+        _validate_reel_source_constraints(
+            duration_seconds=duration_seconds,
+            size_bytes=size_bytes,
+            source_label="url",
+        )
+        reel_required_credits = _estimate_reel_required_credits(
+            duration_seconds=duration_seconds,
+            size_bytes=size_bytes,
+            uses_youtube_source=True,
+        )
+        try:
+            await _assert_user_has_required_credits(user_id, reel_required_credits)
+        except HTTPException:
+            if input_path and os.path.exists(input_path):
+                os.remove(input_path)
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            raise
+
+        if input_path:
+            cmd.extend(["-i", input_path])
+        else:
+            cmd.extend(["-u", url])
     else:
         _validate_video_extension(file.filename if file else "", context_label="reel")
 
@@ -2443,6 +2538,18 @@ async def process_endpoint(
             size_bytes=float(size),
             source_label="fichier",
         )
+        reel_required_credits = _estimate_reel_required_credits(
+            duration_seconds=local_duration,
+            size_bytes=float(size),
+            uses_youtube_source=False,
+        )
+        try:
+            await _assert_user_has_required_credits(user_id, reel_required_credits)
+        except HTTPException:
+            if os.path.exists(input_path):
+                os.remove(input_path)
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            raise
 
         cmd.extend(["-i", input_path])
 
@@ -2458,11 +2565,12 @@ async def process_endpoint(
         'env': env,
         'output_dir': job_output_dir,
         'input_path': input_path,
-        'source_type': 'url' if url else 'file',
-        'source_value': url if url else (file.filename if file else ''),
+        'source_type': source_type,
+        'source_value': source_value,
         'attestation': attestation,
         'user_id': user_id,
         'priority': job_priority,
+        'reel_required_credits': reel_required_credits,
     }
 
     jobs[job_id] = dict(runtime_payload)
@@ -2475,19 +2583,21 @@ async def process_endpoint(
         pipeline_name="ReelProcessingPipeline",
         job_id=job_id,
         job_data={
-            "source_type": "url" if url else "file",
-            "source_value": url if url else (file.filename if file else ""),
+            "source_type": source_type,
+            "source_value": source_value,
             "output_dir": job_output_dir,
             "input_path": input_path,
             "max_file_size_mb": MAX_FILE_SIZE_MB,
             "reel_max_duration_minutes": REEL_MAX_DURATION_MINUTES,
             "reel_max_storage_gb": REEL_MAX_STORAGE_GB,
             "attestation": attestation,
+            "reel_required_credits": reel_required_credits,
         },
         runtime_data=dict(runtime_payload),
         max_attempts=REEL_JOB_MAX_ATTEMPTS,
         reserved_quota=1.0,
         priority=job_priority,
+        queue_name="reels",
     )
     await reel_job_manager.enqueue_job(job_id)
     await ReelProcessingPipeline(reel_job_manager, job_id).queued()
@@ -2637,25 +2747,7 @@ async def edit_clip(
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
 
-    # Credit pre-check for reel auto-edit customization
     edit_required_credits = 0.0
-    if is_supabase_configured():
-        _edit_breakdown = estimate_reel_cost_usd(
-            duration_minutes=3.0,
-            video_size_gb=0.3,
-            uses_youtube_download=False,
-            uses_openai=True,
-            uses_assembly=False,
-            uses_gemini=False,
-        )
-        edit_required_credits = calculate_credits_for_operation(_edit_breakdown)["final_credits"]
-        _edit_user_data = await supabase_get_user_data(user_id)
-        _edit_available = float(_edit_user_data.get("credit", 0)) if _edit_user_data else 0.0
-        if _edit_available < edit_required_credits:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {edit_required_credits} cr, disponible : {_edit_available} cr.",
-            )
 
     job = jobs.get(req.job_id)
 
@@ -2684,6 +2776,18 @@ async def edit_clip(
 
         if not os.path.exists(input_path):
              raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+        input_size_bytes = float(os.path.getsize(input_path) if os.path.exists(input_path) else 0)
+        input_duration_seconds = _probe_local_video_duration_seconds(input_path)
+        edit_required_credits = _estimate_reel_required_credits(
+            duration_seconds=input_duration_seconds,
+            size_bytes=input_size_bytes,
+            uses_youtube_source=False,
+            uses_openai=False,
+            uses_assembly=False,
+            uses_gemini=True,
+        )
+        await _assert_user_has_required_credits(user_id, edit_required_credits)
 
         os.makedirs(os.path.join(OUTPUT_DIR, req.job_id), exist_ok=True)
 
@@ -2806,6 +2910,8 @@ async def edit_clip(
             "edit_plan": plan
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Edit Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2822,24 +2928,6 @@ async def process_caption_endpoint(
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     if not ack_flag:
         raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
-
-    caption_required_credits = 0.0
-    if is_supabase_configured():
-        caption_breakdown = estimate_caption_cost_usd(
-            duration_minutes=3.0,
-            video_size_gb=0.2,
-            uses_assembly=True,
-            uses_openai=True,
-            uses_gemini=False,
-        )
-        caption_required_credits = calculate_credits_for_operation(caption_breakdown)["final_credits"]
-        user_data = await supabase_get_user_data(user_id)
-        available = float(user_data.get("credit", 0)) if user_data else 0.0
-        if available < caption_required_credits:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {caption_required_credits} cr, disponible : {available} cr.",
-            )
 
     _validate_video_extension(file.filename if file else "", context_label="sous-titres")
 
@@ -2873,6 +2961,18 @@ async def process_caption_endpoint(
         size_bytes=float(size_bytes),
         source_label="fichier",
     )
+
+    caption_required_credits = _estimate_caption_required_credits(
+        duration_seconds=local_duration,
+        size_bytes=float(size_bytes),
+    )
+    try:
+        await _assert_user_has_required_credits(user_id, caption_required_credits)
+    except HTTPException:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
 
     job_priority = await _resolve_user_job_priority(user_id)
     runtime_payload = {
@@ -2908,6 +3008,7 @@ async def process_caption_endpoint(
         max_attempts=1,
         reserved_quota=1.0,
         priority=job_priority,
+        queue_name="captions",
     )
     await reel_job_manager.enqueue_job(caption_job_id)
     await CaptionProcessingPipeline(reel_job_manager, caption_job_id).step(0, "queued")
@@ -2997,22 +3098,6 @@ async def persist_captioned_reel(
     user_id: str = Depends(get_user_id_header),
 ):
     caption_required_credits = 0.0
-    if is_supabase_configured():
-        caption_breakdown = estimate_caption_cost_usd(
-            duration_minutes=3.0,
-            video_size_gb=0.2,
-            uses_assembly=True,
-            uses_openai=True,
-            uses_gemini=False,
-        )
-        caption_required_credits = calculate_credits_for_operation(caption_breakdown)["final_credits"]
-        user_data = await supabase_get_user_data(user_id)
-        available = float(user_data.get("credit", 0)) if user_data else 0.0
-        if available < caption_required_credits:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {caption_required_credits} cr, disponible : {available} cr.",
-            )
 
     if not file:
         raise HTTPException(status_code=400, detail="Missing rendered video file")
@@ -3045,6 +3130,22 @@ async def persist_captioned_reel(
             shutil.copyfileobj(file.file, handle)
     finally:
         await file.close()
+
+    rendered_size_bytes = float(os.path.getsize(output_path) if os.path.exists(output_path) else 0)
+    rendered_duration_seconds = _probe_local_video_duration_seconds(output_path)
+    caption_required_credits = _estimate_caption_required_credits(
+        duration_seconds=rendered_duration_seconds,
+        size_bytes=rendered_size_bytes,
+        uses_assembly=False,
+        uses_openai=False,
+        uses_gemini=False,
+    )
+    try:
+        await _assert_user_has_required_credits(user_id, caption_required_credits)
+    except HTTPException:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        raise
 
     new_video_url = f"/videos/{job_id}/{output_filename}"
 
@@ -3131,7 +3232,8 @@ class EffectsGenerateRequest(BaseModel):
 @app.post("/api/effects/generate")
 async def generate_effects_config(
     req: EffectsGenerateRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Generate structured EffectsConfig JSON for Remotion rendering via Gemini AI."""
     final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
@@ -3163,6 +3265,18 @@ async def generate_effects_config(
 
         if not os.path.exists(input_path):
             raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+        input_size_bytes = float(os.path.getsize(input_path) if os.path.exists(input_path) else 0)
+        input_duration_seconds = _probe_local_video_duration_seconds(input_path)
+        effects_required_credits = _estimate_reel_required_credits(
+            duration_seconds=input_duration_seconds,
+            size_bytes=input_size_bytes,
+            uses_youtube_source=False,
+            uses_openai=False,
+            uses_assembly=False,
+            uses_gemini=True,
+        )
+        await _assert_user_has_required_credits(user_id, effects_required_credits)
 
         os.makedirs(os.path.join(OUTPUT_DIR, req.job_id), exist_ok=True)
 
@@ -3423,15 +3537,7 @@ class HookRequest(BaseModel):
 
 @app.post("/api/hook")
 async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header)):
-    hook_required_credits = max(1.0, round(DEFAULT_PUBLICATION_CREDITS * 0.5, 2))
-    if is_supabase_configured():
-        _hook_user_data = await supabase_get_user_data(user_id)
-        _hook_available = float(_hook_user_data.get("credit", 0)) if _hook_user_data else 0.0
-        if _hook_available < hook_required_credits:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {hook_required_credits} cr, disponible : {_hook_available} cr.",
-            )
+    hook_required_credits = 0.0
 
     job = jobs.get(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
@@ -3462,7 +3568,19 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
 
     if not os.path.exists(input_path):
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
-        
+
+    input_size_bytes = float(os.path.getsize(input_path) if os.path.exists(input_path) else 0)
+    input_duration_seconds = _probe_local_video_duration_seconds(input_path)
+    hook_required_credits = _estimate_reel_required_credits(
+        duration_seconds=input_duration_seconds,
+        size_bytes=input_size_bytes,
+        uses_youtube_source=False,
+        uses_openai=False,
+        uses_assembly=False,
+        uses_gemini=False,
+    )
+    await _assert_user_has_required_credits(user_id, hook_required_credits)
+
     # Output video
     output_filename = f"hook_{filename}"
     output_path = os.path.join(output_dir, output_filename)

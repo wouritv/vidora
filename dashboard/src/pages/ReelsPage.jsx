@@ -46,9 +46,8 @@ export default function ReelsPage() {
     const navigate = useNavigate();
 
     const totalPages = useMemo(() => Math.max(1, Math.ceil(total / pageSize)), [total, pageSize]);
-    const reelCostEstimate = Number(defaultCosts?.reel || 1);
     const publicationCostEstimate = Number(defaultCosts?.publication || 1);
-    const canCreateReel = credits >= reelCostEstimate;
+    const hasAnyReelCredit = Number(credits || 0) > 0;
     const canShareReel = credits >= publicationCostEstimate;
 
 
@@ -329,9 +328,9 @@ export default function ReelsPage() {
             </div>
 
             <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
-                {!canCreateReel ? (
+                {!hasAnyReelCredit ? (
                     <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                        {t('reels.insufficientForNew', 'Insufficient balance for new generation ')}
+                        {t("common.insufficientCreditsStart", "Insufficient credits to start this operation.")}
                     </div>
                 ) : null}
                 {shareResult ? (

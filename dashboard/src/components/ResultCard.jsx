@@ -28,9 +28,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     const connectedPlatforms = readConnectedPlatformsFromSettings();
     const defaultPlatforms = connectedPlatforms.length > 0 ? connectedPlatforms : ['tiktok', 'instagram', 'youtube'];
     const hasClipContext = Boolean(jobId) && Number.isFinite(Number(clipIndexForApi));
-    const reelCostEstimate = Number(defaultCosts?.reel || 1);
+    const hasAnyEditingCredit = Number(credits || 0) > 0;
     const publicationCostEstimate = Number(defaultCosts?.publication || 1);
-    const canCustomize = credits >= reelCostEstimate;
     const canShare = credits >= publicationCostEstimate;
 
     const [showModal, setShowModal] = useState(false);
@@ -75,8 +74,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     const [hideSocialPlatforms, setHideSocialPlatforms] = useState(getDefaultHideSocialPlatforms());
 
     const [clipDuration, setClipDuration] = useState(Math.max(1, clipEnd - clipStart));
-    const insufficientCreditsMessage = (required) => (
-        t("reels.insufficientForNew", "Pas assez de crédits, vos actions sont limitées")
+    const insufficientCreditsMessage = () => (
+        t("common.insufficientCreditsStart", "Crédits insuffisants pour initier cette opération.")
     );
 
 
@@ -160,8 +159,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     }, [showModal, clip]);
 
     const handleAutoEdit = async (selectedOptions = autoEditOptions) => {
-        if (!canCustomize) {
-            setEditError(insufficientCreditsMessage(reelCostEstimate));
+        if (!hasAnyEditingCredit) {
+            setEditError(insufficientCreditsMessage());
             setTimeout(() => setEditError(null), 5000);
             return;
         }
@@ -268,8 +267,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
 
     const handleCaptions = async (options) => {
-        if (!canCustomize) {
-            setEditError(insufficientCreditsMessage(reelCostEstimate));
+        if (!hasAnyEditingCredit) {
+            setEditError(insufficientCreditsMessage());
             setTimeout(() => setEditError(null), 5000);
             return;
         }
@@ -354,8 +353,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     };
 
     const handleHook = async (hookData) => {
-        if (!canCustomize) {
-            setEditError(insufficientCreditsMessage(reelCostEstimate));
+        if (!hasAnyEditingCredit) {
+            setEditError(insufficientCreditsMessage());
             setTimeout(() => setEditError(null), 5000);
             return;
         }
@@ -581,10 +580,10 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     </div>
                 )}
 
-                {!canCustomize && (
+                {!hasAnyEditingCredit && (
                     <div className="mb-3 p-2 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px] rounded-lg flex items-center gap-2">
                         <AlertCircle size={12} className="shrink-0" />
-                        {insufficientCreditsMessage(reelCostEstimate)}
+                        {insufficientCreditsMessage()}
                     </div>
                 )}
 
@@ -592,7 +591,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-auto pt-4 border-t border-slate-200 dark:border-white/5">
                     <button
                         onClick={() => setShowAutoEditModal(true)}
-                        disabled={isEditing || !hasClipContext || !canCustomize}
+                        disabled={isEditing || !hasClipContext || !hasAnyEditingCredit}
                         title="Auto Edit"
                         className={`col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
@@ -602,7 +601,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
                     <button
                         onClick={() => setShowHookModal(true)}
-                        disabled={isHooking || !hasClipContext || !canCustomize}
+                        disabled={isHooking || !hasClipContext || !hasAnyEditingCredit}
                         title="Viral Hook"
                         className={`col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
@@ -612,7 +611,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
                     <button
                         onClick={() => setShowCaptionsModal(true)}
-                        disabled={isCaptioning || !hasClipContext || !canCustomize}
+                        disabled={isCaptioning || !hasClipContext || !hasAnyEditingCredit}
                         title={t('common.subtitles', 'Subtitles')}
                         className={`col-span-1 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
