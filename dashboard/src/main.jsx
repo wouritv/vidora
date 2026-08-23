@@ -13,6 +13,8 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import DashboardTabPage from "./pages/DashboardTabPage";
 import ReelsPage from "./pages/ReelsPage";
+import CaptionsPage from "./pages/CaptionsPage";
+import NewCaptionPage from "./pages/NewCaptionPage";
 import ResetPassword from "./pages/ResetPassword";
 import UpdatePassword from "./pages/UpdatePassword";
 import AbonnementPage from "./pages/AbonnementPage";
@@ -56,6 +58,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                             <Route index element={<Dashboard />} />
                             <Route path="reel-generator" element={<DashboardTabPage tabKey="reel-generator" />} />
                             <Route path="reels" element={<ReelsPage />} />
+                            <Route path="captions" element={<CaptionsPage />} />
+                            <Route path="captions/new" element={<NewCaptionPage />} />
                             <Route path="social-publications" element={<SocialPublicationsPage />} />
                             <Route path="settings" element={<DashboardTabPage tabKey="settings" />} />
                             <Route path="abonnements" element={<AbonnementPage />} />

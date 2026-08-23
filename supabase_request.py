@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_REELS_TABLE = os.environ.get("SUPABASE_REELS_TABLE", "reels")
-SUPABASE_CAPTIONS_TABLE = os.environ.get("SUPABASE_CAPTIONS_TABLE", "ia_caption")
+SUPABASE_CAPTIONS_TABLE = os.environ.get("SUPABASE_CAPTIONS_TABLE", "captions")
 SUPABASE_ABONNEMENTS_TABLE = os.environ.get("SUPABASE_ABONNEMENTS_TABLE", "abonnement")
 SUPABASE_SOUSCRIPTION_TABLE = os.environ.get("SUPABASE_SOUSCRIPTION_TABLE", "souscription")
 SUPABASE_JOBS_TABLE = os.environ.get("SUPABASE_JOBS_TABLE", "jobs")
@@ -228,6 +228,52 @@ async def get_caption(caption_id: str, user_id: str) -> Optional[Dict[str, Any]]
 	if not rows:
 		return None
 	return rows[0]
+
+
+async def get_caption_by_job_clip(job_id: str, clip_index: int, user_id: str) -> Optional[Dict[str, Any]]:
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_CAPTIONS_TABLE)
+		.select(CAPTION_COLUMNS)
+		.eq("caption_job_id", job_id)
+		.eq("caption_clip_index", int(clip_index))
+		.eq("caption_user_id", user_id)
+		.is_("deleted_at", "null")
+		.order("caption_updated_at", desc=True)
+		.limit(1)
+		.execute()
+	)
+	rows = response.data or []
+	if not rows:
+		return None
+	return rows[0]
+
+
+async def update_caption(caption_id: str, user_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+	if not caption_id:
+		return None
+	client = await get_client()
+	payload = dict(updates or {})
+	payload["caption_updated_at"] = datetime.now(timezone.utc).isoformat()
+	await (
+		client.table(SUPABASE_CAPTIONS_TABLE)
+		.update(payload)
+		.eq("id", caption_id)
+		.eq("caption_user_id", user_id)
+		.is_("deleted_at", "null")
+		.execute()
+	)
+	response = (
+		await client.table(SUPABASE_CAPTIONS_TABLE)
+		.select(CAPTION_COLUMNS)
+		.eq("id", caption_id)
+		.eq("caption_user_id", user_id)
+		.is_("deleted_at", "null")
+		.limit(1)
+		.execute()
+	)
+	rows = response.data or []
+	return rows[0] if rows else None
 
 
 async def soft_delete_caption(caption_id: str, user_id: str) -> bool:

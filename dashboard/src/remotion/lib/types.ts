@@ -12,6 +12,20 @@ export interface CaptionWord {
   linePositionY?: number;
   lineFontSize?: number;
   lineFontFamily?: string;
+  lineFontColor?: string;
+  lineHighlightColor?: string;
+  lineAnimation?: SubtitleAnimation;
+  lineBold?: boolean;
+  lineItalic?: boolean;
+  lineBorderColor?: string;
+  lineBorderWidth?: number;
+  lineBgColor?: string;
+  lineBgOpacity?: number;
+  lineTextShadowColor?: string;
+  lineShadowBlur?: number;
+  lineShadowOffsetX?: number;
+  lineShadowOffsetY?: number;
+  lineTextCase?: "none" | "uppercase" | "lowercase";
 }
 
 // --- Subtitle config ---
@@ -107,6 +121,31 @@ export const captionWordSchema = z.object({
   linePositionY: z.number().optional(),
   lineFontSize: z.number().optional(),
   lineFontFamily: z.string().optional(),
+  lineFontColor: z.string().optional(),
+  lineHighlightColor: z.string().optional(),
+  lineAnimation: z.enum([
+    "none",
+    "active-color",
+    "word-highlight",
+    "pop",
+    "karaoke",
+    "fade-in-out",
+    "zoom-in-out",
+    "slide-in-out",
+    "rotate-in-out",
+    "emoticon",
+  ]).optional(),
+  lineBold: z.boolean().optional(),
+  lineItalic: z.boolean().optional(),
+  lineBorderColor: z.string().optional(),
+  lineBorderWidth: z.number().optional(),
+  lineBgColor: z.string().optional(),
+  lineBgOpacity: z.number().optional(),
+  lineTextShadowColor: z.string().optional(),
+  lineShadowBlur: z.number().optional(),
+  lineShadowOffsetX: z.number().optional(),
+  lineShadowOffsetY: z.number().optional(),
+  lineTextCase: z.enum(["none", "uppercase", "lowercase"]).optional(),
 });
 
 export const subtitleStyleSchema = z.object({

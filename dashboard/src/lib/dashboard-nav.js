@@ -2,6 +2,7 @@ import {
     CreditCardIcon,
     Home,
     LayoutGrid,
+    MessageSquareText,
     Settings,
     Share2,
 } from "lucide-react";
@@ -30,6 +31,18 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         badge: "Gallery",
         category: "service",
         path: "/dashboard/reels",
+    },
+    {
+        key: "captions",
+        title: "Sous titres",
+        sidebarLabel: "Sous titres",
+        icon: MessageSquareText,
+        activeClassName: "bg-emerald-500/10 text-emerald-400",
+        inactiveClassName: "text-slate-500 dark:text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Genere et gere des sous-titres de maniere autonome pour tes videos locales.",
+        badge: "Caption",
+        category: "service",
+        path: "/dashboard/captions",
     },
     {
         key: "social-publications",

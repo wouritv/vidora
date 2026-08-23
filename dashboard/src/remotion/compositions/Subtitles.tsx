@@ -75,25 +75,45 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
   const { style } = config;
 
   const currentTimeMs = blockStartMs + (frame / fps) * 1000;
+  const elapsedBlockMs = Math.max(0, currentTimeMs - blockStartMs);
+  const flashPulse = interpolate(elapsedBlockMs, [0, 120, 280], [0, 1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
   const activeIndex = getActiveWordIndex(block.words, currentTimeMs);
   const firstWord = block.words[0];
+  const blockStyle = {
+    ...style,
+    positionX: Number.isFinite(Number(firstWord?.linePositionX)) ? Number(firstWord?.linePositionX) : style.positionX,
+    positionY: Number.isFinite(Number(firstWord?.linePositionY)) ? Number(firstWord?.linePositionY) : style.positionY,
+    fontSize: Number.isFinite(Number(firstWord?.lineFontSize)) ? Number(firstWord?.lineFontSize) : style.fontSize,
+    fontFamily: String(firstWord?.lineFontFamily || style.fontFamily || "Arial"),
+    fontColor: String(firstWord?.lineFontColor || style.fontColor),
+    highlightColor: String(firstWord?.lineHighlightColor || style.highlightColor),
+    animation: firstWord?.lineAnimation || style.animation,
+    bold: typeof firstWord?.lineBold === "boolean" ? firstWord.lineBold : style.bold,
+    italic: typeof firstWord?.lineItalic === "boolean" ? firstWord.lineItalic : style.italic,
+    borderColor: String(firstWord?.lineBorderColor || style.borderColor),
+    borderWidth: Number.isFinite(Number(firstWord?.lineBorderWidth)) ? Number(firstWord?.lineBorderWidth) : style.borderWidth,
+    bgColor: String(firstWord?.lineBgColor || style.bgColor),
+    bgOpacity: Number.isFinite(Number(firstWord?.lineBgOpacity)) ? Number(firstWord?.lineBgOpacity) : style.bgOpacity,
+    textShadowColor: String(firstWord?.lineTextShadowColor || style.textShadowColor),
+    shadowBlur: Number.isFinite(Number(firstWord?.lineShadowBlur)) ? Number(firstWord?.lineShadowBlur) : style.shadowBlur,
+    shadowOffsetX: Number.isFinite(Number(firstWord?.lineShadowOffsetX)) ? Number(firstWord?.lineShadowOffsetX) : style.shadowOffsetX,
+    shadowOffsetY: Number.isFinite(Number(firstWord?.lineShadowOffsetY)) ? Number(firstWord?.lineShadowOffsetY) : style.shadowOffsetY,
+    textCase: firstWord?.lineTextCase || style.textCase,
+  };
   const blockFontFamily = String(firstWord?.lineFontFamily || style.fontFamily || "Arial");
   const fontStack = getFontStack(blockFontFamily);
-  const blockPositionX = Number.isFinite(Number(firstWord?.linePositionX))
-    ? Number(firstWord?.linePositionX)
-    : style.positionX;
-  const blockPositionY = Number.isFinite(Number(firstWord?.linePositionY))
-    ? Number(firstWord?.linePositionY)
-    : style.positionY;
-  const blockFontSize = Number.isFinite(Number(firstWord?.lineFontSize))
-    ? Number(firstWord?.lineFontSize)
-    : style.fontSize;
+  const blockPositionX = blockStyle.positionX;
+  const blockPositionY = blockStyle.positionY;
+  const blockFontSize = blockStyle.fontSize;
   const blockEmoji = typeof firstWord?.lineEmoji === "string" ? firstWord.lineEmoji.trim() : "";
 
-  const hasBg = style.bgOpacity > 0;
+  const hasBg = blockStyle.bgOpacity > 0;
   const bgStyle: React.CSSProperties = hasBg
     ? {
-        backgroundColor: `${style.bgColor}${Math.round(style.bgOpacity * 255)
+        backgroundColor: `${blockStyle.bgColor}${Math.round(blockStyle.bgOpacity * 255)
           .toString(16)
           .padStart(2, "0")}`,
         borderRadius: 8,
@@ -119,6 +139,13 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           justifyContent: "center",
           gap: "6px 8px",
           maxWidth: "85%",
+          boxShadow: flashPulse > 0
+            ? `0 0 ${Math.round(26 * flashPulse)}px rgba(16,185,129,${0.45 * flashPulse})`
+            : "none",
+          border: flashPulse > 0
+            ? `1px solid rgba(16,185,129,${0.55 * flashPulse})`
+            : "1px solid transparent",
+          transition: "box-shadow 120ms linear, border-color 120ms linear",
           ...bgStyle,
         }}
       >
@@ -140,10 +167,10 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
             wordColor={word.color}
             word={word.text}
             isActive={i === activeIndex}
-            style={style}
+            style={blockStyle}
             fontSize={blockFontSize}
             fontStack={fontStack}
-            animation={style.animation}
+            animation={blockStyle.animation}
             frame={frame}
             fps={fps}
             wordStartMs={word.startMs}

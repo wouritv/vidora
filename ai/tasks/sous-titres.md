@@ -1,0 +1,15 @@
+## Taches a faire
+- Rajouter un menu dans le dashboard "Sous titres", en dessous du menu "Reels", 
+- Ce menu dois permettre de generer des sous titres pour une video,
+- En entree l'utilisateur dois uploder une video, et le systeme doit generer automatiquement les sous titres pour cette video,
+- Le selecteur de video dois etre le meme elements que celui qui est present pour les reels, pas d'upload via Youtube, upload local uniquement
+- utiliser les variables d'environnement CAPTION_MAX_DURATION pour limiter la durée de la video, si la video est plus longue que cette valeur, afficher un message d'erreur  et CAPTION_MAX_STORAGE pour limiter la taille du fichier, si le fichier est plus grand que cette valeur, afficher un message d'erreur
+- une fois la video l'uploader, reprendre exactement le meme process de generation de sous titres que pour les reels, avec la meme interface et les memes fonctionnalites
+- L'idee etant que la fonctionnalite de sous titres puissent etre utiliser dans la gestion des reels et aussi de facon autonome, pour une video dans un menu dediee
+- la gestion des credits dois rester la meme que cequi existe, donc aussi bien pour l'upload de la video pour traitement que pour la gestion des sous titres, il faut que le systeme verifie si l'utilisateur a assez de credits pour generer les sous titres, et si ce n'est pas le cas, afficher un message d'erreur et ne pas lancer le traitement dans ce nouveau menu
+- avoir aussi une vue liste ou grille qui presente les travaux que l'on a fait. Dans le menu sous titres, il faudrait dans la page de liste pour chaque element avoir un bouton preview pour voir et peut etre modifer, un bouton share pour partager, un bouton download et un bouton delete
+- il faudrait creer la table en bd pour cela
+- le process de generation de reels ne dois pas etre modifie, il s'agit d'une nouvelle feature qui doit etre autonome, mais qui utilise le meme moteur de generation de sous titres que celui des reels, donc peut etre factorise cela de maniere a ce que si l'on ajoute une police ou une option de style cela s'applique partout, que ce soit pour les reels ou pour le menu sous titres autonome
+- Valider aussi de respecter la logique de traduction des textes
+- Dans le menu reels dans la la page de liste, enlever la vue en grille. 
+- pour le sous-titres, il faudrait aussi les brancher au publication de maniere a ce que les videos pour lesquelles on a rajoute des sous titres on puisse les publier

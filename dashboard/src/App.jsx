@@ -547,27 +547,23 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
         <header>
 
           {currentTab === 'reel-generator' && (
-             <div className="h-16 border-b border-slate-200 dark:border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
-              <div className="flex items-center gap-4">
+              <div className="flex-1 overflow-y-auto p-8 space-y-6">
+                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
                   <h1 className="text-3xl font-black tracking-tight">{t('app.reelGenerator', 'Reel generation')}</h1>
+                  <p className="mt-2 text-sm text-slate-500 dark:text-zinc-400">{t('app.dropVideo', 'Drop your long-form video below to instantly generate viral clips with AI.')}</p>
                 </div>
-              </div>
 
-               <button
-                   type="button"
-                   onClick={() => {
-                     navigate("/dashboard/reels");
-                   }}
-                   className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
-               >
-                 <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
-                   <ArrowLeft size={16} />
-                 </div>
-                 <div className="hidden lg:block overflow-hidden">
-                    <p className="text-sm font-bold text-white leading-none mb-0.5">{t('app.backToList', 'Back to list')}</p>
-                 </div>
-               </button>
+                  <button
+                      type="button"
+                      onClick={() => navigate("/dashboard/reels")}
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-200 hover:bg-white/10"
+                  >
+                    <ArrowLeft size={14} />
+                    {t("app.backToList", "Back to list")}
+                  </button>
+
+              </div>
 
              </div>
           )}
@@ -588,7 +584,6 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
               <div className="h-full flex flex-col items-center justify-center p-6 animate-[fadeIn_0.3s_ease-out]">
                 <div className="max-w-xl w-full text-center space-y-8">
                   <div className="space-y-4">
-                    <p className="text-slate-500 dark:text-zinc-400 text-lg">{t('app.dropVideo', 'Drop your long-form video below to instantly generate viral clips with AI.')}</p>
                   </div>
                   <MediaInput
                     onProcess={handleProcess}

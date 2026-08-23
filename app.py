@@ -11,6 +11,7 @@ import time
 import asyncio
 import itertools
 import secrets
+import re
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any
@@ -38,6 +39,12 @@ from supabase_request import (
     get_reel as supabase_get_reel,
     get_reel_by_job_clip as supabase_get_reel_by_job_clip,
     soft_delete_reel as supabase_soft_delete_reel,
+    insert_captions as supabase_insert_captions,
+    list_captions as supabase_list_captions,
+    get_caption as supabase_get_caption,
+    get_caption_by_job_clip as supabase_get_caption_by_job_clip,
+    update_caption as supabase_update_caption,
+    soft_delete_caption as supabase_soft_delete_caption,
     is_supabase_configured,
     list_abonnements as supabase_list_abonnements,
     get_user_abonnement,
@@ -69,7 +76,7 @@ from billing import (
     CREDIT_UNIT_PRICE_BY_DOLLAR,
 )
 from job_manager import JobManager, JobType, calc_elapsed_seconds
-from pipelines import ReelProcessingPipeline
+from pipelines import ReelProcessingPipeline, CaptionProcessingPipeline
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 import logging
@@ -99,11 +106,14 @@ REEL_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("REEL_JOB_RETRY_DELAY_SECONDS"
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 REEL_MAX_DURATION_MINUTES = float(os.environ.get("REEL_MAX_DURATION", "180"))
 REEL_MAX_STORAGE_GB = float(os.environ.get("REEL_MAX_STORAGE", "15"))
+CAPTION_MAX_DURATION_MINUTES = float(os.environ.get("CAPTION_MAX_DURATION", str(REEL_MAX_DURATION_MINUTES)))
+CAPTION_MAX_STORAGE_GB = float(os.environ.get("CAPTION_MAX_STORAGE", str(REEL_MAX_STORAGE_GB)))
 VIREEL_VIDEO_FORMAT = os.environ.get("VIREEL_VIDEO_FORMAT", "mp4,mov,avi")
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
 OUTPUT_SWEEP_INTERVAL_SECONDS = int(os.environ.get("OUTPUT_SWEEP_INTERVAL_SECONDS", str(6 * 3600)))
 OUTPUT_SWEEP_MIN_AGE_SECONDS = int(os.environ.get("OUTPUT_SWEEP_MIN_AGE_SECONDS", "1800"))
 DISABLE_YOUTUBE_URL = os.environ.get("DISABLE_YOUTUBE_URL", "false").lower() in ("1", "true", "yes")
+HIDE_SOCIAL_PLATFORMS = os.environ.get("HIDE_SOCIAL_PLATFORMS", "false").lower() in ("1", "true", "yes")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_CURRENCY = os.environ.get("STRIPE_CURRENCY", "eur").lower()
@@ -648,6 +658,31 @@ def _reel_thumbnail_url_from_s3_key(s3_key: str) -> str:
     return generate_presigned_url(bucket, s3_key, expiration=7200) or ""
 
 
+def _caption_media_url_from_s3_key(s3_key: str) -> str:
+    if not s3_key:
+        return ""
+    bucket = os.environ.get("AWS_S3_BUCKET", "")
+    if not bucket:
+        return ""
+    return generate_presigned_url(bucket, s3_key, expiration=7200) or ""
+
+
+def _normalize_caption_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    media_url = _caption_media_url_from_s3_key(row.get("caption_s3_key") or "") or row.get("caption_url") or ""
+    thumbnail_ref = row.get("caption_thumbnail_url") or ""
+    thumbnail_url = _caption_media_url_from_s3_key(thumbnail_ref) if thumbnail_ref.startswith("captions/") else thumbnail_ref
+    preview_url = thumbnail_url or media_url
+
+    return {
+        **row,
+        "caption_url": media_url or row.get("caption_url") or "",
+        "caption_playback_url": media_url,
+        "caption_download_url": media_url,
+        "caption_preview_url": preview_url,
+        "media_url": media_url,
+    }
+
+
 def _job_uses_remote_source(job_data: Optional[Dict[str, Any]]) -> bool:
     payload = job_data or {}
     source_type = str(
@@ -1093,7 +1128,10 @@ async def run_job_wrapper(job_id: str, job_priority: int):
         job = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id)
         if job:
             job["priority"] = execution_ctx["priority"]
-            await run_job(job_id, job, execution_ctx=execution_ctx)
+            if str(job.get("job_kind") or "reel") == "caption":
+                await run_caption_job(job_id, job, execution_ctx=execution_ctx)
+            else:
+                await run_job(job_id, job, execution_ctx=execution_ctx)
     except Exception as e:
          print(f"❌ Job wrapper error {job_id}: {e}")
     finally:
@@ -1453,9 +1491,154 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
             except Exception:
                 pass
 
+
+async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):
+    user_id = job_data.get("user_id")
+    output_dir = str(job_data.get("output_dir") or "")
+    input_path = str(job_data.get("input_path") or "")
+    source_name = str(job_data.get("source_name") or os.path.basename(input_path) or "caption_source.mp4")
+    caption_required_credits = float(job_data.get("caption_required_credits") or 0.0)
+    pipeline = CaptionProcessingPipeline(reel_job_manager, job_id)
+
+    jobs[job_id]["status"] = "processing"
+    jobs[job_id]["logs"].append("Caption job started by worker.")
+    await reel_job_manager.start_job(job_id)
+
+    try:
+        await pipeline.analyzing()
+        if not input_path or not os.path.exists(input_path):
+            raise RuntimeError("Uploaded source video not found for caption job")
+
+        local_duration = _probe_local_video_duration_seconds(input_path)
+        _validate_caption_source_constraints(
+            duration_seconds=local_duration,
+            size_bytes=float(os.path.getsize(input_path) if os.path.exists(input_path) else 0),
+            source_label="fichier",
+        )
+
+        await pipeline.transcribing()
+        from main import transcribe_video
+
+        loop = asyncio.get_event_loop()
+        transcript = await loop.run_in_executor(None, transcribe_video, input_path)
+
+        await pipeline.persisting()
+        duration_sec = max(0.5, float(local_duration) or _estimate_transcript_duration_seconds(transcript))
+        title = os.path.splitext(source_name)[0] or "Sous-titres"
+        local_video_ref = f"/videos/{job_id}/{os.path.basename(input_path)}"
+
+        metadata = {
+            "shorts": [
+                {
+                    "title": title,
+                    "start": 0.0,
+                    "end": duration_sec,
+                    "duration": duration_sec,
+                    "video_url": local_video_ref,
+                    "video_title_for_youtube_short": title,
+                    "video_description_for_instagram": "",
+                    "video_description_for_tiktok": "",
+                }
+            ],
+            "transcript": transcript,
+            "standalone_caption": {
+                "created_at": int(time.time()),
+                "source": "upload",
+                "input_filename": source_name,
+            },
+        }
+        metadata_path = os.path.join(output_dir, f"{job_id}_metadata.json")
+        _persist_metadata_json(metadata_path, metadata)
+
+        bucket = os.environ.get("AWS_S3_BUCKET", "")
+        caption_s3_key = ""
+        media_url = local_video_ref
+        thumbnail_ref = ""
+        if bucket:
+            caption_s3_key = f"captions/{user_id}/{job_id}/{os.path.basename(input_path)}"
+            if upload_file_to_s3(input_path, bucket, caption_s3_key):
+                media_url = _caption_media_url_from_s3_key(caption_s3_key) or local_video_ref
+
+            thumb_local = _generate_reel_thumbnail_from_video(input_path, OUTPUT_DIR, job_id, 0)
+            if thumb_local:
+                thumb_key = f"captions/{user_id}/{job_id}/thumbnail.jpg"
+                if upload_file_to_s3(thumb_local, bucket, thumb_key):
+                    thumbnail_ref = thumb_key
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        row_payload: Dict[str, Any] = {
+            "caption_url": media_url,
+            "caption_thumbnail_url": thumbnail_ref,
+            "caption_title": title,
+            "caption_description": "",
+            "caption_duration": max(1, int(round(duration_sec))),
+            "caption_created_at": now_iso,
+            "caption_updated_at": now_iso,
+            "caption_user_id": user_id,
+            "caption_status": "termine",
+            "caption_job_id": job_id,
+            "caption_clip_index": 0,
+            "caption_s3_key": caption_s3_key,
+            "generation_inputs": {
+                "source_type": "file",
+                "source_value": source_name,
+                "caption_max_duration_minutes": CAPTION_MAX_DURATION_MINUTES,
+                "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
+                "duration_seconds": duration_sec,
+            },
+            "input_source_type": "file",
+            "input_source_value": source_name,
+        }
+
+        normalized_item = {"id": f"local-{job_id}", **row_payload}
+        if is_supabase_configured():
+            saved = await supabase_insert_captions([row_payload])
+            if saved:
+                normalized_item = _normalize_caption_row(saved[0])
+
+            if caption_required_credits > 0 and user_id:
+                debit_ok = await reel_job_manager.debit_credits_for_job(
+                    job_id=job_id,
+                    user_id=user_id,
+                    credits=caption_required_credits,
+                    storage_delta=0.0,
+                    operation_type="captions",
+                )
+                if not debit_ok:
+                    raise RuntimeError("Insufficient balance to finalize caption job")
+
+        await pipeline.rendering()
+        result_payload = {
+            "item": _normalize_caption_row(normalized_item),
+            "job_id": job_id,
+            "clip_index": 0,
+        }
+        jobs[job_id]["result"] = result_payload
+        jobs[job_id]["status"] = "completed"
+        await reel_job_manager.complete_job(
+            job_id,
+            result_payload,
+            actual_credit=caption_required_credits,
+            consumed_quota=1.0,
+        )
+    except Exception as exc:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["logs"].append(f"Caption job failed: {exc}")
+        await reel_job_manager.fail_job(
+            job_id,
+            str(exc),
+            error_code="CAPTION_JOB_FAILED",
+            retry_delay_seconds=0,
+        )
+
 @app.get("/api/config")
 async def get_config():
-    return {"youtubeUrlEnabled": not DISABLE_YOUTUBE_URL}
+    return {
+        "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
+        "hideSocialPlatforms": HIDE_SOCIAL_PLATFORMS,
+        "captionMaxDurationMinutes": CAPTION_MAX_DURATION_MINUTES,
+        "captionMaxStorageGb": CAPTION_MAX_STORAGE_GB,
+    }
 
 @app.get("/api/services/status")
 async def get_services_status():
@@ -1580,6 +1763,29 @@ def _validate_reel_source_constraints(duration_seconds: float, size_bytes: float
         )
 
 
+def _validate_caption_source_constraints(duration_seconds: float, size_bytes: float, source_label: str) -> None:
+    max_duration_seconds = max(0.0, CAPTION_MAX_DURATION_MINUTES) * 60.0
+    max_size_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
+
+    if max_size_bytes > 0 and size_bytes > max_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Source {source_label} trop volumineuse: {_bytes_to_gb(size_bytes):.2f} Go. "
+                f"Maximum autorise: {CAPTION_MAX_STORAGE_GB:.2f} Go."
+            ),
+        )
+
+    if max_duration_seconds > 0 and duration_seconds > max_duration_seconds:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Source {source_label} trop longue: {duration_seconds / 60.0:.2f} min. "
+                f"Maximum autorise: {CAPTION_MAX_DURATION_MINUTES:.2f} min."
+            ),
+        )
+
+
 def _allowed_video_formats() -> List[str]:
     return [
         fmt.strip().lower().lstrip(".")
@@ -1600,6 +1806,528 @@ def _validate_video_extension(filename: str, context_label: str = "fichier") -> 
             status_code=400,
             detail=f"Format video invalide pour {context_label}. Formats acceptes: {accepted}.",
         )
+
+
+_AUTO_EDIT_KEYS = (
+    "zoom",
+    "brightness",
+    "saturation",
+    "contrast",
+    "speed",
+    "removeSilence",
+    "cleanAudio",
+    "removeBadTakes",
+)
+
+
+def _normalize_auto_edit_options(raw_options: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    raw = raw_options or {}
+    return {key: bool(raw.get(key)) for key in _AUTO_EDIT_KEYS}
+
+
+def _apply_auto_edit_options_to_effects_config(
+    effects_config: Optional[Dict[str, Any]],
+    raw_options: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Any], List[str]]:
+    config = dict(effects_config or {})
+    options = _normalize_auto_edit_options(raw_options)
+    segments = config.get("segments") or []
+    processed_segments: List[Dict[str, Any]] = []
+
+    for segment in segments:
+        seg = dict(segment or {})
+        if not options["zoom"]:
+            seg["zoom"] = 1.0
+            seg["zoomCenterX"] = 0.5
+            seg["zoomCenterY"] = 0.5
+        if not options["brightness"]:
+            seg["brightness"] = 1.0
+        if not options["contrast"]:
+            seg["contrast"] = 1.0
+        if not options["saturation"]:
+            seg["saturate"] = 1.0
+        processed_segments.append(seg)
+
+    config["segments"] = processed_segments
+
+    applied_steps: List[str] = []
+    if options["removeBadTakes"]:
+        applied_steps.append("remove_bad_takes:queued")
+    if options["removeSilence"]:
+        applied_steps.append("remove_silence:queued")
+    if options["cleanAudio"]:
+        applied_steps.append("clean_audio:queued")
+    if options["zoom"]:
+        applied_steps.append("zoom:enabled")
+    if options["brightness"]:
+        applied_steps.append("brightness:enabled")
+    if options["saturation"]:
+        applied_steps.append("saturation:enabled")
+    if options["contrast"]:
+        applied_steps.append("contrast:enabled")
+    if options["speed"]:
+        applied_steps.append("speed:queued")
+
+    return config, applied_steps
+
+
+def _apply_auto_edit_options_to_filter_data(
+    filter_data: Optional[Dict[str, Any]],
+    raw_options: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Any], List[str]]:
+    data = dict(filter_data or {})
+    filter_string = str(data.get("filter_string") or "").strip()
+    options = _normalize_auto_edit_options(raw_options)
+    if not filter_string:
+        return data, []
+
+    chain = VideoEditor._split_filter_chain(filter_string)
+    normalized_chain: List[str] = []
+    for part in chain:
+        low = part.lower()
+
+        if "zoompan=" in low and not options["zoom"]:
+            continue
+        if "hue=" in low and not options["saturation"]:
+            continue
+        if "eq=" in low and not (options["brightness"] or options["contrast"] or options["saturation"]):
+            continue
+
+        normalized_chain.append(part)
+
+    data["filter_string"] = ",".join(normalized_chain)
+    _, applied_steps = _apply_auto_edit_options_to_effects_config({"segments": []}, raw_options)
+    return data, applied_steps
+
+
+def _run_ffmpeg_command(cmd: List[str]) -> None:
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="ignore") or "FFmpeg command failed")
+
+
+def _video_has_audio_stream(video_path: str) -> bool:
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8", errors="ignore").strip()
+        return bool(out)
+    except Exception:
+        return False
+
+
+def _merge_intervals(ranges: List[tuple[float, float]]) -> List[tuple[float, float]]:
+    if not ranges:
+        return []
+    ordered = sorted((max(0.0, float(a)), max(0.0, float(b))) for a, b in ranges)
+    merged: List[tuple[float, float]] = []
+    for start, end in ordered:
+        if end <= start:
+            continue
+        if not merged:
+            merged.append((start, end))
+            continue
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _invert_cut_ranges(total_duration: float, cut_ranges: List[tuple[float, float]]) -> List[tuple[float, float]]:
+    duration = max(0.0, float(total_duration or 0.0))
+    if duration <= 0:
+        return []
+    merged = _merge_intervals(cut_ranges)
+    keep: List[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in merged:
+        if start > cursor:
+            keep.append((cursor, min(start, duration)))
+        cursor = max(cursor, end)
+    if cursor < duration:
+        keep.append((cursor, duration))
+    return [(a, b) for a, b in keep if (b - a) >= 0.08]
+
+
+def _build_keep_time_expr(keep_ranges: List[tuple[float, float]]) -> str:
+    chunks = [f"between(t,{round(start, 3)},{round(end, 3)})" for start, end in keep_ranges]
+    return "+".join(chunks) if chunks else "0"
+
+
+def _render_keep_ranges(input_path: str, output_path: str, keep_ranges: List[tuple[float, float]]) -> None:
+    expr = _build_keep_time_expr(keep_ranges)
+    has_audio = _video_has_audio_stream(input_path)
+    if has_audio:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
+            "-af", f"aselect='{expr}',asetpts=N/SR/TB",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "aac", "-b:a", "192k",
+            output_path,
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
+            "-an",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            output_path,
+        ]
+    _run_ffmpeg_command(cmd)
+
+
+def _detect_silence_cut_ranges(video_path: str, total_duration: float) -> List[tuple[float, float]]:
+    cmd = [
+        "ffmpeg", "-hide_banner", "-i", video_path,
+        "-af", "silencedetect=noise=-35dB:d=0.35",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    log_text = result.stderr.decode("utf-8", errors="ignore")
+
+    starts = [float(val) for val in re.findall(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", log_text)]
+    ends = [
+        (float(a), float(b))
+        for a, b in re.findall(r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)\s*\|\s*silence_duration:\s*([0-9]+(?:\.[0-9]+)?)", log_text)
+    ]
+
+    cut_ranges: List[tuple[float, float]] = []
+    pending_start_index = 0
+    for end_value, silence_duration in ends:
+        if pending_start_index >= len(starts):
+            continue
+        start_value = starts[pending_start_index]
+        pending_start_index += 1
+        if silence_duration >= 0.35 and end_value > start_value:
+            cut_ranges.append((start_value, end_value))
+
+    if pending_start_index < len(starts):
+        for start_value in starts[pending_start_index:]:
+            if total_duration > start_value:
+                cut_ranges.append((start_value, total_duration))
+
+    return _merge_intervals(cut_ranges)
+
+
+def _atempo_chain(speed_factor: float) -> str:
+    factor = max(0.5, min(2.0, float(speed_factor or 1.0)))
+    return f"atempo={round(factor, 4)}"
+
+
+def _apply_speed_transform(input_path: str, output_path: str, speed_factor: float = 1.08) -> None:
+    factor = max(0.5, min(2.0, float(speed_factor or 1.0)))
+    has_audio = _video_has_audio_stream(input_path)
+    if has_audio:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-filter:v", f"setpts=PTS/{round(factor, 4)}",
+            "-filter:a", _atempo_chain(factor),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "aac", "-b:a", "192k",
+            output_path,
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-filter:v", f"setpts=PTS/{round(factor, 4)}",
+            "-an",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            output_path,
+        ]
+    _run_ffmpeg_command(cmd)
+
+
+def _apply_clean_audio_transform(input_path: str, output_path: str) -> None:
+    if not _video_has_audio_stream(input_path):
+        shutil.copy(input_path, output_path)
+        return
+    audio_filter = "highpass=f=80,lowpass=f=12000,afftdn=nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11"
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-c:v", "copy",
+        "-af", audio_filter,
+        "-c:a", "aac", "-b:a", "192k",
+        output_path,
+    ]
+    _run_ffmpeg_command(cmd)
+
+
+def _detect_bad_take_candidates_heuristic(transcript: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    segments = (transcript or {}).get("segments") or []
+    filler_words = {"um", "uh", "euh", "hmm", "erm", "hum", "ah"}
+    candidates: List[Dict[str, Any]] = []
+    for segment in segments:
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", 0.0) or 0.0)
+        if end <= start:
+            continue
+        text = str(segment.get("text") or "").strip().lower()
+        words = [w for w in re.findall(r"[a-zA-Z']+", text) if w]
+        if not words:
+            continue
+
+        filler_count = sum(1 for w in words if w in filler_words)
+        repeated = any(words[i] == words[i + 1] for i in range(len(words) - 1))
+        reason = ""
+        confidence = 0.0
+        if filler_count >= 2:
+            reason = "filler hesitation"
+            confidence = min(0.98, 0.7 + 0.08 * filler_count)
+        elif repeated and len(words) >= 4:
+            reason = "repeated phrase"
+            confidence = 0.82
+
+        if reason:
+            candidates.append(
+                {
+                    "start": max(0.0, start - 0.06),
+                    "end": max(start, end + 0.06),
+                    "reason": reason,
+                    "confidence": round(confidence, 2),
+                }
+            )
+
+    return candidates
+
+
+def _parse_bad_take_candidates_response(raw_text: str) -> List[Dict[str, Any]]:
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+
+    fenced_match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced_match:
+        text = fenced_match.group(1).strip()
+
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return []
+
+    if isinstance(payload, dict):
+        items = payload.get("candidates")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _sanitize_bad_take_candidates(
+    raw_candidates: List[Dict[str, Any]],
+    max_end: float,
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for candidate in raw_candidates:
+        try:
+            start = float(candidate.get("start", 0.0) or 0.0)
+            end = float(candidate.get("end", 0.0) or 0.0)
+        except Exception:
+            continue
+
+        start = max(0.0, min(start, max_end))
+        end = max(0.0, min(end, max_end))
+        if end <= start:
+            continue
+
+        reason = str(candidate.get("reason") or "bad take").strip() or "bad take"
+        reason = reason[:120]
+
+        try:
+            confidence = float(candidate.get("confidence", 0.5) or 0.5)
+        except Exception:
+            confidence = 0.5
+        confidence = max(0.0, min(confidence, 1.0))
+
+        normalized.append(
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "reason": reason,
+                "confidence": round(confidence, 2),
+            }
+        )
+
+    normalized.sort(key=lambda x: (x["start"], x["end"]))
+    merged: List[Dict[str, Any]] = []
+    for item in normalized:
+        if not merged:
+            merged.append(item)
+            continue
+        prev = merged[-1]
+        if item["start"] <= prev["end"] and item["reason"] == prev["reason"]:
+            prev["end"] = max(prev["end"], item["end"])
+            prev["confidence"] = max(prev["confidence"], item["confidence"])
+            continue
+        merged.append(item)
+    return merged
+
+
+def _detect_bad_take_candidates_ai(transcript: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if os.environ.get("AUTO_EDIT_BAD_TAKE_AI", "true").strip().lower() in {"0", "false", "no"}:
+        return []
+
+    segments = (transcript or {}).get("segments") or []
+    if not segments:
+        return []
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key or api_key == "your_openai_key":
+        return []
+
+    compact_segments: List[Dict[str, Any]] = []
+    for idx, segment in enumerate(segments[:140]):
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", 0.0) or 0.0)
+        text = str(segment.get("text") or "").strip()
+        if not text or end <= start:
+            continue
+        compact_segments.append(
+            {
+                "index": idx,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+            }
+        )
+
+    if not compact_segments:
+        return []
+
+    max_end = max(float(seg.get("end", 0.0) or 0.0) for seg in compact_segments)
+    prompt_payload = {
+        "instructions": (
+            "Detect low-quality speaking takes using multi-segment context. "
+            "Consider hesitations, false starts, repeated fragments across neighboring segments, "
+            "and self-corrections that hurt fluency. Return only meaningful cut candidates."
+        ),
+        "output_contract": {
+            "format": "JSON",
+            "top_level": "candidates",
+            "fields": ["start", "end", "reason", "confidence"],
+            "confidence_range": "0..1",
+        },
+        "segments": compact_segments,
+    }
+
+    try:
+        from openai import OpenAI
+
+        model = os.environ.get("OPENAI_BAD_TAKE_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a video editing analyst. "
+                        "Use context between adjacent transcript segments before suggesting cuts. "
+                        "Respond with strict JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(prompt_payload, ensure_ascii=True),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=900,
+        )
+        raw_output = (response.choices[0].message.content or "").strip()
+        parsed = _parse_bad_take_candidates_response(raw_output)
+        return _sanitize_bad_take_candidates(parsed, max_end=max_end)
+    except Exception as exc:
+        print(f"⚠️ AI bad-take analysis failed, fallback heuristic. Reason: {exc}")
+        return []
+
+
+def _detect_bad_take_candidates(transcript: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ai_candidates = _detect_bad_take_candidates_ai(transcript)
+    if ai_candidates:
+        return ai_candidates
+    return _detect_bad_take_candidates_heuristic(transcript)
+
+
+def _apply_auto_edit_media_steps(
+    input_path: str,
+    job_id: str,
+    transcript: Optional[Dict[str, Any]],
+    raw_options: Optional[Dict[str, Any]],
+) -> tuple[str, List[str], List[Dict[str, Any]], List[str]]:
+    options = _normalize_auto_edit_options(raw_options)
+    steps: List[str] = []
+    bad_take_candidates: List[Dict[str, Any]] = []
+    cleanup_paths: List[str] = []
+    current_path = input_path
+
+    def build_temp(name: str) -> str:
+        return os.path.join(OUTPUT_DIR, job_id, f"auto_{name}_{uuid.uuid4().hex[:8]}.mp4")
+
+    total_duration = _probe_local_video_duration_seconds(current_path)
+
+    if options["removeBadTakes"]:
+        bad_take_candidates = _detect_bad_take_candidates(transcript)
+        cut_ranges = [(float(c["start"]), float(c["end"])) for c in bad_take_candidates]
+        keep_ranges = _invert_cut_ranges(total_duration, cut_ranges)
+        if keep_ranges and len(keep_ranges) > 1:
+            next_path = build_temp("bad_takes")
+            _render_keep_ranges(current_path, next_path, keep_ranges)
+            cleanup_paths.append(next_path)
+            current_path = next_path
+            total_duration = _probe_local_video_duration_seconds(current_path)
+            steps.append(f"remove_bad_takes:done:{len(bad_take_candidates)}")
+        else:
+            steps.append("remove_bad_takes:skipped")
+    else:
+        steps.append("remove_bad_takes:disabled")
+
+    if options["removeSilence"] and _video_has_audio_stream(current_path):
+        silence_ranges = _detect_silence_cut_ranges(current_path, total_duration)
+        keep_ranges = _invert_cut_ranges(total_duration, silence_ranges)
+        if keep_ranges and len(keep_ranges) > 1:
+            next_path = build_temp("silence")
+            _render_keep_ranges(current_path, next_path, keep_ranges)
+            cleanup_paths.append(next_path)
+            current_path = next_path
+            total_duration = _probe_local_video_duration_seconds(current_path)
+            steps.append(f"remove_silence:done:{len(silence_ranges)}")
+        else:
+            steps.append("remove_silence:skipped")
+    elif options["removeSilence"]:
+        steps.append("remove_silence:no_audio")
+    else:
+        steps.append("remove_silence:disabled")
+
+    if options["cleanAudio"]:
+        next_path = build_temp("clean_audio")
+        _apply_clean_audio_transform(current_path, next_path)
+        cleanup_paths.append(next_path)
+        current_path = next_path
+        total_duration = _probe_local_video_duration_seconds(current_path)
+        steps.append("clean_audio:done")
+    else:
+        steps.append("clean_audio:disabled")
+
+    if options["speed"]:
+        next_path = build_temp("speed")
+        _apply_speed_transform(current_path, next_path, speed_factor=1.08)
+        cleanup_paths.append(next_path)
+        current_path = next_path
+        steps.append("speed:done:1.08")
+    else:
+        steps.append("speed:disabled")
+
+    return current_path, steps, bad_take_candidates, cleanup_paths
 
 @app.post("/api/process")
 async def process_endpoint(
@@ -1850,6 +2578,7 @@ class EditRequest(BaseModel):
     api_key: Optional[str] = None
     input_filename: Optional[str] = None
     input_url: Optional[str] = None
+    auto_edit_options: Optional[Dict[str, bool]] = None
 
 
 def _sanitize_input_filename(value: Optional[str]) -> Optional[str]:
@@ -1961,7 +2690,17 @@ async def edit_clip(
         # Define output path for edited video
         edited_filename = f"edited_{filename}"
         output_path = os.path.join(OUTPUT_DIR, req.job_id, edited_filename)
-        
+
+        transcript_for_edit = None
+        try:
+            meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+            if meta_files:
+                with open(meta_files[0], "r") as f:
+                    data = json.load(f)
+                    transcript_for_edit = data.get("transcript")
+        except Exception as e:
+            print(f"⚠️ Could not load transcript for editing context: {e}")
+
         # Run editing in a thread to avoid blocking main loop
         # Since VideoEditor uses blocking calls (subprocess, API wait)
         def run_edit():
@@ -1975,14 +2714,23 @@ async def edit_clip(
             # Copy original file to safe path
             # (Copy is safer than rename if something crashes, we keep original)
             shutil.copy(input_path, safe_input_path)
-            
+            auto_cleanup_paths: List[str] = []
+
             try:
+                processed_input_path, media_steps, bad_take_candidates, generated_paths = _apply_auto_edit_media_steps(
+                    safe_input_path,
+                    req.job_id,
+                    transcript_for_edit,
+                    req.auto_edit_options,
+                )
+                auto_cleanup_paths.extend(generated_paths)
+
                 # 1. Upload (using safe path)
-                vid_file = editor.upload_video(safe_input_path)
-                
+                vid_file = editor.upload_video(processed_input_path)
+
                 # 2. Get duration
                 import cv2
-                cap = cv2.VideoCapture(safe_input_path)
+                cap = cv2.VideoCapture(processed_input_path)
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1990,25 +2738,22 @@ async def edit_clip(
                 duration = frame_count / fps if fps else 0
                 cap.release()
                 
-                # Load transcript from metadata
-                transcript = None
-                try:
-                    meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
-                    if meta_files:
-                        with open(meta_files[0], 'r') as f:
-                            data = json.load(f)
-                            transcript = data.get('transcript')
-                except Exception as e:
-                    print(f"⚠️ Could not load transcript for editing context: {e}")
-
                 # 3. Get Plan (Filter String)
-                filter_data = editor.get_ffmpeg_filter(vid_file, duration, fps=fps, width=width, height=height, transcript=transcript)
-                
+                filter_data = editor.get_ffmpeg_filter(
+                    vid_file,
+                    duration,
+                    fps=fps,
+                    width=width,
+                    height=height,
+                    transcript=transcript_for_edit,
+                )
+                filter_data, applied_steps = _apply_auto_edit_options_to_filter_data(filter_data, req.auto_edit_options)
+
                 # 4. Apply
                 # Use safe output name first
                 safe_output_path = os.path.join(OUTPUT_DIR, req.job_id, f"temp_output_{req.job_id}.mp4")
-                editor.apply_edits(safe_input_path, safe_output_path, filter_data)
-                
+                editor.apply_edits(processed_input_path, safe_output_path, filter_data)
+
                 # Move result to final destination (rename works even if dest name has unicode if filesystem supports it, 
                 # but python might still struggle if locale is broken? No, os.rename usually handles it better than subprocess args)
                 # Actually, output_path is defined above: f"edited_{filename}"
@@ -2017,11 +2762,18 @@ async def edit_clip(
                 if os.path.exists(safe_output_path):
                     shutil.move(safe_output_path, output_path)
                 
-                return filter_data
+                return {
+                    "filter": filter_data,
+                    "applied_steps": applied_steps + media_steps,
+                    "bad_take_candidates": bad_take_candidates,
+                }
             finally:
                 # Cleanup temp safe input
                 if os.path.exists(safe_input_path):
                     os.remove(safe_input_path)
+                for temp_path in auto_cleanup_paths:
+                    if temp_path != safe_input_path and os.path.exists(temp_path):
+                        os.remove(temp_path)
 
         # Run in thread pool
         loop = asyncio.get_event_loop()
@@ -2057,6 +2809,112 @@ async def edit_clip(
     except Exception as e:
         print(f"❌ Edit Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/captions/process")
+async def process_caption_endpoint(
+    file: UploadFile = File(...),
+    acknowledged: Optional[str] = Form(None),
+    user_id: str = Depends(get_user_id_header),
+):
+    if not file:
+        raise HTTPException(status_code=400, detail="Must provide a video file")
+
+    ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
+    if not ack_flag:
+        raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
+
+    caption_required_credits = 0.0
+    if is_supabase_configured():
+        caption_breakdown = estimate_caption_cost_usd(
+            duration_minutes=3.0,
+            video_size_gb=0.2,
+            uses_assembly=True,
+            uses_openai=True,
+            uses_gemini=False,
+        )
+        caption_required_credits = calculate_credits_for_operation(caption_breakdown)["final_credits"]
+        user_data = await supabase_get_user_data(user_id)
+        available = float(user_data.get("credit", 0)) if user_data else 0.0
+        if available < caption_required_credits:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {caption_required_credits} cr, disponible : {available} cr.",
+            )
+
+    _validate_video_extension(file.filename if file else "", context_label="sous-titres")
+
+    caption_job_id = str(uuid.uuid4())
+    output_dir = os.path.join(OUTPUT_DIR, caption_job_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    source_name = os.path.basename(str(file.filename or "caption_source.mp4"))
+    input_filename = f"caption_input_{int(time.time())}_{source_name}"
+    input_path = os.path.join(output_dir, input_filename)
+
+    size_bytes = 0
+    limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
+    try:
+        with open(input_path, "wb") as handle:
+            while content := await file.read(1024 * 1024):
+                size_bytes += len(content)
+                if limit_bytes > 0 and size_bytes > limit_bytes:
+                    raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {CAPTION_MAX_STORAGE_GB:.2f} Go")
+                handle.write(content)
+    except HTTPException:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        raise
+    finally:
+        await file.close()
+
+    local_duration = _probe_local_video_duration_seconds(input_path)
+    _validate_caption_source_constraints(
+        duration_seconds=local_duration,
+        size_bytes=float(size_bytes),
+        source_label="fichier",
+    )
+
+    job_priority = await _resolve_user_job_priority(user_id)
+    runtime_payload = {
+        "status": "queued",
+        "logs": [f"Caption job {caption_job_id} queued."],
+        "output_dir": output_dir,
+        "input_path": input_path,
+        "source_type": "file",
+        "source_value": source_name,
+        "source_name": source_name,
+        "user_id": user_id,
+        "priority": job_priority,
+        "job_kind": "caption",
+        "caption_required_credits": caption_required_credits,
+    }
+
+    jobs[caption_job_id] = dict(runtime_payload)
+    reel_job_manager.runtime_jobs[caption_job_id] = dict(runtime_payload)
+    await reel_job_manager.create_job(
+        user_id=user_id,
+        job_type=JobType.GENERATE_SUBTITLES,
+        pipeline_name="CaptionProcessingPipeline",
+        job_id=caption_job_id,
+        job_data={
+            "source_type": "file",
+            "source_value": source_name,
+            "output_dir": output_dir,
+            "input_path": input_path,
+            "caption_max_duration_minutes": CAPTION_MAX_DURATION_MINUTES,
+            "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
+        },
+        runtime_data=dict(runtime_payload),
+        max_attempts=1,
+        reserved_quota=1.0,
+        priority=job_priority,
+    )
+    await reel_job_manager.enqueue_job(caption_job_id)
+    await CaptionProcessingPipeline(reel_job_manager, caption_job_id).step(0, "queued")
+    await enqueue_reel_job(caption_job_id, priority=job_priority)
+
+    return {"job_id": caption_job_id, "status": "queued"}
+
 
 class SubtitleRequest(BaseModel):
     job_id: str
@@ -2198,6 +3056,21 @@ async def persist_captioned_reel(
     data['shorts'] = clips
     _persist_metadata_json(metadata_path, data)
 
+    if is_supabase_configured():
+        caption_row = await supabase_get_caption_by_job_clip(job_id, clip_index, user_id)
+        if caption_row:
+            caption_updates: Dict[str, Any] = {
+                "caption_url": new_video_url,
+                "caption_status": "termine",
+            }
+            bucket = os.environ.get("AWS_S3_BUCKET", "")
+            if bucket and os.path.exists(output_path):
+                caption_s3_key = f"captions/{user_id}/{job_id}/{output_filename}"
+                if upload_file_to_s3(output_path, bucket, caption_s3_key):
+                    caption_updates["caption_s3_key"] = caption_s3_key
+                    caption_updates["caption_url"] = _caption_media_url_from_s3_key(caption_s3_key) or new_video_url
+            await supabase_update_caption(str(caption_row.get("id")), user_id, caption_updates)
+
     if is_supabase_configured() and caption_required_credits > 0:
         debited = await supabase_deduct_user_credits(user_id, caption_required_credits)
         if not debited:
@@ -2253,6 +3126,7 @@ class EffectsGenerateRequest(BaseModel):
     clip_index: int
     input_filename: Optional[str] = None
     input_url: Optional[str] = None
+    auto_edit_options: Optional[Dict[str, bool]] = None
 
 @app.post("/api/effects/generate")
 async def generate_effects_config(
@@ -2357,7 +3231,14 @@ async def generate_effects_config(
         if effects_config is None:
             raise HTTPException(status_code=500, detail="Failed to generate effects config from Gemini")
 
-        return {"effects": effects_config}
+        normalized_effects, applied_steps = _apply_auto_edit_options_to_effects_config(
+            effects_config,
+            req.auto_edit_options,
+        )
+        return {
+            "effects": normalized_effects,
+            "applied_steps": applied_steps,
+        }
 
     except HTTPException:
         raise
@@ -4205,6 +5086,138 @@ async def buy_credits_checkout(request: Request, payload: BuyCreditsRequest):
     }
 
 
+@app.get("/api/captions")
+async def list_captions(
+    user_id: str = Depends(get_user_id_header),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase captions is not configured")
+
+    rows, total = await supabase_list_captions(user_id=user_id, page=page, page_size=page_size, status=status, query=q)
+    return {
+        "items": [_normalize_caption_row(row) for row in rows],
+        "total": total,
+        "page": max(page, 1),
+        "page_size": min(max(page_size, 1), 100),
+    }
+
+
+@app.get("/api/captions/{caption_id}/media-url")
+async def caption_media_url(caption_id: str, user_id: str = Depends(get_user_id_header)):
+    row = await supabase_get_caption(caption_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Caption not found")
+    item = _normalize_caption_row(row)
+    return {"media_url": item.get("media_url")}
+
+
+@app.delete("/api/captions/{caption_id}")
+async def delete_caption(caption_id: str, user_id: str = Depends(get_user_id_header)):
+    deleted = await supabase_soft_delete_caption(caption_id, user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Caption not found")
+    return {"deleted": True}
+
+
+@app.post("/api/captions/{caption_id}/share")
+async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
+    if is_supabase_configured():
+        platform_count = len(payload.platforms) if payload.platforms else 1
+        _pub_cost = calculate_credits_for_operation(
+            estimate_publication_cost_usd(platform_count=platform_count, video_size_gb=0.5)
+        )
+        _pub_required = _pub_cost["final_credits"]
+        _pub_ud = await supabase_get_user_data(user_id)
+        _pub_credits = float(_pub_ud.get("credit", 0)) if _pub_ud else 0.0
+        if _pub_credits < _pub_required:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Crédits insuffisants. Requis : {_pub_required} cr, disponible : {_pub_credits} cr.",
+            )
+
+    row = await supabase_get_caption(caption_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Caption not found")
+
+    item = _normalize_caption_row(row)
+    media_url = item.get("media_url")
+    if not media_url:
+        raise HTTPException(status_code=400, detail="No media URL available")
+
+    final_title = payload.title or row.get("caption_title") or "Sous-titres"
+    final_description = payload.description or row.get("caption_description") or ""
+    selected_platforms = _resolve_social_platforms(payload.platforms)
+    publish_priority = await _resolve_user_job_priority(user_id)
+
+    results: Dict[str, Any] = {}
+    overall_success = True
+    for platform_name in selected_platforms:
+        publish_job_id = await _insert_publish_job(
+            user_id=user_id,
+            platform=platform_name,
+            external_id="n/a",
+            status="queued",
+            priority=publish_priority,
+        )
+        try:
+            await _update_publish_job_status(publish_job_id, "processing")
+            account = await _get_social_account(user_id, platform_name)
+            if not account:
+                raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
+
+            publish_payload = PublishRequest(
+                user_id=user_id,
+                title=final_title,
+                description=final_description,
+                text=final_description,
+                caption=final_description,
+                video_url=media_url,
+            )
+            platform_result = await publish_post(account, publish_payload)
+            external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
+            await _update_publish_job_status(publish_job_id, "done", external_id=external_id)
+            results[platform_name] = {
+                "success": True,
+                "result": platform_result,
+                "publish_job_id": publish_job_id,
+            }
+        except Exception as exc:
+            overall_success = False
+            err_msg = str(exc)
+            await _update_publish_job_status(publish_job_id, "failed", error_message=err_msg)
+            results[platform_name] = {
+                "success": False,
+                "error": err_msg,
+                "publish_job_id": publish_job_id,
+            }
+
+    if is_supabase_configured():
+        platform_count_done = sum(1 for v in results.values() if v.get("success"))
+        if platform_count_done > 0:
+            _pub_done_cost = calculate_credits_for_operation(
+                estimate_publication_cost_usd(platform_count=platform_count_done, video_size_gb=0.5)
+            )
+            _pub_done_credits = _pub_done_cost["final_credits"]
+            await supabase_deduct_user_credits(user_id, _pub_done_credits)
+            await supabase_insert_user_data_history(
+                user_id=user_id,
+                credit=_pub_done_credits,
+                storage=0.0,
+                operation="output",
+                operation_type="publications",
+                operation_id=caption_id,
+            )
+
+    return {
+        "success": overall_success,
+        "results": results,
+    }
+
+
 @app.get("/api/reels")
 async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
     if not is_supabase_configured():
@@ -4591,7 +5604,7 @@ async def _insert_publish_job(
     status: str,
     error_message: Optional[str] = None,
     priority: int = DEFAULT_JOB_PRIORITY,
-) -> None:
+) -> Optional[str]:
     client = await supabase_get_client()
     payload: Dict[str, Any] = {
         "user_id": user_id,
@@ -4604,7 +5617,30 @@ async def _insert_publish_job(
         payload["error_message"] = error_message
     if status in {"done", "failed"}:
         payload["completed_at"] = _utcnow_iso()
-    await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).insert(payload).execute()
+    response = await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).insert(payload).execute()
+    rows = response.data or []
+    return str(rows[0].get("id")) if rows and rows[0].get("id") is not None else None
+
+
+async def _update_publish_job_status(
+    publish_job_id: Optional[str],
+    status: str,
+    error_message: Optional[str] = None,
+    external_id: Optional[str] = None,
+) -> None:
+    if not publish_job_id:
+        return
+    client = await supabase_get_client()
+    payload: Dict[str, Any] = {
+        "status": status,
+    }
+    if error_message is not None:
+        payload["error_message"] = error_message
+    if external_id is not None:
+        payload["external_id"] = external_id
+    if status in {"done", "failed"}:
+        payload["completed_at"] = _utcnow_iso()
+    await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).update(payload).eq("id", publish_job_id).execute()
 
 
 @app.get("/api/social/accounts")

@@ -3,10 +3,18 @@ import { Youtube, Upload, FileVideo, X } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { useTranslation } from '../state/LanguageContext';
 
-export default function MediaInput({ onProcess, isProcessing, isCreditBlocked = false, creditWarning = "" }) {
+export default function MediaInput({
+    onProcess,
+    isProcessing,
+    isCreditBlocked = false,
+    creditWarning = "",
+    localOnly = false,
+    submitLabel = "",
+    processingLabel = "",
+}) {
     const { t } = useTranslation();
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
-    const [mode, setMode] = useState('url'); // 'url' | 'file'
+    const [mode, setMode] = useState(localOnly ? 'file' : 'url'); // 'url' | 'file'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [acknowledged, setAcknowledged] = useState(false);
@@ -22,6 +30,12 @@ export default function MediaInput({ onProcess, isProcessing, isCreditBlocked = 
             })
             .catch(() => {});
     }, []);
+
+    useEffect(() => {
+        if (localOnly) {
+            setMode('file');
+        }
+    }, [localOnly]);
 
     const handleSubmit = (e) => {
         e.preventDefault();
@@ -44,7 +58,7 @@ export default function MediaInput({ onProcess, isProcessing, isCreditBlocked = 
     return (
         <div className="bg-surface border border-slate-200 dark:border-white/5 rounded-2xl p-6 animate-[fadeIn_0.6s_ease-out]">
             <div className="flex gap-4 mb-6 border-b border-slate-200 dark:border-white/5 pb-4">
-                {youtubeUrlEnabled && (
+                {youtubeUrlEnabled && !localOnly && (
                     <button
                         onClick={() => setMode('url')}
                         className={`flex items-center gap-2 pb-2 px-2 transition-all ${mode === 'url'
@@ -58,7 +72,7 @@ export default function MediaInput({ onProcess, isProcessing, isCreditBlocked = 
                 )}
                 <button
                     onClick={() => setMode('file')}
-                    className={`flex items-center gap-2 pb-2 px-2 transition-all ${mode === 'file'
+                    className={`flex items-center gap-2 pb-2 px-2 transition-all ${(mode === 'file' || localOnly)
                         ? 'text-primary border-b-2 border-primary -mb-[17px]'
                         : 'text-slate-500 dark:text-zinc-400 hover:text-white'
                         }`}
@@ -69,7 +83,7 @@ export default function MediaInput({ onProcess, isProcessing, isCreditBlocked = 
             </div>
 
             <form onSubmit={handleSubmit}>
-                {mode === 'url' ? (
+                {mode === 'url' && !localOnly ? (
                     <div className="space-y-4">
                         <input
                             type="url"
@@ -135,18 +149,18 @@ export default function MediaInput({ onProcess, isProcessing, isCreditBlocked = 
 
                 <button
                     type="submit"
-                    disabled={isProcessing || isCreditBlocked || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && !file)}
+                    disabled={isProcessing || isCreditBlocked || !acknowledged || ((mode === 'url' && !localOnly) && !url) || (mode === 'file' && !file)}
                     className="w-full btn-primary mt-4 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     {isProcessing ? (
                         <>
                             <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            {t('mediaInput.processing', 'Processing Video...')}
+                            {processingLabel || t('mediaInput.processing', 'Processing Video...')}
                         </>
                     ) : isCreditBlocked ? (
                         <>{t('mediaInput.insufficientCredits', 'Insufficient credits')}</>
                     ) : (
-                        <>{t('mediaInput.generateClips', 'Generate Clips')}</>
+                        <>{submitLabel || t('mediaInput.generateClips', 'Generate Clips')}</>
                     )}
                 </button>
             </form>

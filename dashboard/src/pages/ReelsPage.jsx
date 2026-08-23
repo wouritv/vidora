@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Play, Plus, Download, Loader2, Search, Share2, Trash2, X, LayoutGrid, List } from "lucide-react";
-import { getApiUrl } from "../config";
+import { Play, Plus, Download, Loader2, Search, Share2, Trash2, X } from "lucide-react";
+import { fetchAppConfig, getApiUrl, getDefaultHideSocialPlatforms } from "../config";
 import { useAuth } from "../state/AuthContext";
 import { useUserCredits } from "../state/UserCreditsContext";
 import { useNavigate } from "react-router-dom";
@@ -25,7 +25,6 @@ export default function ReelsPage() {
     const [queryInput, setQueryInput] = useState("");
     const [query, setQuery] = useState("");
     const [status, setStatus] = useState("");
-    const [viewMode, setViewMode] = useState("table");
     const [sharingId, setSharingId] = useState("");
     const [shareResult, setShareResult] = useState(null);
     const [shareModalItem, setShareModalItem] = useState(null);
@@ -43,7 +42,7 @@ export default function ReelsPage() {
     const [deletingId, setDeletingId] = useState("");
     const [previewItem, setPreviewItem] = useState(null);
     const [previewUrl, setPreviewUrl] = useState("");
-    const [failedGridPreviewKeys, setFailedGridPreviewKeys] = useState(() => new Set());
+    const [hideSocialPlatforms, setHideSocialPlatforms] = useState(getDefaultHideSocialPlatforms());
     const navigate = useNavigate();
 
     const totalPages = useMemo(() => Math.max(1, Math.ceil(total / pageSize)), [total, pageSize]);
@@ -52,18 +51,6 @@ export default function ReelsPage() {
     const canCreateReel = credits >= reelCostEstimate;
     const canShareReel = credits >= publicationCostEstimate;
 
-    const resolveReelPreview = (item) => item.reel_preview_url || item.reel_thumbnail_url || item.reel_playback_url || item.reel_url || "";
-    const getGridPreviewKey = (item) => `${item.id || "unknown"}:${resolveReelPreview(item) || "none"}`;
-
-    const handleGridPreviewError = (item) => {
-        const key = getGridPreviewKey(item);
-        setFailedGridPreviewKeys((prev) => {
-            if (prev.has(key)) return prev;
-            const next = new Set(prev);
-            next.add(key);
-            return next;
-        });
-    };
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -72,6 +59,19 @@ export default function ReelsPage() {
         }, 350);
         return () => clearTimeout(timer);
     }, [queryInput]);
+
+    useEffect(() => {
+        let active = true;
+        fetchAppConfig()
+            .then((cfg) => {
+                if (!active || !cfg || typeof cfg.hideSocialPlatforms !== "boolean") return;
+                setHideSocialPlatforms(cfg.hideSocialPlatforms);
+            })
+            .catch(() => {});
+        return () => {
+            active = false;
+        };
+    }, []);
 
     useEffect(() => {
         if (!user?.id) return;
@@ -121,11 +121,6 @@ export default function ReelsPage() {
             cancelled = true;
         };
     }, [user?.id, page, pageSize, query, status]);
-
-    useEffect(() => {
-        // Reset failed previews when list data changes so newly signed URLs can retry.
-        setFailedGridPreviewKeys(new Set());
-    }, [items]);
 
     const refresh = async () => {
         if (!user?.id) return;
@@ -377,28 +372,9 @@ export default function ReelsPage() {
                         {t('settings.refresh', 'Refresh')}
                     </button>
 
-                    <div className="inline-flex rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-1">
-                        <button
-                            type="button"
-                            onClick={() => setViewMode("table")}
-                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "table" ? "bg-white/10 text-white" : "text-slate-500 dark:text-zinc-400 hover:text-zinc-200"}`}
-                            title={t("reels.tableView", "Table view")}
-                        >
-                            <List size={14} /> {t("reels.tableLabel", "Table")}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setViewMode("grid")}
-                            className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${viewMode === "grid" ? "bg-white/10 text-white" : "text-slate-500 dark:text-zinc-400 hover:text-zinc-200"}`}
-                            title={t("reels.gridView", "Grid view")}
-                        >
-                            <LayoutGrid size={14} /> {t("reels.gridLabel", "Grid")}
-                        </button>
-                    </div>
                 </div>
 
-                {viewMode === "table" ? (
-                    <div className="overflow-x-auto">
+                <div className="overflow-x-auto">
                         <table className="min-w-full text-sm">
                             <thead>
                                 <tr className="border-b border-slate-300 dark:border-white/10 text-left text-slate-500 dark:text-zinc-400">
@@ -476,15 +452,17 @@ export default function ReelsPage() {
                                                         <Download size={14} />
                                                     </button>
 
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleShare(item)}
-                                                        disabled={sharingId === item.id || !canShareReel}
-                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50"
-                                                        title={t('reels.share', 'Share')}
-                                                    >
-                                                        {sharingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
-                                                    </button>
+                                                    {!hideSocialPlatforms ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleShare(item)}
+                                                            disabled={sharingId === item.id || !canShareReel}
+                                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50"
+                                                            title={t('reels.share', 'Share')}
+                                                        >
+                                                            {sharingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
+                                                        </button>
+                                                    ) : null}
 
                                                     <button
                                                         type="button"
@@ -501,94 +479,7 @@ export default function ReelsPage() {
                                     ))}
                             </tbody>
                         </table>
-                    </div>
-                ) : (
-                    <div>
-                        {loading ? (
-                            <div className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">
-                                <span className="inline-flex items-center gap-2">
-                                    <Loader2 size={14} className="animate-spin" /> {t('reels.loading', 'Loading...')}
-                                </span>
-                            </div>
-                        ) : null}
-
-                        {!loading && error ? <div className="px-3 py-10 text-center text-red-300">{error}</div> : null}
-
-                        {!loading && !error && items.length === 0 ? (
-                            <div className="px-3 py-10 text-center text-slate-500 dark:text-zinc-400">{t('reels.noneFound', 'No reels found.')}</div>
-                        ) : null}
-
-                        {!loading && !error && items.length > 0 ? (
-                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                                {items.map((item) => (
-                                    <article key={item.id} className="group overflow-hidden rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5">
-                                        <div className="relative aspect-video bg-black/40">
-                                            {resolveReelPreview(item) && !failedGridPreviewKeys.has(getGridPreviewKey(item)) ? (
-                                                <img
-                                                    src={resolveReelPreview(item)}
-                                                    alt={item.reel_title || "thumbnail"}
-                                                    className="h-full w-full object-cover"
-                                                    onError={() => handleGridPreviewError(item)}
-                                                />
-                                            ) : (
-                                                <div className="flex h-full w-full items-center justify-center text-slate-400 dark:text-zinc-500">{t("reels.previewUnavailable", "Preview unavailable")}</div>
-                                            )}
-
-                                            <span className={`absolute right-2 top-2 inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.reel_status)}`}>
-                                                {statusLabel(item.reel_status)}
-                                            </span>
-
-                                            <div className="absolute inset-x-2 bottom-2 flex translate-y-2 items-center justify-center gap-2 opacity-0 transition group-hover:translate-y-0 group-hover:opacity-100">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handlePreview(item)}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
-                                                    title={t('reels.preview', 'Preview')}
-                                                >
-                                                    <Play size={14} />
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleDownload(item.id)}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-black/65 text-zinc-100 hover:bg-black/80"
-                                                    title={t('reels.download', 'Download')}
-                                                >
-                                                    <Download size={14} />
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleShare(item)}
-                                                    disabled={sharingId === item.id || !canShareReel}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-primary/40 bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50"
-                                                    title={t('reels.share', 'Share')}
-                                                >
-                                                    {sharingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleDelete(item.id)}
-                                                    disabled={deletingId === item.id}
-                                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/40 bg-red-500/20 text-red-300 hover:bg-red-500/30 disabled:opacity-50"
-                                                    title={t('reels.delete', 'Delete')}
-                                                >
-                                                    {deletingId === item.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        <div className="space-y-2 p-3">
-                                            <p className="line-clamp-2 text-sm font-semibold text-white">{item.reel_title || t("generatedMedia.untitled", "Untitled")}</p>
-                                            <p className="line-clamp-2 text-xs text-slate-500 dark:text-zinc-400">{item.reel_description || "-"}</p>
-                                            <p className="text-xs text-slate-400 dark:text-zinc-500">
-                                                {item.reel_duration ? `${item.reel_duration}s` : "-"} • {item.reel_created_at ? new Date(item.reel_created_at).toLocaleString() : "-"}
-                                            </p>
-                                        </div>
-                                    </article>
-                                ))}
-                            </div>
-                        ) : null}
-                    </div>
-                )}
+                </div>
 
                 <div className="flex items-center justify-between border-t border-slate-300 dark:border-white/10 pt-4 text-sm">
                     <p className="text-slate-500 dark:text-zinc-400">{total} {t("reels.reelCount", "reel(s)")}</p>
@@ -616,24 +507,26 @@ export default function ReelsPage() {
                 </div>
             </section>
 
-            <SharePostModal
-                isOpen={Boolean(shareModalItem)}
-                onClose={() => setShareModalItem(null)}
-                title={shareTitle}
-                onTitleChange={setShareTitle}
-                description={shareDescription}
-                onDescriptionChange={setShareDescription}
-                isScheduling={shareScheduling}
-                onSchedulingChange={setShareScheduling}
-                scheduleDate={shareScheduleDate}
-                onScheduleDateChange={setShareScheduleDate}
-                platforms={sharePlatforms}
-                onPlatformChange={(platform, checked) => setSharePlatforms((prev) => ({ ...prev, [platform]: checked }))}
-                connectedPlatforms={connectedPlatforms}
-                isSubmitting={Boolean(shareModalItem && sharingId === shareModalItem.id)}
-                result={shareResult}
-                onSubmit={submitShare}
-            />
+            {!hideSocialPlatforms ? (
+                <SharePostModal
+                    isOpen={Boolean(shareModalItem)}
+                    onClose={() => setShareModalItem(null)}
+                    title={shareTitle}
+                    onTitleChange={setShareTitle}
+                    description={shareDescription}
+                    onDescriptionChange={setShareDescription}
+                    isScheduling={shareScheduling}
+                    onSchedulingChange={setShareScheduling}
+                    scheduleDate={shareScheduleDate}
+                    onScheduleDateChange={setShareScheduleDate}
+                    platforms={sharePlatforms}
+                    onPlatformChange={(platform, checked) => setSharePlatforms((prev) => ({ ...prev, [platform]: checked }))}
+                    connectedPlatforms={connectedPlatforms}
+                    isSubmitting={Boolean(shareModalItem && sharingId === shareModalItem.id)}
+                    result={shareResult}
+                    onSubmit={submitShare}
+                />
+            ) : null}
 
             {previewItem && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">

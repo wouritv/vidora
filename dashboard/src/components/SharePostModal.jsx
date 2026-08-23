@@ -1,6 +1,7 @@
 import React from 'react';
 import { X, Loader2, Share2, Calendar, Clock, Instagram, Youtube, Video, Facebook, Linkedin, CheckCircle, AlertCircle } from 'lucide-react';
 import { SUPPORTED_SOCIAL_PLATFORMS, PLATFORM_LABELS } from '../lib/platforms';
+import { useTranslation } from "../state/LanguageContext";
 
 export default function SharePostModal({
     isOpen,
@@ -20,6 +21,9 @@ export default function SharePostModal({
     result,
     onSubmit,
 }) {
+
+    const { t } = useTranslation();
+
     if (!isOpen) return null;
 
     return (
@@ -32,36 +36,36 @@ export default function SharePostModal({
                     <X size={20} />
                 </button>
 
-                <h3 className="title-contrast text-lg font-bold mb-4">Post / Schedule</h3>
+                <h3 className="title-contrast text-lg font-bold mb-4">{t("social.title", "Post / Schedule")}</h3>
 
 
                 <div className="space-y-4 mb-6">
                     <div>
-                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-1">Video Title</label>
+                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-1">{t("social.videoTile", "Video Title")}</label>
                         <input
                             type="text"
                             value={title}
                             onChange={(e) => onTitleChange(e.target.value)}
                             className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
-                            placeholder="Enter a catchy title..."
+                            placeholder={t("social.videoTile", "Enter a catchy title...")}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-1">Caption / Description</label>
+                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-1">{t("social.postResume", "Caption / Description")}</label>
                         <textarea
                             value={description}
                             onChange={(e) => onDescriptionChange(e.target.value)}
                             rows={4}
                             className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
-                            placeholder="Write a caption for your post..."
+                            placeholder={t("social.postResumePlaceholder", "Write a caption for your post...")}
                         />
                     </div>
 
                     <div className="p-3 bg-white/5 rounded-lg border border-slate-200 dark:border-white/5">
                         <div className="flex items-center justify-between mb-2">
                             <div className="flex items-center gap-2 text-sm text-white font-medium">
-                                <Calendar size={16} className="text-purple-400" /> Schedule Post
+                                <Calendar size={16} className="text-purple-400" /> {t("social.postSchedule", "Schedule Post")}
                             </div>
                             <label className="relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" checked={isScheduling} onChange={(e) => onSchedulingChange(e.target.checked)} className="sr-only peer" />
@@ -71,7 +75,7 @@ export default function SharePostModal({
 
                         {isScheduling ? (
                             <div className="mt-3 animate-[fadeIn_0.2s_ease-out]">
-                                <label className="block text-xs text-slate-500 dark:text-zinc-400 mb-1">Select Date & Time</label>
+                                <label className="block text-xs text-slate-500 dark:text-zinc-400 mb-1">{t("social.postSchedulePlaceholder", "Select Date & Time")}</label>
                                 <div className="relative">
                                     <input
                                         type="datetime-local"
@@ -86,7 +90,7 @@ export default function SharePostModal({
                     </div>
 
                     <div>
-                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-2">Select Platforms</label>
+                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-2">{t("social.postSelectPlatform", "Select Platforms")}</label>
                         <div className="grid grid-cols-1 gap-2">
                             {SUPPORTED_SOCIAL_PLATFORMS
                                 .filter((platform) => connectedPlatforms.length === 0 || connectedPlatforms.includes(platform))
@@ -105,14 +109,14 @@ export default function SharePostModal({
                                                 className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
                                             />
                                             <div className="flex items-center gap-2 text-sm text-white">
-                                                <Icon size={16} className="text-slate-700 dark:text-zinc-300" /> {PLATFORM_LABELS[platform]}
+                                                <Icon size={16} className="text-slate-700 dark:text-zinc-300" /> {t(`social.${platform}`, PLATFORM_LABELS[platform])}
                                             </div>
                                         </label>
                                     );
                                 })}
                         </div>
                         {connectedPlatforms.length === 0 ? (
-                            <p className="mt-2 text-xs text-slate-400 dark:text-zinc-500">No platform is marked as connected in Settings, so defaults are shown.</p>
+                            <p className="mt-2 text-xs text-slate-400 dark:text-zinc-500">{t("social.noPlatformConnected", "No platform is marked as connected in Settings, so defaults are shown.")}</p>
                         ) : null}
                     </div>
                 </div>
@@ -132,12 +136,12 @@ export default function SharePostModal({
                     {isSubmitting ? (
                         <>
                             <Loader2 size={16} className="animate-spin" />
-                            {isScheduling ? 'Scheduling...' : 'Publishing...'}
+                            {isScheduling ? t("social.postScheduling", "Scheduling...") : t("social.postPublishing", "Publishing...")}
                         </>
                     ) : (
                         <>
                             <Share2 size={16} />
-                            {isScheduling ? 'Schedule Post' : 'Publish Now'}
+                            {isScheduling ? t("social.postScheduleButton", "Schedule Post") : t("social.postPublishButton", "Publish Now")}
                         </>
                     )}
                 </button>

@@ -1,5 +1,7 @@
+import { useEffect, useMemo, useState } from "react";
 import {CreditCard, LogOut } from "lucide-react";
 import {NavLink, Outlet, useNavigate} from "react-router-dom";
+import { fetchAppConfig, getDefaultHideSocialPlatforms } from "../config";
 import { DASHBOARD_SIDEBAR_ITEMS } from "../lib/dashboard-nav";
 import { useAuth } from "../state/AuthContext";
 import { useTranslation } from "../state/LanguageContext";
@@ -7,6 +9,7 @@ import { useTranslation } from "../state/LanguageContext";
 export default function DashboardLayout() {
     const { user, logout } = useAuth();
     const { t } = useTranslation();
+    const [hideSocialPlatforms, setHideSocialPlatforms] = useState(getDefaultHideSocialPlatforms());
 
     const navigate = useNavigate();
     const displayName =
@@ -14,6 +17,24 @@ export default function DashboardLayout() {
         user?.user_metadata?.name ||
         user?.email?.split("@")[0] ||
         t("settings.user", "Utilisateur");
+
+    useEffect(() => {
+        let active = true;
+        fetchAppConfig()
+            .then((cfg) => {
+                if (!active || !cfg || typeof cfg.hideSocialPlatforms !== "boolean") return;
+                setHideSocialPlatforms(cfg.hideSocialPlatforms);
+            })
+            .catch(() => {});
+        return () => {
+            active = false;
+        };
+    }, []);
+
+    const sidebarItems = useMemo(
+        () => DASHBOARD_SIDEBAR_ITEMS.filter((item) => !(hideSocialPlatforms && item.key === "social-publications")),
+        [hideSocialPlatforms]
+    );
 
     return (
         <div className="min-h-screen bg-background text-white selection:bg-primary/30">
@@ -33,7 +54,7 @@ export default function DashboardLayout() {
                     </div>
 
                     <nav className="flex-1 px-4 py-4 space-y-2 overflow-y-auto custom-scrollbar">
-                        {DASHBOARD_SIDEBAR_ITEMS.map((item) => {
+                        {sidebarItems.map((item) => {
                             const ItemIcon = item.icon;
                             return (
                                 <NavLink

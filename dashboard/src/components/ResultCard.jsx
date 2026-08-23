@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Wand2, Type, MessageSquareText } from 'lucide-react';
-import { getApiUrl } from '../config';
-import SubtitleModal from './SubtitleModal';
+import { Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Wand2, Type, SlidersHorizontal, X } from 'lucide-react';
+import { fetchAppConfig, getApiUrl, getDefaultHideSocialPlatforms } from '../config';
 import CaptionsModal from './CaptionsModal';
 import HookModal from './HookModal';
 import SharePostModal from './SharePostModal';
@@ -35,7 +34,6 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     const canShare = credits >= publicationCostEstimate;
 
     const [showModal, setShowModal] = useState(false);
-    const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const [showCaptionsModal, setShowCaptionsModal] = useState(false);
     const videoRef = React.useRef(null);
     const originalVideoUrl = rawVideoUrl ? getApiUrl(rawVideoUrl) : '';
@@ -57,13 +55,24 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     const [postResult, setPostResult] = useState(null);
 
     const [isEditing, setIsEditing] = useState(false);
-    const [isSubtitling, setIsSubtitling] = useState(false);
+    const [showAutoEditModal, setShowAutoEditModal] = useState(false);
+    const [autoEditOptions, setAutoEditOptions] = useState({
+        zoom: false,
+        brightness: false,
+        saturation: false,
+        contrast: false,
+        speed: false,
+        removeSilence: false,
+        cleanAudio: false,
+        removeBadTakes: false,
+    });
     const [isCaptioning, setIsCaptioning] = useState(false);
     const [captionsCreditBlocked, setCaptionsCreditBlocked] = useState(false);
     const [captionsCreditError, setCaptionsCreditError] = useState('');
     const [isHooking, setIsHooking] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [editError, setEditError] = useState(null);
+    const [hideSocialPlatforms, setHideSocialPlatforms] = useState(getDefaultHideSocialPlatforms());
 
     const [clipDuration, setClipDuration] = useState(Math.max(1, clipEnd - clipStart));
     const insufficientCreditsMessage = (required) => (
@@ -97,6 +106,19 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         videoRef.current.pause();
         videoRef.current.load();
     }, [currentVideoUrl]);
+
+    useEffect(() => {
+        let active = true;
+        fetchAppConfig()
+            .then((cfg) => {
+                if (!active || !cfg || typeof cfg.hideSocialPlatforms !== 'boolean') return;
+                setHideSocialPlatforms(cfg.hideSocialPlatforms);
+            })
+            .catch(() => {});
+        return () => {
+            active = false;
+        };
+    }, []);
 
     useEffect(() => {
         if (showCaptionsModal) {
@@ -137,7 +159,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         }
     }, [showModal, clip]);
 
-    const handleAutoEdit = async () => {
+    const handleAutoEdit = async (selectedOptions = autoEditOptions) => {
         if (!canCustomize) {
             setEditError(insufficientCreditsMessage(reelCostEstimate));
             setTimeout(() => setEditError(null), 5000);
@@ -152,39 +174,48 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         setEditError(null);
         try {
             const effectiveInputUrl = currentVideoUrl?.startsWith('blob:') ? originalVideoUrl : currentVideoUrl;
+            const requiresBackendMediaPipeline = Boolean(
+                selectedOptions?.removeSilence
+                || selectedOptions?.cleanAudio
+                || selectedOptions?.removeBadTakes
+                || selectedOptions?.speed
+            );
             // Gemini API Key is now configured server-side via .env
             // No need to send header from frontend
 
             // Try Remotion effects endpoint first
-            const effectsRes = await fetch(getApiUrl('/api/effects/generate'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
-                },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: clipIndexForApi,
-                    input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
-                    input_url: effectiveInputUrl,
-                })
-            });
+            if (!requiresBackendMediaPipeline) {
+                const effectsRes = await fetch(getApiUrl('/api/effects/generate'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                    },
+                    body: JSON.stringify({
+                        job_id: jobId,
+                        clip_index: clipIndexForApi,
+                        input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
+                        input_url: effectiveInputUrl,
+                        auto_edit_options: selectedOptions,
+                    })
+                });
 
-            if (effectsRes.ok) {
-                const data = await effectsRes.json();
-                if (data.effects && data.effects.segments) {
-                    const newLayers = { ...activeLayers, effects: data.effects };
-                    setActiveLayers(newLayers);
-                    const blobUrl = await renderInBrowser({
-                        videoUrl: originalVideoUrl,
-                        durationInSeconds: clipDuration,
-                        subtitles: resolveTextLayer(newLayers),
-                        hook: newLayers.hook,
-                        effects: newLayers.effects,
-                    });
-                    setCurrentVideoUrl(blobUrl);
-                    if (videoRef.current) videoRef.current.load();
-                    return;
+                if (effectsRes.ok) {
+                    const data = await effectsRes.json();
+                    if (data.effects && data.effects.segments) {
+                        const newLayers = { ...activeLayers, effects: data.effects };
+                        setActiveLayers(newLayers);
+                        const blobUrl = await renderInBrowser({
+                            videoUrl: originalVideoUrl,
+                            durationInSeconds: clipDuration,
+                            subtitles: resolveTextLayer(newLayers),
+                            hook: newLayers.hook,
+                            effects: newLayers.effects,
+                        });
+                        setCurrentVideoUrl(blobUrl);
+                        if (videoRef.current) videoRef.current.load();
+                        return;
+                    }
                 }
             }
 
@@ -200,6 +231,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     clip_index: clipIndexForApi,
                     input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
                     input_url: effectiveInputUrl,
+                    auto_edit_options: selectedOptions,
                 })
             });
 
@@ -229,127 +261,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         }
     };
 
-    const handleSubtitle = async (options) => {
-        if (!canCustomize) {
-            setEditError(insufficientCreditsMessage(reelCostEstimate));
-            setTimeout(() => setEditError(null), 5000);
-            return;
-        }
-        if (!hasClipContext) {
-            setEditError(t("reels.noActionAvailable", "Actions indisponibles: ce reel est detache de son job original."));
-            setTimeout(() => setEditError(null), 5000);
-            return;
-        }
-        setIsSubtitling(true);
-        setEditError(null);
-        try {
-            const effectiveInputUrl = currentVideoUrl?.startsWith('blob:') ? originalVideoUrl : currentVideoUrl;
-            if (options.remotion) {
-                let nextCaptions = Array.isArray(options.translatedCaptions) && options.translatedCaptions.length > 0
-                    ? options.translatedCaptions
-                    : (Array.isArray(options.remotion.captions) ? options.remotion.captions : []);
-                let nextDurationSec = Number.isFinite(Number(options.previewDurationSec)) && Number(options.previewDurationSec) > 0
-                    ? Number(options.previewDurationSec)
-                    : clipDuration;
-
-                if (options.targetLanguage && nextCaptions.length === 0) {
-                    const captionsRes = await fetch(getApiUrl('/api/translate/captions'), {
-                        method: 'POST',
-                                        headers: {
-                                            'Content-Type': 'application/json',
-                                            ...(user?.id ? { 'X-User-Id': user.id } : {}),
-                                        },
-                        body: JSON.stringify({
-                            job_id: jobId,
-                                clip_index: clipIndexForApi,
-                            target_language: options.targetLanguage,
-                            input_url: effectiveInputUrl,
-                        }),
-                    });
-
-                    if (!captionsRes.ok) {
-                        const errText = await captionsRes.text();
-                        throw new Error(errText || 'Subtitle translation failed');
-                    }
-
-                    const translatedData = await captionsRes.json();
-                    nextCaptions = Array.isArray(translatedData.captions) ? translatedData.captions : [];
-                    if (translatedData.durationSec) {
-                        nextDurationSec = translatedData.durationSec;
-                    }
-                }
-
-                // Accumulate layer and render all layers together
-                const subtitleLayer = {
-                    ...options.remotion,
-                    captions: nextCaptions,
-                };
-                const newLayers = { ...activeLayers, subtitles: subtitleLayer, captions: null };
-                setActiveLayers(newLayers);
-                setClipDuration(nextDurationSec);
-                const blobUrl = await renderInBrowser({
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: nextDurationSec,
-                    subtitles: resolveTextLayer(newLayers),
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
-            const fallbackPosition = options.positionY <= 33 ? 'top' : options.positionY >= 66 ? 'bottom' : 'middle';
-            const res = await fetch(getApiUrl('/api/subtitle'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
-                },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: clipIndexForApi,
-                    position: fallbackPosition,
-                    position_x: options.positionX,
-                    position_y: options.positionY,
-                    font_size: options.fontSize,
-                    font_name: options.fontName,
-                    font_color: options.fontColor,
-                    highlight_color: options.highlightColor,
-                    border_color: options.borderColor,
-                    border_width: options.borderWidth,
-                    text_shadow_color: options.textShadowColor,
-                    shadow_blur: options.shadowBlur,
-                    shadow_offset_x: options.shadowOffsetX,
-                    shadow_offset_y: options.shadowOffsetY,
-                    bg_color: options.bgColor,
-                    bg_opacity: options.bgOpacity,
-                    text_case: options.textCase,
-                    bold: options.bold,
-                    italic: options.italic,
-                    words_per_line: options.wordsPerLine,
-                    animation: options.animation,
-                    input_filename: inputFilenameFromVideoUrl(currentVideoUrl),
-                    input_url: effectiveInputUrl
-                })
-            });
-
-            if (!res.ok) throw new Error(await res.text());
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
-            }
-        } catch (e) {
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsSubtitling(false);
-        }
+    const handleApplyAutoEdit = async () => {
+        setShowAutoEditModal(false);
+        await handleAutoEdit(autoEditOptions);
     };
+
 
     const handleCaptions = async (options) => {
         if (!canCustomize) {
@@ -673,25 +589,15 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 )}
 
                 {/* Actions Footer */}
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-auto pt-4 border-t border-slate-200 dark:border-white/5">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-auto pt-4 border-t border-slate-200 dark:border-white/5">
                     <button
-                        onClick={handleAutoEdit}
+                        onClick={() => setShowAutoEditModal(true)}
                         disabled={isEditing || !hasClipContext || !canCustomize}
                         title="Auto Edit"
                         className={`col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
                         {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
                         {!compactActions ? (isEditing ? t("common.editing", "Editing...") : t("common.autoEdit", "Auto Edit")) : null}
-                    </button>
-
-                    <button
-                        onClick={() => setShowSubtitleModal(true)}
-                        disabled={isSubtitling || !hasClipContext || !canCustomize}
-                        title="Subtitles"
-                        className={`col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
-                    >
-                        {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
-                        {!compactActions ? (isSubtitling ? t("common.adding", "Adding...") : t("common.subtitles", "Subtitles")) : null}
                     </button>
 
                     <button
@@ -707,55 +613,101 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     <button
                         onClick={() => setShowCaptionsModal(true)}
                         disabled={isCaptioning || !hasClipContext || !canCustomize}
-                        title={t('common.captions', 'Captions')}
+                        title={t('common.subtitles', 'Subtitles')}
                         className={`col-span-1 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
-                        {isCaptioning ? <Loader2 size={14} className="animate-spin" /> : <MessageSquareText size={14} />}
-                        {!compactActions ? (isCaptioning ? t("common.adding", "Adding...") : t('common.captions', 'Captions')) : null}
+                        {isCaptioning ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
+                        {!compactActions ? (isCaptioning ? t("common.adding", "Adding...") : t('common.subtitles', 'Subtitles')) : null}
                     </button>
 
-                    <button
-                        onClick={() => setShowModal(true)}
-                        disabled={!hasClipContext || !canShare}
-                        title={t("common.post", "Post")}
-                        className={`col-span-1 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2 ${compactActions ? 'min-h-[40px]' : ''}`}
-                    >
-                        <Share2 size={14} className="shrink-0" />
-                        {!compactActions ? t("common.post", "Post") : null}
-                    </button>
+                    {!hideSocialPlatforms ? (
+                        <button
+                            onClick={() => setShowModal(true)}
+                            disabled={!hasClipContext || !canShare}
+                            title={t("common.post", "Post")}
+                            className={`col-span-1 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2 ${compactActions ? 'min-h-[40px]' : ''}`}
+                        >
+                            <Share2 size={14} className="shrink-0" />
+                            {!compactActions ? t("common.post", "Post") : null}
+                        </button>
+                    ) : null}
                 </div>
             </div>
 
-            <SharePostModal
-                isOpen={showModal}
-                onClose={() => setShowModal(false)}
-                title={postTitle}
-                onTitleChange={setPostTitle}
-                description={postDescription}
-                onDescriptionChange={setPostDescription}
-                isScheduling={isScheduling}
-                onSchedulingChange={setIsScheduling}
-                scheduleDate={scheduleDate}
-                onScheduleDateChange={setScheduleDate}
-                platforms={platforms}
-                onPlatformChange={(platform, checked) => setPlatforms((prev) => ({ ...prev, [platform]: checked }))}
-                connectedPlatforms={connectedPlatforms}
-                isSubmitting={posting}
-                result={postResult}
-                onSubmit={handlePost}
-            />
+            {!hideSocialPlatforms ? (
+                <SharePostModal
+                    isOpen={showModal}
+                    onClose={() => setShowModal(false)}
+                    title={postTitle}
+                    onTitleChange={setPostTitle}
+                    description={postDescription}
+                    onDescriptionChange={setPostDescription}
+                    isScheduling={isScheduling}
+                    onSchedulingChange={setIsScheduling}
+                    scheduleDate={scheduleDate}
+                    onScheduleDateChange={setScheduleDate}
+                    platforms={platforms}
+                    onPlatformChange={(platform, checked) => setPlatforms((prev) => ({ ...prev, [platform]: checked }))}
+                    connectedPlatforms={connectedPlatforms}
+                    isSubmitting={posting}
+                    result={postResult}
+                    onSubmit={handlePost}
+                />
+            ) : null}
 
-            <SubtitleModal
-                isOpen={showSubtitleModal}
-                onClose={() => setShowSubtitleModal(false)}
-                onGenerate={handleSubtitle}
-                isProcessing={isSubtitling}
-                videoUrl={originalVideoUrl}
-                jobId={jobId}
-                clipIndex={clipIndexForApi}
-                existingHook={activeLayers.hook}
-                existingEffects={activeLayers.effects}
-            />
+            {showAutoEditModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-lg rounded-2xl border border-slate-300 dark:border-white/10 bg-zinc-950 p-5">
+                        <div className="mb-4 flex items-center justify-between">
+                            <h3 className="title-contrast text-lg font-bold inline-flex items-center gap-2">
+                                <SlidersHorizontal size={16} className="text-primary" />
+                                {t("common.autoEdit", "Auto Edit")}
+                            </h3>
+                            <button
+                                type="button"
+                                onClick={() => setShowAutoEditModal(false)}
+                                className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10"
+                            >
+                                <X size={14} />
+                            </button>
+                        </div>
+
+                        <div className="space-y-2">
+                            {[
+                                ["zoom", t("zoom","Zoom")],
+                                ["brightness", t("luminosity","Luminosite")],
+                                ["saturation", t("saturation","Saturation")],
+                                ["contrast", t("contrast","Contraste")],
+                                ["speed", t("speed","Vitesse")],
+                                ["removeSilence", t("removeSilence","Retirer les silences")],
+                                ["cleanAudio", t("cleanAudio","Nettoyer l'audio")],
+                                ["removeBadTakes", t("removeBadTakes","Retirer les mauvaises prises")],
+                            ].map(([key, label]) => (
+                                <label key={key} className="flex items-center justify-between rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200">
+                                    <span>{label}</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => setAutoEditOptions((prev) => ({ ...prev, [key]: !prev[key] }))}
+                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${autoEditOptions[key] ? "bg-emerald-500/20 text-emerald-300" : "bg-black/40 text-slate-400"}`}
+                                    >
+                                        {autoEditOptions[key] ? "ON" : "OFF"}
+                                    </button>
+                                </label>
+                            ))}
+                        </div>
+
+                        <button
+                            type="button"
+                            onClick={handleApplyAutoEdit}
+                            disabled={isEditing}
+                            className="mt-4 w-full rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                        >
+                            {isEditing ? t("common.editing", "Editing...") : t("captionsModal.apply", "Appliquer")}
+                        </button>
+                    </div>
+                </div>
+            )}
+
 
             <CaptionsModal
                 isOpen={showCaptionsModal}
