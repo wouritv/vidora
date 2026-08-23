@@ -534,7 +534,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             </div>
 
             {/* Right: Content & Details */}
-            <div className="flex-1 p-4 md:p-5 flex flex-col bg-[#121214] overflow-hidden min-w-0">
+            <div className="flex-1 p-4 md:p-5 flex flex-col bg-white dark:bg-[#121214] overflow-hidden min-w-0">
                 <div className="mb-4">
                     <h3 className="title-contrast text-base font-bold leading-tight line-clamp-2 mb-2 break-words" title={safeClip.video_title_for_youtube_short}>
                         {safeClip.video_title_for_youtube_short || "Viral Clip Generated"}
@@ -549,7 +549,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 {/* Scrollable Descriptions Area */}
                 <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-2 mb-4">
                     {/* YouTube */}
-                    <div className="bg-black/20 rounded-lg p-3 border border-slate-200 dark:border-white/5">
+                    <div className="bg-slate-100 dark:bg-black/20 rounded-lg p-3 border border-slate-200 dark:border-white/5">
                         <div className="flex items-center gap-2 text-[10px] font-bold text-red-400 mb-1.5 uppercase tracking-wider">
                             <Youtube size={12} className="shrink-0" /> <span className="truncate">{t("common.titleYoutube", "YouTube Title")}</span>
                         </div>
@@ -559,7 +559,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     </div>
 
                     {/* TikTok / IG */}
-                    <div className="bg-black/20 rounded-lg p-3 border border-slate-200 dark:border-white/5">
+                    <div className="bg-slate-100 dark:bg-black/20 rounded-lg p-3 border border-slate-200 dark:border-white/5">
                         <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 dark:text-zinc-400 mb-1.5 uppercase tracking-wider">
                             <Video size={12} className="text-cyan-400 shrink-0" />
                             <span className="text-slate-400 dark:text-zinc-500">/</span>
@@ -656,7 +656,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
             {showAutoEditModal && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-                    <div className="w-full max-w-lg rounded-2xl border border-slate-300 dark:border-white/10 bg-zinc-950 p-5">
+                    <div className="w-full max-w-lg rounded-2xl border border-slate-300 dark:border-white/10 bg-white dark:bg-zinc-950 p-5">
                         <div className="mb-4 flex items-center justify-between">
                             <h3 className="title-contrast text-lg font-bold inline-flex items-center gap-2">
                                 <SlidersHorizontal size={16} className="text-primary" />
@@ -665,7 +665,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                             <button
                                 type="button"
                                 onClick={() => setShowAutoEditModal(false)}
-                                className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10"
+                                className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-slate-200 dark:hover:bg-white/10"
                             >
                                 <X size={14} />
                             </button>
@@ -682,12 +682,12 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                                 ["cleanAudio", t("cleanAudio","Nettoyer l'audio")],
                                 ["removeBadTakes", t("removeBadTakes","Retirer les mauvaises prises")],
                             ].map(([key, label]) => (
-                                <label key={key} className="flex items-center justify-between rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200">
+                                <label key={key} className="flex items-center justify-between rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-3 py-2 text-sm text-slate-800 dark:text-zinc-200">
                                     <span>{label}</span>
                                     <button
                                         type="button"
                                         onClick={() => setAutoEditOptions((prev) => ({ ...prev, [key]: !prev[key] }))}
-                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${autoEditOptions[key] ? "bg-emerald-500/20 text-emerald-300" : "bg-black/40 text-slate-400"}`}
+                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${autoEditOptions[key] ? "bg-emerald-500/20 text-emerald-300" : "bg-slate-200 dark:bg-black/40 text-slate-600 dark:text-slate-400"}`}
                                     >
                                         {autoEditOptions[key] ? "ON" : "OFF"}
                                     </button>

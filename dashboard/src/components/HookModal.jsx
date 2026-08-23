@@ -50,10 +50,10 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-slate-300 dark:border-white/10 p-6 rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
+            <div className="bg-white dark:bg-[#121214] border border-slate-300 dark:border-white/10 p-6 rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
                 <button
                     onClick={onClose}
-                    className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-white z-10"
+                    className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-slate-700 dark:hover:text-white z-10"
                 >
                     <X size={20} />
                 </button>
@@ -105,7 +105,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                 value={text}
                                 onChange={(e) => setText(e.target.value)}
                                 rows={4}
-                                className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-xl p-3 text-white placeholder-zinc-600 focus:outline-none focus:border-yellow-500/50 resize-none font-serif"
+                                className="w-full bg-slate-50 dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-xl p-3 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-zinc-600 focus:outline-none focus:border-yellow-500/50 resize-none font-serif"
                                 placeholder={t('hookModal.textPlaceholder', 'Enter text that will stop the scroll...')}
                             />
                         </div>

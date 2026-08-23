@@ -37,7 +37,7 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         title: "Sous titres",
         sidebarLabel: "Sous titres",
         icon: MessageSquareText,
-        activeClassName: "bg-emerald-500/10 text-emerald-400",
+        activeClassName: "bg-yellow-500/10 text-yellow-400",
         inactiveClassName: "text-slate-500 dark:text-zinc-400 hover:text-white hover:bg-white/5",
         description: "Genere et gere des sous-titres de maniere autonome pour tes videos locales.",
         badge: "Caption",

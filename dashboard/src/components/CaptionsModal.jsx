@@ -360,29 +360,29 @@ export default function CaptionsModal({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-      <div className="bg-[#121214] border border-slate-300 dark:border-white/10 p-5 md:p-6 rounded-2xl w-full max-w-7xl shadow-2xl relative flex flex-col md:flex-row gap-5 md:gap-6 max-h-[92vh]">
-        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-white z-10">
+      <div className="bg-white dark:bg-[#121214] border border-slate-300 dark:border-white/10 p-5 md:p-6 rounded-2xl w-full max-w-7xl shadow-2xl relative flex flex-col md:flex-row gap-5 md:gap-6 max-h-[92vh]">
+        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-slate-700 dark:hover:text-white z-10">
           <X size={20} />
         </button>
 
-        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 md:p-5 overflow-y-auto custom-scrollbar">
           {showStyleEditor && selectedLine ? (
             <>
               <div className="mb-4 flex items-center justify-between gap-2">
-                <button onClick={() => setShowStyleEditor(false)} className="inline-flex items-center gap-2 text-xs text-slate-300">
+                <button onClick={() => setShowStyleEditor(false)} className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
                   <ArrowLeft size={14} /> {t('captionsModal.back', 'Retour')}
                 </button>
-                <h4 className="text-sm font-bold text-white">{t('captionsModal.styleEditor', 'Edition de style')}</h4>
+                <h4 className="text-sm font-bold text-slate-900 dark:text-white">{t('captionsModal.styleEditor', 'Edition de style')}</h4>
               </div>
 
               <div className="space-y-4">
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.freePosition', 'Free position (X/Y)')}</label>
                   <div className="mt-2 space-y-2">
-                    <label className="block text-[11px] text-slate-300">X ({selectedLineStyle.positionX}%)
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-300">X ({selectedLineStyle.positionX}%)
                       <input type="range" min="5" max="95" value={selectedLineStyle.positionX} onChange={(e) => { updateLineStyle(selectedLine.id, { positionX: Number(e.target.value) || 50 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
                     </label>
-                    <label className="block text-[11px] text-slate-300">Y ({selectedLineStyle.positionY}%)
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-300">Y ({selectedLineStyle.positionY}%)
                       <input type="range" min="5" max="95" value={selectedLineStyle.positionY} onChange={(e) => { updateLineStyle(selectedLine.id, { positionY: Number(e.target.value) || 82 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
                     </label>
                   </div>
@@ -404,7 +404,7 @@ export default function CaptionsModal({
                           key={`${selectedLine.id}-emph-${opt.key}`}
                           type="button"
                           onClick={() => { updateLineStyle(selectedLine.id, opt.patch); focusPreviewLine(selectedLine.id); }}
-                          className={`rounded-md border px-2 py-1.5 text-xs ${isActive ? 'border-emerald-400 bg-emerald-500/15 text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-black/30 text-slate-300'}`}
+                          className={`rounded-md border px-2 py-1.5 text-xs ${isActive ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}
                         >
                           {opt.label}
                         </button>
@@ -421,7 +421,7 @@ export default function CaptionsModal({
                         key={`${selectedLine.id}-case-${opt.value}`}
                         type="button"
                         onClick={() => { updateLineStyle(selectedLine.id, { textCase: opt.value }); focusPreviewLine(selectedLine.id); }}
-                        className={`rounded-md border px-2 py-1.5 text-xs ${selectedLineStyle.textCase === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-black/30 text-slate-300'}`}
+                        className={`rounded-md border px-2 py-1.5 text-xs ${selectedLineStyle.textCase === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}
                       >
                         {opt.label}
                       </button>
@@ -433,7 +433,7 @@ export default function CaptionsModal({
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.animation', 'Animation')}</label>
                   <div className="mt-2 grid grid-cols-2 gap-2">
                     {ANIMATION_OPTIONS.map((opt) => (
-                      <button key={`${selectedLine.id}-anim-${opt.value}`} type="button" onClick={() => { updateLineStyle(selectedLine.id, { animation: opt.value }); focusPreviewLine(selectedLine.id); }} className={`rounded-md border px-2 py-1.5 text-left ${selectedLineStyle.animation === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-black/30 text-slate-300'}`}>
+                      <button key={`${selectedLine.id}-anim-${opt.value}`} type="button" onClick={() => { updateLineStyle(selectedLine.id, { animation: opt.value }); focusPreviewLine(selectedLine.id); }} className={`rounded-md border px-2 py-1.5 text-left ${selectedLineStyle.animation === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}>
                         <div className="text-xs font-medium">{opt.label}</div>
                         <div className="mt-0.5 text-[10px] leading-tight opacity-80">{opt.desc}</div>
                       </button>
@@ -443,7 +443,7 @@ export default function CaptionsModal({
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.fontFamily', 'Font family')}</label>
-                  <select value={selectedLineStyle.fontFamily} onChange={(e) => { updateLineStyle(selectedLine.id, { fontFamily: e.target.value }); focusPreviewLine(selectedLine.id); }} className="mt-2 w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1.5 text-xs text-zinc-100">
+                  <select value={selectedLineStyle.fontFamily} onChange={(e) => { updateLineStyle(selectedLine.id, { fontFamily: e.target.value }); focusPreviewLine(selectedLine.id); }} className="mt-2 w-full bg-white dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1.5 text-xs text-slate-900 dark:text-zinc-100">
                     {[...new Set(FONT_OPTIONS.map((opt) => opt.category))].map((cat) => (
                       <optgroup key={cat} label={cat}>{FONT_OPTIONS.filter((opt) => opt.category === cat).map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}</optgroup>
                     ))}
@@ -483,7 +483,7 @@ export default function CaptionsModal({
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.shadowColor', 'Shadow color')}</label>
-                  <div className="mt-2 flex items-center gap-3 rounded-md border border-slate-300 dark:border-white/10 bg-black/30 p-2">
+                  <div className="mt-2 flex items-center gap-3 rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 p-2">
                     <label className="relative h-7 w-7 rounded border border-slate-300 dark:border-white/10 overflow-hidden" title={t('captionsModal.shadowColor', 'Shadow color')}>
                       <div className="h-full w-full" style={{ backgroundColor: selectedLineStyle.textShadowColor }} />
                       <input type="color" value={selectedLineStyle.textShadowColor} onChange={(e) => { updateLineStyle(selectedLine.id, { textShadowColor: e.target.value }); focusPreviewLine(selectedLine.id); }} className="absolute inset-0 opacity-0 cursor-pointer" />
@@ -504,7 +504,7 @@ export default function CaptionsModal({
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.border', 'Border')}</label>
-                  <div className="mt-2 flex items-center gap-3 rounded-md border border-slate-300 dark:border-white/10 bg-black/30 p-2">
+                  <div className="mt-2 flex items-center gap-3 rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 p-2">
                     <label className="relative h-7 w-7 rounded border border-slate-300 dark:border-white/10 overflow-hidden" title={t('captionsModal.borderColor', 'Border color')}>
                       <div className="h-full w-full" style={{ backgroundColor: selectedLineStyle.borderColor }} />
                       <input type="color" value={selectedLineStyle.borderColor} onChange={(e) => { updateLineStyle(selectedLine.id, { borderColor: e.target.value }); focusPreviewLine(selectedLine.id); }} className="absolute inset-0 opacity-0 cursor-pointer" />
@@ -533,7 +533,7 @@ export default function CaptionsModal({
                 </div>
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
-                  <div className="flex items-center justify-between text-xs text-slate-300">
+                  <div className="flex items-center justify-between text-xs text-slate-700 dark:text-slate-300">
                     <span>{t('captionsModal.backgroundBox', 'Background box')}</span>
                     <input
                       type="checkbox"
@@ -558,7 +558,7 @@ export default function CaptionsModal({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <button type="button" onClick={resetSelectedLineStyle} className="rounded-md border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-1.5 text-xs text-slate-300">
+                  <button type="button" onClick={resetSelectedLineStyle} className="rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300">
                     {t('captionsModal.resetStyles', 'Reset styles')}
                   </button>
                   <button type="button" onClick={applySelectedStyleToAll} className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200">
@@ -577,11 +577,11 @@ export default function CaptionsModal({
                   <MessageSquareText className="text-emerald-400" size={18} />
                   {t('captionsModal.subtitleTitle', 'Sous-titres')}
                 </h3>
-                <button
+                  <button
                   type="button"
                   onClick={() => setShowStyleEditor(true)}
                   disabled={!selectedLine}
-                  className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 hover:bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-200 disabled:opacity-40"
+                    className="rounded-lg border border-slate-300 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-40"
                 >
                   {t('captionsModal.styleEditor', 'Edition de style')}
                 </button>
@@ -591,12 +591,12 @@ export default function CaptionsModal({
 
               <div className="mb-4 rounded-xl border border-slate-300 dark:border-white/10 bg-white/[0.04] p-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-300">{t('captionsModal.translation', 'Traduction')}</span>
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">{t('captionsModal.translation', 'Traduction')}</span>
                   <input type="checkbox" checked={translationEnabled} onChange={(e) => setTranslationEnabled(e.target.checked)} />
                 </div>
                 {translationEnabled ? (
                   <>
-                    <div className="flex items-center justify-between text-xs text-slate-300">
+                    <div className="flex items-center justify-between text-xs text-slate-700 dark:text-slate-300">
                       <span>{t('captionsModal.translationText', 'Texte')}</span>
                       <input type="checkbox" checked={translateText} onChange={(e) => setTranslateText(e.target.checked)} />
                     </div>
@@ -604,7 +604,7 @@ export default function CaptionsModal({
                       <span>{t('captionsModal.translationVoice', 'Voix')}</span>
                       <input type="checkbox" checked={false} disabled />
                     </div>
-                    <select value={targetLanguage} onChange={(e) => setTargetLanguage(e.target.value)} className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1 text-xs text-zinc-100">
+                    <select value={targetLanguage} onChange={(e) => setTargetLanguage(e.target.value)} className="w-full bg-white dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1 text-xs text-slate-900 dark:text-zinc-100">
                       {Object.entries(languages).map(([code, name]) => (
                         <option key={code} value={code}>{name}</option>
                       ))}
@@ -635,7 +635,7 @@ export default function CaptionsModal({
                             setEmojiSearch('');
                             setEmojiGroup('popular');
                           }}
-                          className="rounded-md border border-slate-300 dark:border-white/10 bg-black/30 px-2 py-1 text-[11px] text-slate-200"
+                          className="rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 px-2 py-1 text-[11px] text-slate-700 dark:text-slate-200"
                         >
                           {t('captionsModal.addEmoji', 'Add emoji')}
                         </button>
@@ -645,13 +645,13 @@ export default function CaptionsModal({
                     </div>
 
                     {emojiLineId === line.id ? (
-                      <div onClick={(e) => e.stopPropagation()} className="rounded-lg border border-slate-300 dark:border-white/10 bg-black/50 p-2.5 space-y-2">
+                      <div onClick={(e) => e.stopPropagation()} className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-black/50 p-2.5 space-y-2">
                         <input
                           type="text"
                           value={emojiSearch}
                           onChange={(e) => setEmojiSearch(e.target.value)}
                           placeholder={t('captionsModal.searchEmoji', 'Search emoji...')}
-                          className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1 text-xs text-zinc-100"
+                          className="w-full bg-white dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1 text-xs text-slate-900 dark:text-zinc-100"
                         />
                         <div className="flex flex-wrap gap-1.5">
                           {Object.keys(EMOJI_GROUPS).map((groupKey) => (
@@ -659,7 +659,7 @@ export default function CaptionsModal({
                               key={`${line.id}-${groupKey}`}
                               type="button"
                               onClick={() => setEmojiGroup(groupKey)}
-                              className={`rounded-md border px-2 py-1 text-[10px] uppercase tracking-wide ${emojiGroup === groupKey ? 'border-emerald-400 bg-emerald-500/15 text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-black/30 text-slate-300'}`}
+                              className={`rounded-md border px-2 py-1 text-[10px] uppercase tracking-wide ${emojiGroup === groupKey ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}
                             >
                               {t(`captionsModal.emojiCategory.${groupKey}`, groupKey)}
                             </button>
@@ -671,7 +671,7 @@ export default function CaptionsModal({
                               key={`${line.id}-${emoji}`}
                               type="button"
                               onClick={() => appendEmojiToLineEnd(line.id, emoji)}
-                              className="h-7 rounded-md border border-slate-300 dark:border-white/10 bg-black/30 hover:bg-black/60 text-sm"
+                              className="h-7 rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 hover:bg-slate-200 dark:hover:bg-black/60 text-sm"
                               title={emoji}
                             >
                               {emoji}
@@ -683,12 +683,12 @@ export default function CaptionsModal({
 
                     <div className="flex flex-wrap gap-2">
                       {line.words.map((word) => (
-                        <div key={word.id} className="inline-flex items-center rounded-md border border-slate-300 dark:border-white/10 bg-black/30 overflow-hidden">
+                        <div key={word.id} className="inline-flex items-center rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 overflow-hidden">
                           <input
                             value={word.text}
                             onClick={(e) => e.stopPropagation()}
                             onChange={(e) => updateWordText(line.id, word.id, e.target.value)}
-                            className="bg-transparent px-2 py-1 text-xs text-zinc-100 min-w-[72px] outline-none"
+                            className="bg-transparent px-2 py-1 text-xs text-slate-900 dark:text-zinc-100 min-w-[72px] outline-none"
                           />
                           <input
                             type="color"
@@ -721,7 +721,7 @@ export default function CaptionsModal({
           )}
         </div>
 
-        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-4 md:p-5 flex flex-col gap-3">
+        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 md:p-5 flex flex-col gap-3">
           <h3 className="title-contrast text-lg font-bold">{t('captionsModal.preview', 'Preview')}</h3>
           <div className="flex-1 rounded-lg border border-slate-300 dark:border-white/10 overflow-hidden bg-black min-h-[360px]">
             <RemotionPreview

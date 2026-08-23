@@ -529,10 +529,10 @@ export default function ReelsPage() {
 
             {previewItem && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">
-                    <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-slate-300 dark:border-white/10 bg-zinc-950 shadow-2xl">
+                    <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-slate-300 dark:border-white/10 bg-white dark:bg-zinc-950 shadow-2xl">
                         <div className="flex items-center justify-between border-b border-slate-300 dark:border-white/10 px-4 py-3">
                             <div>
-                                <p className="text-sm font-semibold text-white">{previewItem.reel_title || t("reels.previewTitle", "Reel preview")}</p>
+                                <p className="text-sm font-semibold text-slate-900 dark:text-white">{previewItem.reel_title || t("reels.previewTitle", "Reel preview")}</p>
                                 <p className="text-xs text-slate-500 dark:text-zinc-400">{t("reels.previewSubtitle", "Preview with the same actions as generated clips.")}</p>
                             </div>
                             <button
@@ -541,13 +541,13 @@ export default function ReelsPage() {
                                     setPreviewItem(null);
                                     setPreviewUrl("");
                                 }}
-                                className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10"
+                                className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-slate-200 dark:hover:bg-white/10"
                                 title={t('app.close', 'Close')}
                             >
                                 <X size={16} />
                             </button>
                         </div>
-                        <div className="max-h-[88vh] overflow-y-auto p-4 custom-scrollbar">
+                        <div className="max-h-[88vh] overflow-y-auto p-4 custom-scrollbar bg-slate-50 dark:bg-zinc-950">
                             {previewClip && (
                                 <ResultCard
                                     clip={previewClip}

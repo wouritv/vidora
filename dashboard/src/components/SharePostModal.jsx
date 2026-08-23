@@ -27,11 +27,11 @@ export default function SharePostModal({
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-slate-300 dark:border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
+            <div className="bg-white dark:bg-[#121214] border border-slate-300 dark:border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
                 <button
                     onClick={onClose}
-                    className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-white"
+                    className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-slate-700 dark:hover:text-white"
                 >
                     <X size={20} />
                 </button>
@@ -46,7 +46,7 @@ export default function SharePostModal({
                             type="text"
                             value={title}
                             onChange={(e) => onTitleChange(e.target.value)}
-                            className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
+                            className="w-full bg-slate-50 dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-primary/50 placeholder-slate-400 dark:placeholder-zinc-600"
                             placeholder={t("social.videoTile", "Enter a catchy title...")}
                         />
                     </div>
@@ -57,14 +57,14 @@ export default function SharePostModal({
                             value={description}
                             onChange={(e) => onDescriptionChange(e.target.value)}
                             rows={4}
-                            className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
+                            className="w-full bg-slate-50 dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-primary/50 placeholder-slate-400 dark:placeholder-zinc-600 resize-none"
                             placeholder={t("social.postResumePlaceholder", "Write a caption for your post...")}
                         />
                     </div>
 
-                    <div className="p-3 bg-white/5 rounded-lg border border-slate-200 dark:border-white/5">
+                    <div className="p-3 bg-slate-100 dark:bg-white/5 rounded-lg border border-slate-200 dark:border-white/5">
                         <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-2 text-sm text-white font-medium">
+                            <div className="flex items-center gap-2 text-sm text-slate-800 dark:text-white font-medium">
                                 <Calendar size={16} className="text-purple-400" /> {t("social.postSchedule", "Schedule Post")}
                             </div>
                             <label className="relative inline-flex items-center cursor-pointer">
@@ -81,7 +81,7 @@ export default function SharePostModal({
                                         type="datetime-local"
                                         value={scheduleDate}
                                         onChange={(e) => onScheduleDateChange(e.target.value)}
-                                        className="w-full bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 pl-9 text-sm text-white focus:outline-none focus:border-purple-500/50 [color-scheme:dark]"
+                                        className="w-full bg-slate-50 dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-lg p-2 pl-9 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-purple-500/50 [color-scheme:light] dark:[color-scheme:dark]"
                                     />
                                     <Clock size={14} className="absolute left-3 top-2.5 text-slate-400 dark:text-zinc-500" />
                                 </div>
@@ -101,14 +101,14 @@ export default function SharePostModal({
                                                 : platform === 'linkedin' ? Linkedin
                                                     : Video;
                                     return (
-                                        <label key={platform} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-slate-200 dark:border-white/5">
+                                        <label key={platform} className="flex items-center gap-3 p-3 bg-slate-100 dark:bg-white/5 rounded-lg cursor-pointer hover:bg-slate-200 dark:hover:bg-white/10 transition-colors border border-slate-200 dark:border-white/5">
                                             <input
                                                 type="checkbox"
                                                 checked={Boolean(platforms[platform])}
                                                 onChange={(e) => onPlatformChange(platform, e.target.checked)}
                                                 className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
                                             />
-                                            <div className="flex items-center gap-2 text-sm text-white">
+                                            <div className="flex items-center gap-2 text-sm text-slate-800 dark:text-white">
                                                 <Icon size={16} className="text-slate-700 dark:text-zinc-300" /> {t(`social.${platform}`, PLATFORM_LABELS[platform])}
                                             </div>
                                         </label>
