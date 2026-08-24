@@ -6600,6 +6600,13 @@ async def _create_linkedin_post(token: str, owner_urn: str, commentary: str, med
     post_id = response.headers.get("x-restli-id") or response.headers.get("X-RestLi-Id")
     return {"id": post_id}
 
+def _cleanup_temp_file(path: str) -> None:
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception:
+            logger.warning("Could not remove temp file %s", path, exc_info=True)
+
 async def _li_initialize_video_upload(access_token: str, owner_urn: str, file_size: int):
     """Renvoie (video_urn, upload_instructions, upload_token)."""
     init_payload = {
