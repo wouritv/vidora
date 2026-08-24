@@ -12,6 +12,8 @@ import asyncio
 import itertools
 import secrets
 import re
+import ipaddress
+import socket
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any
@@ -121,6 +123,13 @@ STRIPE_SUCCESS_URL = os.environ.get("STRIPE_SUCCESS_URL", "")
 STRIPE_CANCEL_URL = os.environ.get("STRIPE_CANCEL_URL", "")
 STORAGE_RETENTION_PERIODE_DAYS = max(0, int(os.environ.get("STORAGE_RETENTION_PERIODE", "7") or "7"))
 STORAGE_OVERAGE_TOLERANCE_PERCENT = max(0.0, float(os.environ.get("STORAGE_OVERAGE_TOLERANCE_PERCENT", "10") or "10"))
+
+# Social publishing constants
+ALLOWED_YT_PRIVACY = {"public", "private", "unlisted"}
+YT_CHUNK_SIZE = 8 * 1024 * 1024
+YT_MAX_RETRIES_PER_CHUNK = 3
+LINKEDIN_API_VERSION = os.environ.get("LINKEDIN_API_VERSION", "202607")  # YYYYMM, à mettre à jour périodiquement
+LINKEDIN_MAX_RETRIES_PER_PART = 3
 PLATFORM_CONFIG = {
     "linkedin": {
         "auth_url": "https://www.linkedin.com/oauth/v2/authorization",
@@ -6125,6 +6134,67 @@ def _is_token_expiring(account: Dict[str, Any], margin_seconds: int = 300) -> bo
         return True
 
 
+# --------------------------------------------------------------------------
+# Helpers génériques (social publishing)
+# --------------------------------------------------------------------------
+
+def _require_platform_user_id(account: Dict[str, Any], platform: str) -> str:
+    user_id = str(account.get("platform_user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail=f"Connected {platform} account id is missing")
+    return user_id
+
+
+async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        logger.error("%s API error: %s - %s", platform, e.response.status_code, e.response.text)
+        raise HTTPException(
+            status_code=502,
+            detail=f"{platform} API error ({e.response.status_code}): {e.response.text}",
+        ) from e
+
+
+def _validate_download_url(url: str) -> None:
+    """Anti-SSRF minimal avant un GET serveur vers une URL fournie par l'utilisateur."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="video_url must be http(s)")
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="video_url is invalid")
+    try:
+        resolved_ips = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+    except socket.gaierror as e:
+        raise HTTPException(status_code=400, detail="video_url host could not be resolved") from e
+    for ip_str in resolved_ips:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            raise HTTPException(status_code=400, detail="video_url points to a disallowed address")
+
+
+async def _download_to_file(url: str, dest_path: str, timeout: float = 180.0) -> None:
+    _validate_download_url(url)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            with open(dest_path, "wb") as handle:
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                    handle.write(chunk)
+
+
+# --------------------------------------------------------------------------
+# Token refresh (get_valid_token)
+# --------------------------------------------------------------------------
+
+# Certains providers OAuth n'utilisent pas les noms de paramètres standards
+# (client_id/client_secret). TikTok en particulier attend client_key.
+_REFRESH_PARAM_OVERRIDES = {
+    "tiktok": {"client_id_param": "client_key"},
+}
+
+
 async def get_valid_token(account: Dict[str, Any]) -> str:
     access_token = _decrypt_token(account.get("access_token_encrypted"))
     if access_token and not _is_token_expiring(account):
@@ -6132,83 +6202,96 @@ async def get_valid_token(account: Dict[str, Any]) -> str:
 
     platform = str(account.get("platform") or "").lower()
 
-    # Instagram : pas de refresh_token classique, on rafraîchit le long-lived
-    # access_token directement via un GET dédié (ig_refresh_token)
+    # --- Instagram : pas de refresh_token classique, on rafraîchit le
+    # long-lived access_token directement via ig_refresh_token ---
     if platform == "instagram":
         if not access_token:
             raise HTTPException(status_code=401, detail="Instagram account token missing, reconnection required")
 
-        config = _resolve_platform_config(platform)
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 "https://graph.instagram.com/refresh_access_token",
-                params={
-                    "grant_type": "ig_refresh_token",
-                    "access_token": access_token,
-                },
+                params={"grant_type": "ig_refresh_token", "access_token": access_token},
             )
-        response.raise_for_status()
+
+        if response.status_code in (400, 401):
+            logger.warning("Instagram token refresh rejected: %s", response.text)
+            raise HTTPException(status_code=401, detail="Instagram token expired, reconnection required")
+        await _raise_for_status_or_502(response, "Instagram")
+
         new_data = response.json()
+        refreshed_access_token = new_data.get("access_token")
+        if not refreshed_access_token:
+            raise HTTPException(status_code=502, detail="Instagram refresh response missing access_token")
+        expires_in = int(new_data.get("expires_in") or 5_184_000)  # 60 jours par défaut
 
-        refreshed_access_token = new_data["access_token"]
-        expires_in = int(new_data.get("expires_in") or 5184000)  # 60 jours par défaut
-
-        client = await supabase_get_client()
-        await (
-            client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
-            .update(
-                {
-                    "access_token_encrypted": _encrypt_token(refreshed_access_token),
-                    "expires_at": datetime.fromtimestamp(time.time() + max(expires_in, 60), tz=timezone.utc).isoformat(),
-                    "updated_at": _utcnow_iso(),
-                }
-            )
-            .eq("id", account.get("id"))
-            .execute()
-        )
+        await _persist_refreshed_token(account, refreshed_access_token, None, expires_in)
         return refreshed_access_token
 
-    # --- Flow générique existant pour les autres plateformes ---
+    # --- Flow générique (OAuth refresh_token) pour les autres plateformes ---
     refresh_token = _decrypt_token(account.get("refresh_token_encrypted"))
     if not refresh_token:
         if access_token:
+            logger.warning(
+                "No refresh_token for account %s (%s); reusing possibly-expiring access_token",
+                account.get("id"), platform,
+            )
             return access_token
         raise HTTPException(status_code=401, detail="Account token expired and no refresh token available")
 
     config = _resolve_platform_config(platform)
 
+    overrides = _REFRESH_PARAM_OVERRIDES.get(platform, {})
+    client_id_param = overrides.get("client_id_param", "client_id")
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             config["token_url"],
             data={
-                "client_id": config["client_id"],
+                client_id_param: config["client_id"],
                 "client_secret": config["client_secret"],
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
             },
         )
-    response.raise_for_status()
+
+    if response.status_code in (400, 401):
+        logger.warning("%s token refresh rejected: %s", platform, response.text)
+        raise HTTPException(status_code=401, detail=f"{platform} refresh token invalid, reconnection required")
+    await _raise_for_status_or_502(response, platform)
 
     new_tokens = await _extract_token_data(platform, response.json())
-    refreshed_access_token = new_tokens["access_token"]
+    refreshed_access_token = new_tokens.get("access_token")
+    if not refreshed_access_token:
+        raise HTTPException(status_code=502, detail=f"{platform} refresh response missing access_token")
     refreshed_refresh_token = new_tokens.get("refresh_token") or refresh_token
     expires_in = int(new_tokens.get("expires_in") or 3600)
+
+    await _persist_refreshed_token(account, refreshed_access_token, refreshed_refresh_token, expires_in)
+    return refreshed_access_token
+
+
+async def _persist_refreshed_token(
+    account: Dict[str, Any],
+    access_token: str,
+    refresh_token: Optional[str],
+    expires_in: int,
+) -> None:
+    update_payload: Dict[str, Any] = {
+        "access_token_encrypted": _encrypt_token(access_token),
+        "expires_at": datetime.fromtimestamp(time.time() + max(expires_in, 60), tz=timezone.utc).isoformat(),
+        "updated_at": _utcnow_iso(),
+    }
+    if refresh_token is not None:
+        update_payload["refresh_token_encrypted"] = _encrypt_token(refresh_token)
 
     client = await supabase_get_client()
     await (
         client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
-        .update(
-            {
-                "access_token_encrypted": _encrypt_token(refreshed_access_token),
-                "refresh_token_encrypted": _encrypt_token(refreshed_refresh_token),
-                "expires_at": datetime.fromtimestamp(time.time() + max(expires_in, 60), tz=timezone.utc).isoformat(),
-                "updated_at": _utcnow_iso(),
-            }
-        )
+        .update(update_payload)
         .eq("id", account.get("id"))
         .execute()
     )
-    return refreshed_access_token
 
 
 class PublishRequest(BaseModel):
@@ -6222,193 +6305,115 @@ class PublishRequest(BaseModel):
     privacy_level: Optional[str] = "PUBLIC_TO_EVERYONE"
 
 
-async def publish_post(account: Dict[str, Any], content: PublishRequest):
-    token = await get_valid_token(account)
-    headers = {"Authorization": f"Bearer {token}"}
-    platform = str(account.get("platform") or "").lower()
-    text_value = content.text or content.caption or content.description or "Posted from Vireel"
+# --------------------------------------------------------------------------
+# YouTube
+# --------------------------------------------------------------------------
 
-    if platform == "linkedin":
-
-        if content.video_url:
-            try:
-                return await publish_to_linkedin_video(
-                    access_token=token,
-                    owner_urn=f"urn:li:person:{account.get('platform_user_id')}",
-                    video_url=content.video_url,
-                    title=content.title or "Vireel",
-                    description=text_value,
-                )
-            except Exception:
-                # fallback texte seul
-                pass
-
-        payload = {
-            "author": f"urn:li:person:{account.get('platform_user_id')}",
-            "lifecycleState": "PUBLISHED",
-            "specificContent": {
-                "com.linkedin.ugc.ShareContent": {
-                    "shareCommentary": {"text": text_value},
-                    "shareMediaCategory": "NONE",
-                }
-            },
-            "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
-        }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post("https://api.linkedin.com/v2/ugcPosts", json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()
-
-    if platform == "facebook":
-        if content.video_url:
-            try:
-                return await publish_to_facebook_video(
-                    access_token=token,
-                    target_id=str(account.get("platform_user_id") or ""),
-                    video_url=content.video_url,
-                    message=text_value,
-                    title=content.title or "Vireel",
-                    description=content.description or text_value,
-                )
-            except Exception:
-                # fallback texte seul
-                pass
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"https://graph.facebook.com/{account.get('platform_user_id')}/feed",
-                data={"message": text_value, "access_token": token},
-            )
-        response.raise_for_status()
-        return response.json()
-
-    if platform == "instagram":
-        if not content.video_url:
-            raise HTTPException(status_code=400, detail="video_url is required for Instagram publication")
-        ig_user_id = str(account.get("platform_user_id") or "").strip()
-        if not ig_user_id:
-            raise HTTPException(status_code=400, detail="Connected Instagram account id is missing")
-        return await publish_to_instagram(token, ig_user_id, content.video_url, text_value)
-
-    if platform == "youtube":
-        video_path = (content.video_file or "").strip()
-        temp_path = ""
-        if not video_path:
-            if not content.video_url:
-                raise HTTPException(status_code=400, detail="video_file or video_url is required for YouTube publication")
-            temp_path = os.path.join(UPLOAD_DIR, f"yt_publish_{uuid.uuid4().hex}.mp4")
-            async with httpx.AsyncClient(timeout=180.0, follow_redirects=True) as client:
-                media_response = await client.get(content.video_url)
-                media_response.raise_for_status()
-            with open(temp_path, "wb") as handle:
-                handle.write(media_response.content)
-            video_path = temp_path
-
-        try:
-            return await upload_youtube_video(
-                token,
-                video_path,
-                content.title or "Vireel Short",
-                content.description or text_value,
-            )
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-
-    if platform == "tiktok":
-        if not content.video_url:
-            raise HTTPException(status_code=400, detail="video_url is required for TikTok publication")
-        return await publish_to_tiktok(token, content.video_url, text_value, content.privacy_level or "PUBLIC_TO_EVERYONE")
-
-    raise HTTPException(status_code=404, detail="Unsupported platform")
+def _yt_validate_privacy(privacy: str) -> None:
+    if privacy not in ALLOWED_YT_PRIVACY:
+        raise HTTPException(status_code=400, detail=f"Invalid privacy '{privacy}', must be one of {sorted(ALLOWED_YT_PRIVACY)}")
 
 
-async def upload_youtube_video(access_token: str, video_path: str, title: str, description: str, privacy: str = "public"):
-    if not os.path.exists(video_path):
-        raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
-
-    headers = {"Authorization": f"Bearer {access_token}"}
+async def _yt_initialize_upload(access_token: str, file_size: int, title: str, description: str, privacy: str) -> str:
+    """Enregistre la session resumable et renvoie l'upload URL (header Location)."""
     metadata = {
-        "snippet": {
-            "title": title,
-            "description": description,
-            "categoryId": "22",
-        },
-        "status": {
-            "privacyStatus": privacy,
-        },
+        "snippet": {"title": title, "description": description, "categoryId": "22"},
+        "status": {"privacyStatus": privacy},
     }
-
-    file_size = os.path.getsize(video_path)
     async with httpx.AsyncClient(timeout=120.0) as client:
         init_response = await client.post(
             "https://www.googleapis.com/upload/youtube/v3/videos",
             params={"uploadType": "resumable", "part": "snippet,status"},
             headers={
-                **headers,
+                "Authorization": f"Bearer {access_token}",
                 "X-Upload-Content-Type": "video/*",
                 "X-Upload-Content-Length": str(file_size),
                 "Content-Type": "application/json; charset=UTF-8",
             },
             json=metadata,
         )
-    init_response.raise_for_status()
+    await _raise_for_status_or_502(init_response, "YouTube")
 
     upload_url = init_response.headers.get("Location")
     if not upload_url:
         raise HTTPException(status_code=502, detail="YouTube upload session URL is missing")
+    return upload_url
 
+
+async def _yt_put_chunk_with_retry(upload_url: str, chunk: bytes, chunk_start: int, chunk_end: int, file_size: int) -> httpx.Response:
+    """PUT d'un chunk avec retry ; renvoie la réponse HTTP brute (200/201/308/erreur gérés par l'appelant)."""
+    last_error: Optional[Exception] = None
+    for attempt in range(YT_MAX_RETRIES_PER_CHUNK):
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                return await client.put(
+                    upload_url,
+                    headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {chunk_start}-{chunk_end}/{file_size}",
+                    },
+                    content=chunk,
+                )
+        except httpx.HTTPError as e:
+            last_error = e
+            logger.warning("YouTube chunk upload failed (attempt %s/%s): %s", attempt + 1, YT_MAX_RETRIES_PER_CHUNK, e)
+            await asyncio.sleep(2 ** attempt)
+    raise HTTPException(status_code=502, detail=f"YouTube chunk upload failed after retries: {last_error}")
+
+
+def _yt_next_offset(range_header: Optional[str], uploaded: int, chunk_len: int) -> int:
+    if range_header and "-" in range_header:
+        return int(range_header.split("-")[-1]) + 1
+    return uploaded + chunk_len
+
+
+async def upload_youtube_video(
+    access_token: str, video_path: str, title: str, description: str, privacy: str = "public",
+) -> Dict[str, Any]:
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
+    _yt_validate_privacy(privacy)
+
+    file_size = os.path.getsize(video_path)
+    upload_url = await _yt_initialize_upload(access_token, file_size, title, description, privacy)
+
+    uploaded = 0
     with open(video_path, "rb") as file_handle:
-        file_data = file_handle.read()
+        while uploaded < file_size:
+            file_handle.seek(uploaded)
+            chunk = file_handle.read(YT_CHUNK_SIZE)
+            response = await _yt_put_chunk_with_retry(upload_url, chunk, uploaded, uploaded + len(chunk) - 1, file_size)
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        upload_response = await client.put(
-            upload_url,
-            headers={
-                "Content-Type": "video/*",
-                "Content-Length": str(file_size),
-            },
-            content=file_data,
-        )
-    upload_response.raise_for_status()
-    result = upload_response.json()
-    return {
-        "video_id": result.get("id"),
-        "url": f"https://youtube.com/watch?v={result.get('id')}",
-    }
+            if response.status_code in (200, 201):
+                result = response.json()
+                return {"video_id": result.get("id"), "url": f"https://youtube.com/watch?v={result.get('id')}"}
 
+            if response.status_code == 308:
+                uploaded = _yt_next_offset(response.headers.get("Range"), uploaded, len(chunk))
+                continue
+
+            await _raise_for_status_or_502(response, "YouTube")
+
+    raise HTTPException(status_code=502, detail="YouTube upload ended without a final response")
+
+
+# --------------------------------------------------------------------------
+# TikTok
+# --------------------------------------------------------------------------
 
 async def publish_to_tiktok(access_token: str, video_url: str, caption: str, privacy_level: str = "PUBLIC_TO_EVERYONE"):
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     payload = {
         "post_info": {
-            "title": caption,
-            "privacy_level": privacy_level,
-            "disable_duet": False,
-            "disable_comment": False,
-            "disable_stitch": False,
-            "brand_content_toggle": False,
-            "brand_organic_toggle": False,
+            "title": caption, "privacy_level": privacy_level, "disable_duet": False,
+            "disable_comment": False, "disable_stitch": False,
+            "brand_content_toggle": False, "brand_organic_toggle": False,
         },
-        "source_info": {
-            "source": "PULL_FROM_URL",
-            "video_url": video_url,
-        },
+        "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
     }
-
     async with httpx.AsyncClient(timeout=60.0) as client:
-        init_response = await client.post(
-            "https://open.tiktokapis.com/v2/post/publish/video/init/",
-            headers=headers,
-            json=payload,
-        )
-    init_response.raise_for_status()
+        init_response = await client.post("https://open.tiktokapis.com/v2/post/publish/video/init/", headers=headers, json=payload)
+    await _raise_for_status_or_502(init_response, "TikTok")
 
     init_data = init_response.json()
     if init_data.get("error", {}).get("code") != "ok":
@@ -6420,21 +6425,30 @@ async def publish_to_tiktok(access_token: str, video_url: str, caption: str, pri
     return await poll_tiktok_status(access_token, publish_id)
 
 
-async def poll_tiktok_status(access_token: str, publish_id: str, max_attempts: int = 20):
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
+async def publish_to_tiktok_photo(token: str, image_urls: List[str], caption: str) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "post_info": {"caption": caption},
+        "source_info": {"source": "PULL_FROM_URL", "photo_images": image_urls},
+        "post_mode": "DIRECT_POST",
+        "media_type": "PHOTO",
     }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post("https://open.tiktokapis.com/v2/post/publish/content/init/", json=payload, headers=headers)
+    await _raise_for_status_or_502(response, "TikTok")
+    return response.json()
+
+
+async def poll_tiktok_status(access_token: str, publish_id: str, max_attempts: int = 20):
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     delay = 2.0
     for _ in range(max_attempts):
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
-                headers=headers,
-                json={"publish_id": publish_id},
+                "https://open.tiktokapis.com/v2/post/publish/status/fetch/", headers=headers, json={"publish_id": publish_id},
             )
-        response.raise_for_status()
-        data = (response.json().get("data") or {})
+        await _raise_for_status_or_502(response, "TikTok")
+        data = response.json().get("data") or {}
         status = data.get("status")
         if status == "PUBLISH_COMPLETE":
             return {"success": True, "publish_id": publish_id, "status": status}
@@ -6442,135 +6456,383 @@ async def poll_tiktok_status(access_token: str, publish_id: str, max_attempts: i
             return {"success": False, "publish_id": publish_id, "status": status, "error": data.get("fail_reason") or "unknown"}
         await asyncio.sleep(delay)
         delay = min(delay * 1.5, 30.0)
-
     return {"success": False, "publish_id": publish_id, "status": "TIMEOUT", "error": "timeout"}
 
 
-async def publish_to_facebook_video(
-    access_token: str,
-    target_id: str,
-    video_url: str,
-    message: str,
-    title: str,
-    description: str,
-):
-    """
-    Publie une vidéo sur une page Facebook.
+# --------------------------------------------------------------------------
+# Facebook
+# --------------------------------------------------------------------------
 
-    Args:
-        access_token: Page access token (long-lived, stocké en DB)
-        target_id: page_id (stocké en platform_user_id)
-        video_url: URL publique de la vidéo
-        message: Texte du post
-        title: Titre (optionnel pour Facebook)
-        description: Description (optionnel)
-    """
+async def publish_to_facebook_video(access_token: str, target_id: str, video_url: str, message: str, title: str, description: str):
     if not target_id:
         raise HTTPException(status_code=400, detail="Connected Facebook target id is missing")
-
     if not access_token:
         raise HTTPException(status_code=401, detail="Facebook page access token expired or missing")
 
     async with httpx.AsyncClient(timeout=90.0) as client:
         response = await client.post(
             f"https://graph.facebook.com/v19.0/{target_id}/videos",
-            data={
-                "file_url": video_url,
-                "description": message or description,
-                "title": title,
-                "access_token": access_token,
-            },
+            data={"file_url": video_url, "description": message or description, "title": title, "access_token": access_token},
         )
-
-    if response.status_code >= 400:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"Facebook publish failed: {response.text}"
-        )
-
-    data = response.json()
-    return {
-        "id": data.get("id"),
-    }
-
-
-async def publish_to_instagram(account: SocialAccount, content: PublishRequest):
-    token = await get_valid_token(account)
-    ig_user_id = account.platform_user_id
-
-    # Étape 1 — Créer le container média (l'image/vidéo doit être une URL publique HTTPS)
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        container_response = await client.post(
-            f"https://graph.instagram.com/v25.0/{ig_user_id}/media",
-            data={
-                "video_url": content.video_url,  # ou image_url selon le type
-                "caption": content.text,
-                "media_type": "REELS",  # ou "IMAGE", "VIDEO", "STORIES"
-                "access_token": token,
-            },
-        )
-    container_response.raise_for_status()
-    creation_id = container_response.json()["id"]
-
-    # Étape 2 — Attendre que le container soit prêt (polling, comme TikTok)
-    status = await _poll_instagram_container_status(token, creation_id)
-    if status != "FINISHED":
-        raise Exception(f"Container Instagram non prêt: {status}")
-
-    # Étape 3 — Publier le container
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        publish_response = await client.post(
-            f"https://graph.instagram.com/v25.0/{ig_user_id}/media_publish",
-            data={
-                "creation_id": creation_id,
-                "access_token": token,
-            },
-        )
-    publish_response.raise_for_status()
-    return publish_response.json()  # contient l'id du post publié
-
-
-async def _poll_instagram_container_status(token: str, creation_id: str, max_attempts: int = 20):
-    delay = 2
-    for _ in range(max_attempts):
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"https://graph.instagram.com/v25.0/{creation_id}",
-                params={"fields": "status_code", "access_token": token},
-            )
-        status = response.json().get("status_code")
-        if status in ("FINISHED", "ERROR"):
-            return status
-        await asyncio.sleep(delay)
-        delay = min(delay * 1.5, 30)
-    return "TIMEOUT"
+    await _raise_for_status_or_502(response, "Facebook")
+    return {"id": response.json().get("id")}
 
 
 async def publish_to_facebook_page(page_id: str, page_access_token: str, message: str):
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"https://graph.facebook.com/v19.0/{page_id}/feed",
-            data={
-                "message": message,
-                "access_token": page_access_token,  # token de la Page, pas de l'utilisateur
-            },
+            f"https://graph.facebook.com/v19.0/{page_id}/feed", data={"message": message, "access_token": page_access_token},
         )
-    response.raise_for_status()
+    await _raise_for_status_or_502(response, "Facebook")
     return response.json()
 
+
 async def get_facebook_long_lived_token(short_lived_token: str) -> str:
-    """Échange un token court-terme contre un token long-terme (~60 jours)"""
+    client_id = os.getenv("FACEBOOK_CLIENT_ID")
+    client_secret = os.getenv("FACEBOOK_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=500, detail="FACEBOOK_CLIENT_ID / FACEBOOK_CLIENT_SECRET not configured")
+
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(
             "https://graph.facebook.com/v19.0/oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": os.getenv("FACEBOOK_CLIENT_ID"),
-                "client_secret": os.getenv("FACEBOOK_CLIENT_SECRET"),
-                "access_token": short_lived_token,
-            },
+            params={"grant_type": "fb_exchange_token", "client_id": client_id, "client_secret": client_secret, "access_token": short_lived_token},
         )
-    response.raise_for_status()
-    return response.json().get("access_token")
+    await _raise_for_status_or_502(response, "Facebook")
+    token = response.json().get("access_token")
+    if not token:
+        raise HTTPException(status_code=502, detail="Facebook did not return a long-lived access_token")
+    return token
+
+
+# --------------------------------------------------------------------------
+# Instagram (Login direct -> graph.instagram.com)
+# --------------------------------------------------------------------------
+
+async def publish_to_instagram(token: str, ig_user_id: str, video_url: Optional[str], caption: str) -> Dict[str, Any]:
+    if not video_url:
+        raise HTTPException(status_code=400, detail="video_url is required for Instagram video publication")
+    return await _publish_instagram_container(token, ig_user_id, caption, "REELS", "video_url", video_url)
+
+
+async def publish_to_instagram_image(token: str, ig_user_id: str, image_url: str, caption: str) -> Dict[str, Any]:
+    return await _publish_instagram_container(token, ig_user_id, caption, "IMAGE", "image_url", image_url)
+
+
+async def _publish_instagram_container(
+    token: str, ig_user_id: str, caption: str, media_type: str, media_field: str, media_value: str,
+) -> Dict[str, Any]:
+    base_url = f"https://graph.instagram.com/v19.0/{ig_user_id}"  # Instagram Login direct
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        container_response = await client.post(
+            f"{base_url}/media",
+            data={media_field: media_value, "caption": caption, "media_type": media_type, "access_token": token},
+        )
+    await _raise_for_status_or_502(container_response, "Instagram")
+    creation_id = container_response.json().get("id")
+    if not creation_id:
+        raise HTTPException(status_code=502, detail="Instagram did not return a creation id")
+
+    status = await _poll_instagram_container_status(token, creation_id)
+    if status != "FINISHED":
+        raise HTTPException(status_code=502, detail=f"Instagram container not ready: {status}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        publish_response = await client.post(f"{base_url}/media_publish", data={"creation_id": creation_id, "access_token": token})
+    await _raise_for_status_or_502(publish_response, "Instagram")
+    return publish_response.json()
+
+
+async def _poll_instagram_container_status(token: str, creation_id: str, max_attempts: int = 20) -> str:
+    delay = 2.0
+    for _ in range(max_attempts):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"https://graph.instagram.com/v19.0/{creation_id}",
+                params={"fields": "status_code,status", "access_token": token},
+            )
+        await _raise_for_status_or_502(response, "Instagram")
+        data = response.json()
+        status = data.get("status_code")
+        if status == "FINISHED":
+            return status
+        if status == "ERROR":
+            logger.error("Instagram container error for %s: %s", creation_id, data.get("status"))
+            return status
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.5, 30.0)
+    return "TIMEOUT"
+
+
+# --------------------------------------------------------------------------
+# LinkedIn (Videos API + Posts API — remplace Assets API + v2/ugcPosts)
+# --------------------------------------------------------------------------
+
+def _linkedin_headers(token: str, json_body: bool = True) -> Dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Linkedin-Version": LINKEDIN_API_VERSION,
+    }
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+async def _create_linkedin_post(token: str, owner_urn: str, commentary: str, media: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "author": owner_urn,
+        "commentary": commentary,
+        "visibility": "PUBLIC",
+        "distribution": {"feedDistribution": "MAIN_FEED", "targetEntities": [], "thirdPartyDistributionChannels": []},
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False,
+    }
+    if media:
+        payload["content"] = {"media": media}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post("https://api.linkedin.com/rest/posts", headers=_linkedin_headers(token), json=payload)
+    await _raise_for_status_or_502(response, "LinkedIn")
+
+    # LinkedIn renvoie l'id du post dans le header x-restli-id (pas dans le body).
+    post_id = response.headers.get("x-restli-id") or response.headers.get("X-RestLi-Id")
+    return {"id": post_id}
+
+async def _li_initialize_video_upload(access_token: str, owner_urn: str, file_size: int):
+    """Renvoie (video_urn, upload_instructions, upload_token)."""
+    init_payload = {
+        "initializeUploadRequest": {
+            "owner": owner_urn,
+            "fileSizeBytes": file_size,
+            "uploadCaptions": False,
+            "uploadThumbnail": False,
+        }
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        init_response = await client.post(
+            "https://api.linkedin.com/rest/videos?action=initializeUpload",
+            headers=_linkedin_headers(access_token),
+            json=init_payload,
+        )
+    await _raise_for_status_or_502(init_response, "LinkedIn")
+
+    init_data = (init_response.json() or {}).get("value") or {}
+    video_urn = init_data.get("video")
+    upload_instructions = init_data.get("uploadInstructions") or []
+    upload_token = init_data.get("uploadToken", "")
+
+    if not video_urn or not upload_instructions:
+        raise HTTPException(status_code=502, detail="LinkedIn initializeUpload response missing video urn or upload instructions")
+    return video_urn, upload_instructions, upload_token
+
+
+async def _li_upload_part_with_retry(upload_url: str, chunk: bytes, first_byte: int, last_byte: int) -> str:
+    """PUT d'une part avec retry ; renvoie l'ETag (sans guillemets) en cas de succès."""
+    last_error: Optional[Exception] = None
+    for attempt in range(LINKEDIN_MAX_RETRIES_PER_PART):
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                part_response = await client.put(
+                    upload_url, headers={"Content-Type": "application/octet-stream"}, content=chunk,
+                )
+            part_response.raise_for_status()
+            etag = (part_response.headers.get("etag") or part_response.headers.get("ETag") or "").strip('"')
+            if not etag:
+                raise ValueError("LinkedIn part upload response missing ETag header")
+            return etag
+        except (httpx.HTTPError, ValueError) as e:
+            last_error = e
+            logger.warning(
+                "LinkedIn video part upload failed (bytes %s-%s, attempt %s/%s): %s",
+                first_byte, last_byte, attempt + 1, LINKEDIN_MAX_RETRIES_PER_PART, e,
+            )
+            await asyncio.sleep(2 ** attempt)
+    raise HTTPException(status_code=502, detail=f"LinkedIn video part upload failed after retries: {last_error}")
+
+
+async def _li_upload_all_parts(temp_path: str, upload_instructions: List[Dict[str, Any]]) -> List[str]:
+    uploaded_part_ids: List[str] = []
+    with open(temp_path, "rb") as file_handle:
+        for part in upload_instructions:
+            first_byte, last_byte = part["firstByte"], part["lastByte"]
+            file_handle.seek(first_byte)
+            chunk = file_handle.read(last_byte - first_byte + 1)
+            etag = await _li_upload_part_with_retry(part["uploadUrl"], chunk, first_byte, last_byte)
+            uploaded_part_ids.append(etag)
+    return uploaded_part_ids
+
+
+async def _li_finalize_upload(access_token: str, video_urn: str, upload_token: str, uploaded_part_ids: List[str]) -> None:
+    finalize_payload = {
+        "finalizeUploadRequest": {"video": video_urn, "uploadToken": upload_token, "uploadedPartIds": uploaded_part_ids}
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        finalize_response = await client.post(
+            "https://api.linkedin.com/rest/videos?action=finalizeUpload",
+            headers=_linkedin_headers(access_token),
+            json=finalize_payload,
+        )
+    await _raise_for_status_or_502(finalize_response, "LinkedIn")
+
+
+async def publish_to_linkedin_video(access_token: str, owner_urn: str, video_url: str, title: str, description: str) -> Dict[str, Any]:
+    """
+    Publie une vidéo sur LinkedIn via la Videos API actuelle :
+    1. Téléchargement local de la vidéo (video_url) avec validation anti-SSRF.
+    2. initializeUpload -> URN vidéo + plages de parts à uploader.
+    3. Upload de chaque part avec retry, récupération de l'ETag.
+    4. finalizeUpload avec la liste des ETags dans l'ordre des parts.
+    5. Création du post via /rest/posts (Posts API) référençant l'URN vidéo.
+    """
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    temp_path = os.path.join(UPLOAD_DIR, f"li_publish_{uuid.uuid4().hex}.mp4")
+    await _download_to_file(video_url, temp_path)
+
+    try:
+        file_size = os.path.getsize(temp_path)
+        video_urn, upload_instructions, upload_token = await _li_initialize_video_upload(access_token, owner_urn, file_size)
+        uploaded_part_ids = await _li_upload_all_parts(temp_path, upload_instructions)
+        await _li_finalize_upload(access_token, video_urn, upload_token, uploaded_part_ids)
+
+        post_result = await _create_linkedin_post(
+            token=access_token, owner_urn=owner_urn, commentary=description, media={"title": title, "id": video_urn},
+        )
+        post_result["video_urn"] = video_urn
+        return post_result
+    finally:
+        _cleanup_temp_file(temp_path)
+
+# --------------------------------------------------------------------------
+# Fonction principale
+# --------------------------------------------------------------------------
+async def _publish_video_then_text_fallback(has_video: bool, video_publisher, text_publisher) -> Dict[str, Any]:
+    """
+    Tente video_publisher() si has_video est vrai ; en cas d'échec (ou si
+    pas de vidéo du tout), retombe sur text_publisher(). Les clés
+    video_failed/video_error ne sont ajoutées que si une vidéo a été
+    tentée et a échoué — comportement identique à la version précédente.
+    """
+    if not has_video:
+        return await text_publisher()
+    try:
+        return await video_publisher()
+    except Exception as e:
+        logger.warning("Video publish failed, falling back to text: %s", e, exc_info=True)
+        result = await text_publisher()
+        result["video_failed"] = True
+        result["video_error"] = str(e)
+        return result
+
+
+async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
+    _require_platform_user_id(account, "LinkedIn")
+    owner_urn = f"urn:li:person:{account.get('platform_user_id')}"
+
+    async def video_publisher():
+        return await publish_to_linkedin_video(
+            access_token=token, owner_urn=owner_urn, video_url=content.video_url,
+            title=content.title or "Vireel", description=text_value,
+        )
+
+    async def text_publisher():
+        return await _create_linkedin_post(token=token, owner_urn=owner_urn, commentary=text_value)
+
+    return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
+
+
+async def _publish_facebook(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
+    _require_platform_user_id(account, "Facebook")
+
+    async def video_publisher():
+        return await publish_to_facebook_video(
+            access_token=token, target_id=str(account.get("platform_user_id") or ""),
+            video_url=content.video_url, message=text_value,
+            title=content.title or "Vireel", description=content.description or text_value,
+        )
+
+    async def text_publisher():
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"https://graph.facebook.com/{account.get('platform_user_id')}/feed",
+                data={"message": text_value, "access_token": token},
+            )
+        await _raise_for_status_or_502(response, "Facebook")
+        return response.json()
+
+    return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
+
+
+async def _publish_instagram_platform(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
+    ig_user_id = _require_platform_user_id(account, "Instagram")
+    image_url = getattr(content, "image_url", None)
+
+    if content.video_url:
+        return await publish_to_instagram(token, ig_user_id, content.video_url, text_value)
+    if image_url:
+        return await publish_to_instagram_image(token, ig_user_id, image_url, text_value)
+    raise HTTPException(
+        status_code=400,
+        detail="Instagram requires either video_url or image_url (text-only posts are not supported by the platform)",
+    )
+
+
+async def _resolve_youtube_video_path(content) -> str:
+    """Renvoie le chemin local du fichier vidéo à uploader (téléchargé si besoin)."""
+    video_path = (content.video_file or "").strip()
+    if video_path:
+        return video_path
+    if not content.video_url:
+        raise HTTPException(status_code=400, detail="video_file or video_url is required for YouTube publication")
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    temp_path = os.path.join(UPLOAD_DIR, f"yt_publish_{uuid.uuid4().hex}.mp4")
+    await _download_to_file(content.video_url, temp_path)
+    return temp_path
+
+
+async def _publish_youtube_platform(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
+    video_path = await _resolve_youtube_video_path(content)
+    downloaded = not (content.video_file or "").strip()  # temp file only if we downloaded it ourselves
+    try:
+        return await upload_youtube_video(token, video_path, content.title or "Vireel Short", content.description or text_value)
+    finally:
+        if downloaded:
+            _cleanup_temp_file(video_path)
+
+
+async def _publish_tiktok_platform(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
+    image_url = getattr(content, "image_url", None)
+
+    if content.video_url:
+        return await publish_to_tiktok(token, content.video_url, text_value, content.privacy_level or "PUBLIC_TO_EVERYONE")
+    if image_url:
+        image_urls = image_url if isinstance(image_url, list) else [image_url]
+        return await publish_to_tiktok_photo(token, image_urls, text_value)
+    raise HTTPException(
+        status_code=400,
+        detail="TikTok requires either video_url or image_url (text-only posts are not supported by the platform)",
+    )
+
+
+_PLATFORM_HANDLERS = {
+    "linkedin": _publish_linkedin,
+    "facebook": _publish_facebook,
+    "instagram": _publish_instagram_platform,
+    "youtube": _publish_youtube_platform,
+    "tiktok": _publish_tiktok_platform,
+}
+
+
+async def publish_post(account: Dict[str, Any], content) -> Dict[str, Any]:
+    token = await get_valid_token(account)
+    platform = str(account.get("platform") or "").lower()
+    text_value = content.text or content.caption or content.description or "Posted from Vireel"
+
+    handler = _PLATFORM_HANDLERS.get(platform)
+    if handler is None:
+        raise HTTPException(status_code=404, detail="Unsupported platform")
+    return await handler(account, token, content, text_value)
 
 
