@@ -7,6 +7,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSerif/NotoSerif-Bold.ttf"
 FONT_DIR = "fonts"
 FONT_PATH = os.path.join(FONT_DIR, "NotoSerif-Bold.ttf")
+EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
+EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
 
 def download_font_if_needed():
     """Downloads a serif font for the hook text if not present."""
@@ -221,7 +223,8 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
             '-i', img_path,
             '-filter_complex', f"[0:v][1:v]overlay={overlay_x}:{overlay_y}",
             '-c:a', 'copy',
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+            '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
+            '-pix_fmt', 'yuv420p',
             output_path
         ]
         

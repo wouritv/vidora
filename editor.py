@@ -1,5 +1,9 @@
 import os
 import json
+
+
+EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
+EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
 import re
 import subprocess
 import time
@@ -340,7 +344,8 @@ class VideoEditor:
             'ffmpeg', '-y',
             '-i', input_path,
             '-vf', filter_string,
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+            '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
+            '-pix_fmt', 'yuv420p',
             '-c:a', 'copy',
             output_path
         ]

@@ -37,6 +37,9 @@ load_dotenv()
 ASPECT_RATIO = 9 / 16
 MIN_CLIP_DURATION_SECONDS = 30
 MAX_CLIP_DURATIONS_SECOND = 90
+EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
+EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
+EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
 
 GEMINI_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between {min_clip_duration_seconds} and {max_clip_duration_seconds} seconds long.
@@ -1230,7 +1233,8 @@ def _process_frames_to_temp_video(
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{output_width}x{output_height}', '-pix_fmt', 'bgr24',
         '-r', str(fps), '-i', '-', '-c:v', 'libx264',
-        '-preset', 'fast', '-crf', '23', '-an', temp_video_output
+        '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
+        '-pix_fmt', 'yuv420p', '-an', temp_video_output
     ]
     ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -1995,8 +1999,9 @@ if __name__ == '__main__':
                     '-ss', str(start),
                     '-to', str(end),
                     '-i', input_video,
-                    '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
-                    '-c:a', 'aac',
+                    '-c:v', 'libx264', '-crf', EXPORT_VIDEO_CRF, '-preset', EXPORT_VIDEO_PRESET,
+                    '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac', '-b:a', EXPORT_AUDIO_BITRATE,
                     clip_temp_path
                 ]
                 subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

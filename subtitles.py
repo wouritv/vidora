@@ -3,6 +3,11 @@ import subprocess
 from dataclasses import dataclass
 
 
+EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
+EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
+EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
+
+
 def transcribe_audio(video_path):
     """
     Transcribe audio from a video file using faster-whisper.
@@ -273,7 +278,8 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16, 
         '-i', video_path,
         '-vf', f"subtitles='{safe_srt_path}':force_style='{style_string}'",
         '-c:a', 'copy',
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
+        '-pix_fmt', 'yuv420p',
         output_path
     ]
 

@@ -16,6 +16,7 @@ import ipaddress
 import socket
 import sys
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any
 from contextlib import asynccontextmanager
@@ -115,6 +116,7 @@ VIREEL_VIDEO_FORMAT = os.environ.get("VIREEL_VIDEO_FORMAT", "mp4,mov,avi")
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
 OUTPUT_SWEEP_INTERVAL_SECONDS = int(os.environ.get("OUTPUT_SWEEP_INTERVAL_SECONDS", str(6 * 3600)))
 OUTPUT_SWEEP_MIN_AGE_SECONDS = int(os.environ.get("OUTPUT_SWEEP_MIN_AGE_SECONDS", "1800"))
+SOCIAL_PUBLISH_SCHEDULER_INTERVAL_SECONDS = int(os.environ.get("SOCIAL_PUBLISH_SCHEDULER_INTERVAL_SECONDS", "10"))
 DISABLE_YOUTUBE_URL = os.environ.get("DISABLE_YOUTUBE_URL", "false").lower() in ("1", "true", "yes")
 HIDE_SOCIAL_PLATFORMS = os.environ.get("HIDE_SOCIAL_PLATFORMS", "false").lower() in ("1", "true", "yes")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -131,6 +133,9 @@ YT_CHUNK_SIZE = 8 * 1024 * 1024
 YT_MAX_RETRIES_PER_CHUNK = 3
 LINKEDIN_API_VERSION = os.environ.get("LINKEDIN_API_VERSION", "202607")  # YYYYMM, à mettre à jour périodiquement
 LINKEDIN_MAX_RETRIES_PER_PART = 3
+EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
+EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
+EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
 PLATFORM_CONFIG = {
     "linkedin": {
         "auth_url": "https://www.linkedin.com/oauth/v2/authorization",
@@ -349,6 +354,34 @@ def _parse_iso_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _resolve_scheduled_datetime(value: Any, timezone_name: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Already timezone-aware (offset or trailing Z)
+    if text.endswith("Z") or "+" in text[10:] or "-" in text[10:]:
+        return _parse_iso_datetime(text)
+
+    # Naive local datetime -> interpret with provided timezone
+    try:
+        naive = datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+    if naive.tzinfo is not None:
+        return naive.astimezone(timezone.utc)
+
+    tz_name = (timezone_name or "UTC").strip() or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    return naive.replace(tzinfo=tz).astimezone(timezone.utc)
 
 
 def _clamp_job_priority(value: Any) -> int:
@@ -1210,11 +1243,13 @@ async def lifespan(app: FastAPI):
         for idx in range(max(1, QUEUE_WORKER_COUNT))
     ]
     cleanup_task = asyncio.create_task(cleanup_jobs())
+    scheduler_task = asyncio.create_task(process_scheduled_social_publish_jobs())
     yield
     # Cleanup (optional: cancel worker)
     for task in worker_tasks:
         task.cancel()
     cleanup_task.cancel()
+    scheduler_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -2101,8 +2136,9 @@ def _render_keep_ranges(input_path: str, output_path: str, keep_ranges: List[tup
             "ffmpeg", "-y", "-i", input_path,
             "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
             "-af", f"aselect='{expr}',asetpts=N/SR/TB",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:v", "libx264", "-preset", EXPORT_VIDEO_PRESET, "-crf", EXPORT_VIDEO_CRF,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", EXPORT_AUDIO_BITRATE,
             output_path,
         ]
     else:
@@ -2110,7 +2146,8 @@ def _render_keep_ranges(input_path: str, output_path: str, keep_ranges: List[tup
             "ffmpeg", "-y", "-i", input_path,
             "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
             "-an",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:v", "libx264", "-preset", EXPORT_VIDEO_PRESET, "-crf", EXPORT_VIDEO_CRF,
+            "-pix_fmt", "yuv420p",
             output_path,
         ]
     _run_ffmpeg_command(cmd)
@@ -2162,8 +2199,9 @@ def _apply_speed_transform(input_path: str, output_path: str, speed_factor: floa
             "ffmpeg", "-y", "-i", input_path,
             "-filter:v", f"setpts=PTS/{round(factor, 4)}",
             "-filter:a", _atempo_chain(factor),
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:v", "libx264", "-preset", EXPORT_VIDEO_PRESET, "-crf", EXPORT_VIDEO_CRF,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", EXPORT_AUDIO_BITRATE,
             output_path,
         ]
     else:
@@ -2171,7 +2209,8 @@ def _apply_speed_transform(input_path: str, output_path: str, speed_factor: floa
             "ffmpeg", "-y", "-i", input_path,
             "-filter:v", f"setpts=PTS/{round(factor, 4)}",
             "-an",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:v", "libx264", "-preset", EXPORT_VIDEO_PRESET, "-crf", EXPORT_VIDEO_CRF,
+            "-pix_fmt", "yuv420p",
             output_path,
         ]
     _run_ffmpeg_command(cmd)
@@ -4255,6 +4294,10 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
     selected_platforms = _resolve_social_platforms(req.platforms)
     user_id = _resolve_request_user_id(req.user_id, user_id_header)
     publish_priority = await _resolve_user_job_priority(user_id)
+    scheduled_for = _resolve_scheduled_datetime(req.scheduled_date, req.timezone)
+    if req.scheduled_date and not scheduled_for:
+        raise HTTPException(status_code=400, detail="Invalid scheduled_date (expected ISO-8601)")
+    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
 
     clip = await _resolve_clip_for_social_post(req.job_id, req.clip_index)
 
@@ -4272,6 +4315,32 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
     overall_success = True
 
     for platform_name in selected_platforms:
+        if is_scheduled:
+            publish_job_id = await _insert_publish_job(
+                user_id=user_id,
+                platform=platform_name,
+                external_id="scheduled",
+                status="queued",
+                priority=publish_priority,
+                scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
+                timezone=req.timezone or "UTC",
+                payload={
+                    "source_type": "job_clip",
+                    "source_id": req.job_id,
+                    "clip_index": req.clip_index,
+                    "title": final_title,
+                    "description": final_description,
+                    "media_url": public_video_url,
+                },
+            )
+            results[platform_name] = {
+                "success": True,
+                "scheduled": True,
+                "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
+                "publish_job_id": publish_job_id,
+            }
+            continue
+
         try:
             account = await _get_social_account(user_id, platform_name)
             if not account:
@@ -5323,10 +5392,39 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str
     final_description = payload.description or row.get("caption_description") or ""
     selected_platforms = _resolve_social_platforms(payload.platforms)
     publish_priority = await _resolve_user_job_priority(user_id)
+    scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
+    if payload.scheduled_date and not scheduled_for:
+        raise HTTPException(status_code=400, detail="Invalid scheduled_date (expected ISO-8601)")
+    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
 
     results: Dict[str, Any] = {}
     overall_success = True
     for platform_name in selected_platforms:
+        if is_scheduled:
+            publish_job_id = await _insert_publish_job(
+                user_id=user_id,
+                platform=platform_name,
+                external_id="scheduled",
+                status="queued",
+                priority=publish_priority,
+                scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
+                timezone=payload.timezone or "UTC",
+                payload={
+                    "source_type": "caption",
+                    "source_id": caption_id,
+                    "title": final_title,
+                    "description": final_description,
+                    "media_url": media_url,
+                },
+            )
+            results[platform_name] = {
+                "success": True,
+                "scheduled": True,
+                "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
+                "publish_job_id": publish_job_id,
+            }
+            continue
+
         publish_job_id = await _insert_publish_job(
             user_id=user_id,
             platform=platform_name,
@@ -5366,7 +5464,7 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str
                 "publish_job_id": publish_job_id,
             }
 
-    if is_supabase_configured():
+    if is_supabase_configured() and not is_scheduled:
         platform_count_done = sum(1 for v in results.values() if v.get("success"))
         if platform_count_done > 0:
             _pub_done_cost = calculate_credits_for_operation(
@@ -5468,10 +5566,39 @@ async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Dep
     final_description = payload.description or row.get("reel_description") or ""
     selected_platforms = _resolve_social_platforms(payload.platforms)
     publish_priority = await _resolve_user_job_priority(user_id)
+    scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
+    if payload.scheduled_date and not scheduled_for:
+        raise HTTPException(status_code=400, detail="Invalid scheduled_date (expected ISO-8601)")
+    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
 
     results: Dict[str, Any] = {}
     overall_success = True
     for platform_name in selected_platforms:
+        if is_scheduled:
+            publish_job_id = await _insert_publish_job(
+                user_id=user_id,
+                platform=platform_name,
+                external_id="scheduled",
+                status="queued",
+                priority=publish_priority,
+                scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
+                timezone=payload.timezone or "UTC",
+                payload={
+                    "source_type": "reel",
+                    "source_id": reel_id,
+                    "title": final_title,
+                    "description": final_description,
+                    "media_url": media_url,
+                },
+            )
+            results[platform_name] = {
+                "success": True,
+                "scheduled": True,
+                "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
+                "publish_job_id": publish_job_id,
+            }
+            continue
+
         try:
             account = await _get_social_account(user_id, platform_name)
             if not account:
@@ -5502,7 +5629,7 @@ async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Dep
             }
 
     # Debit credits after publications (best-effort)
-    if is_supabase_configured():
+    if is_supabase_configured() and not is_scheduled:
         platform_count_done = sum(1 for v in results.values() if v.get("success"))
         if platform_count_done > 0:
             _pub_done_cost = calculate_credits_for_operation(
@@ -5807,9 +5934,12 @@ async def _insert_publish_job(
     status: str,
     error_message: Optional[str] = None,
     priority: int = DEFAULT_JOB_PRIORITY,
+    scheduled_for: Optional[str] = None,
+    timezone: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     client = await supabase_get_client()
-    payload: Dict[str, Any] = {
+    insert_payload: Dict[str, Any] = {
         "user_id": user_id,
         "platform": platform,
         "external_id": external_id,
@@ -5817,12 +5947,98 @@ async def _insert_publish_job(
         "priority": _clamp_job_priority(priority),
     }
     if error_message:
-        payload["error_message"] = error_message
+        insert_payload["error_message"] = error_message
+    if scheduled_for:
+        insert_payload["scheduled_for"] = scheduled_for
+    if timezone:
+        insert_payload["timezone"] = timezone
+    if payload is not None:
+        insert_payload["payload"] = payload
     if status in {"done", "failed"}:
-        payload["completed_at"] = _utcnow_iso()
-    response = await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).insert(payload).execute()
+        insert_payload["completed_at"] = _utcnow_iso()
+    response = await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).insert(insert_payload).execute()
     rows = response.data or []
     return str(rows[0].get("id")) if rows and rows[0].get("id") is not None else None
+
+
+async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
+    job_id = str(job_row.get("id") or "")
+    user_id = str(job_row.get("user_id") or "")
+    platform = str(job_row.get("platform") or "").lower()
+    raw_payload = job_row.get("payload") or {}
+    task_payload = raw_payload if isinstance(raw_payload, dict) else {}
+
+    if not job_id or not user_id or not platform:
+        return
+
+    try:
+        await _update_publish_job_status(job_id, "processing", error_message=None)
+
+        account = await _get_social_account(user_id, platform)
+        if not account:
+            raise HTTPException(status_code=404, detail=f"No connected {platform} account found")
+
+        media_url = str(task_payload.get("media_url") or "").strip()
+        if not media_url:
+            raise HTTPException(status_code=400, detail="No media URL available for scheduled publish")
+
+        description = str(task_payload.get("description") or "")
+        publish_payload = PublishRequest(
+            user_id=user_id,
+            title=str(task_payload.get("title") or "Vireel"),
+            description=description,
+            text=description,
+            caption=description,
+            video_url=media_url,
+        )
+
+        platform_result = await publish_post(account, publish_payload)
+        external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
+        await _update_publish_job_status(job_id, "done", external_id=external_id, error_message=None)
+
+        if is_supabase_configured():
+            done_cost = calculate_credits_for_operation(
+                estimate_publication_cost_usd(platform_count=1, video_size_gb=0.5)
+            )
+            done_credits = done_cost["final_credits"]
+            await supabase_deduct_user_credits(user_id, done_credits)
+            await supabase_insert_user_data_history(
+                user_id=user_id,
+                credit=done_credits,
+                storage=0.0,
+                operation="output",
+                operation_type="publications",
+                operation_id=str(task_payload.get("source_id") or job_id),
+            )
+    except Exception as exc:
+        await _update_publish_job_status(job_id, "failed", error_message=str(exc))
+
+
+async def process_scheduled_social_publish_jobs() -> None:
+    while True:
+        try:
+            if not is_supabase_configured():
+                await asyncio.sleep(max(3, SOCIAL_PUBLISH_SCHEDULER_INTERVAL_SECONDS))
+                continue
+
+            client = await supabase_get_client()
+            now_iso = _utcnow_iso()
+            response = (
+                await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE)
+                .select("*")
+                .eq("status", "queued")
+                .lte("scheduled_for", now_iso)
+                .order("scheduled_for", desc=False)
+                .limit(20)
+                .execute()
+            )
+
+            for row in (response.data or []):
+                await _execute_scheduled_publish_job(row)
+        except Exception as exc:
+            logger.warning("Scheduled publish worker error: %s", exc, exc_info=True)
+
+        await asyncio.sleep(max(3, SOCIAL_PUBLISH_SCHEDULER_INTERVAL_SECONDS))
 
 
 async def _update_publish_job_status(
