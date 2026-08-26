@@ -5999,7 +5999,7 @@ async def select_facebook_page(payload: SelectFacebookPageRequest):
 
     return {
         "success": True,
-        "message": f"Connected Facebook page '{payload.page_name}'",
+        "message": f"Connected Facebook page '{identity.get('name', 'Facebook Page')}'",
         "platform": "facebook",
         "page_id": payload.page_id,
     }
