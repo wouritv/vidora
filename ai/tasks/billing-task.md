@@ -22,7 +22,7 @@ AMAZON_S3_LIST_REQUEST_PRICE=0.0004
 
 - Si l'operation necessite de telecharger une video sur Youtube, il faudra integrer la facturation DATAIMPUILSE en considerant cette variable qui est le prix par Go en USD : DATA_IMPULSE_PRICE_BY_GO=1
 
-- Le temps de traitement d'une operation est facturé en fonction du temps d'execution de l'operation. Il faudra donc integrer le prix par minute en USD : VIREL_VPS_PRICE_BY_MINUTE=0.01
+- Le temps de traitement d'une operation est facturé en fonction du temps d'execution de l'operation. Il faudra donc integrer le prix par minute en USD : VIREEL_VPS_PRICE_BY_MINUTE=0.01
 
 - pour les operations qui vont utiliser Assembly, OpenIA ou Gemini, il faudra integrer les prix par operation en USD pour chaque service par minute. Voici les variables d'environnements correspondantes :
   ASSEMBLY_ESTIMATE_COST_PER_MINUTE=0.21

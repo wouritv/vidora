@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote, urlencode
 from urllib.request import Request as UrlRequest, urlopen
 from starlette.background import BackgroundTask
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query, Depends
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -198,6 +198,22 @@ if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY manquant dans l'environnement")
 
 _oauth_serializer = URLSafeTimedSerializer(SECRET_KEY)
+
+router = APIRouter()
+
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN")
+if not FRONTEND_ORIGIN:
+    raise RuntimeError(
+        "FRONTEND_ORIGIN must be set (exact frontend origin, e.g. 'https://app.vireel.com') "
+        "-- postMessage must never target '*' when carrying selection data."
+    )
+
+_PAGE_SELECTION_TTL_SECONDS = 600  # 10 minutes pour que l'utilisateur choisisse une page
+
+_page_selection_serializer = URLSafeTimedSerializer(
+    os.environ["OAUTH_STATE_SECRET"],  # réutilise ta clé secrète OAuth existante
+    salt="fb-page-selection",
+)
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -5550,30 +5566,62 @@ def _resolve_platform_config(platform: str) -> Dict[str, Any]:
     return config
 
 
-def _oauth_popup_response(success: bool, platform: str, message: Optional[str] = None, page_selection_data: Optional[Dict[str, Any]] = None) -> HTMLResponse:
+def _oauth_popup_response(
+    success: bool,
+    platform: str,
+    message: Optional[str] = None,
+    page_selection_data: Optional[Dict[str, Any]] = None,
+) -> HTMLResponse:
     if page_selection_data:
-        # Pour la sélection de pages Facebook
-        payload = {
-            "type": "oauth_page_selection",
-            "platform": platform,
-            "pages": page_selection_data.get("pages", []),
-            "user_token": page_selection_data.get("user_token"),
-            "user_token_expires_in": page_selection_data.get("user_token_expires_in"),
-        }
+        payload = _build_page_selection_payload(platform, page_selection_data)
     else:
         payload = {
             "type": "oauth_success" if success else "oauth_error",
             "platform": platform,
             "message": message or "",
         }
+
     return HTMLResponse(
         f"""
         <script>
-          window.opener && window.opener.postMessage({json.dumps(payload)}, '*');
+          window.opener && window.opener.postMessage({json.dumps(payload)}, {json.dumps(FRONTEND_ORIGIN)});
           window.close();
         </script>
         """
     )
+
+
+def _build_page_selection_payload(platform: str, page_selection_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sépare strictement ce qui part au navigateur (affichage seulement) de ce
+    qui reste signé côté serveur (les tokens réels).
+    """
+    raw_pages: List[Dict[str, Any]] = page_selection_data.get("pages", [])
+
+    display_pages = [
+        {
+            "page_id": p.get("page_id"),
+            "page_name": p.get("page_name"),
+            "page_picture": p.get("page_picture"),
+            "page_category": p.get("page_category"),
+        }
+        for p in raw_pages
+    ]
+
+    selection_token = _page_selection_serializer.dumps({
+        "platform": platform,
+        # Map page_id -> page_access_token, jamais envoyée au client.
+        "pages": {p.get("page_id"): p.get("page_access_token") for p in raw_pages},
+        "user_token": page_selection_data.get("user_token"),
+        "user_token_expires_in": page_selection_data.get("user_token_expires_in"),
+    })
+
+    return {
+        "type": "oauth_page_selection",
+        "platform": platform,
+        "pages": display_pages,
+        "selection_token": selection_token,
+    }
 
 
 
@@ -5892,31 +5940,38 @@ async def list_publish_jobs(
         raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
 
 
+class SelectFacebookPageRequest(BaseModel):
+    selection_token: str
+    page_id: str
+
+
 @app.post("/api/auth/facebook/select-page")
-async def facebook_select_page(
-    payload: FacebookPageSelectionRequest,
-    user_id: str = Depends(get_user_id_header),
-):
-    """
-    L'utilisateur a sélectionné une page Facebook à connecter.
-    Stocke le page_id + page_access_token (pas le token utilisateur).
-    """
+async def select_facebook_page(payload: SelectFacebookPageRequest, current_user=Depends(get_current_user)):
+    try:
+        data = _page_selection_serializer.loads(payload.selection_token, max_age=_PAGE_SELECTION_TTL_SECONDS)
+    except SignatureExpired:
+        raise HTTPException(status_code=400, detail="Page selection expired, please reconnect Facebook")
+    except BadSignature:
+        raise HTTPException(status_code=400, detail="Invalid selection token")
 
-    if not payload.page_access_token:
-        raise HTTPException(status_code=400, detail="Missing page_access_token")
+    if data.get("platform") != "facebook":
+        raise HTTPException(status_code=400, detail="Invalid selection token platform")
 
-    # Stocke le compte avec :
-    # - platform_user_id = page_id
-    # - access_token_encrypted = page_access_token (long-lived)
+    page_token = (data.get("pages") or {}).get(payload.page_id)
+    if not page_token:
+        raise HTTPException(status_code=400, detail="This page was not part of the original selection")
+
+    identity = await fetch_platform_identity("facebook", page_token)
+
     await _upsert_social_account(
-        user_id=user_id,
+        user_id=current_user.id,
         platform="facebook",
-        access_token=payload.page_access_token,
-        refresh_token=None,  # Les tokens de page n'ont pas de refresh token
-        expires_in=payload.user_token_expires_in or 5184000,  # ~60 jours par défaut
+        access_token=page_token,
+        refresh_token=None,  # les Page tokens n'ont pas de refresh_token classique
+        expires_in=int(data.get("user_token_expires_in") or 5_184_000),
         platform_user_id=payload.page_id,
-        platform_account_name=payload.page_name,
-        scopes="pages_manage_posts,pages_read_engagement",  # Scopes réels pour les pages
+        platform_account_name=identity.get("name", "Facebook Page"),
+        scopes="pages_manage_posts,pages_read_engagement",
     )
 
     return {
@@ -6401,7 +6456,26 @@ async def upload_youtube_video(
 # TikTok
 # --------------------------------------------------------------------------
 
+TIKTOK_DIRECT_POST_ENABLED = os.environ.get("TIKTOK_DIRECT_POST_ENABLED", "false").strip().lower() == "true"
+# Statuts terminaux considérés comme un succès selon le flow utilisé.
+_TIKTOK_DIRECT_SUCCESS_STATUSES = ("PUBLISH_COMPLETE",)
+# En mode inbox, la vidéo est traitée puis déposée en boîte de réception ;
+# PUBLISH_COMPLETE ne surviendra que si/quand le créateur termine dans l'app.
+_TIKTOK_INBOX_SUCCESS_STATUSES = ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX")
+
+
 async def publish_to_tiktok(access_token: str, video_url: str, caption: str, privacy_level: str = "PUBLIC_TO_EVERYONE"):
+    """
+    Point d'entrée unique utilisé par publish_post. Choisit automatiquement
+    le flow direct post ou inbox selon TIKTOK_DIRECT_POST_ENABLED.
+    """
+    if TIKTOK_DIRECT_POST_ENABLED:
+        return await _publish_to_tiktok_direct(access_token, video_url, caption, privacy_level)
+    return await _publish_to_tiktok_inbox(access_token, video_url, caption)
+
+
+async def _publish_to_tiktok_direct(access_token: str, video_url: str, caption: str, privacy_level: str) -> Dict[str, Any]:
+    """Publication directe sur le profil — nécessite le scope video.publish (app auditée)."""
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     payload = {
         "post_info": {
@@ -6422,7 +6496,44 @@ async def publish_to_tiktok(access_token: str, video_url: str, caption: str, pri
     publish_id = ((init_data.get("data") or {}).get("publish_id") or "").strip()
     if not publish_id:
         raise HTTPException(status_code=502, detail="TikTok publish_id missing")
-    return await poll_tiktok_status(access_token, publish_id)
+
+    result = await poll_tiktok_status(access_token, publish_id, success_statuses=_TIKTOK_DIRECT_SUCCESS_STATUSES)
+    result["mode"] = "direct_post"
+    return result
+
+
+async def _publish_to_tiktok_inbox(access_token: str, video_url: str, caption: str) -> Dict[str, Any]:
+    """
+    Dépose la vidéo dans la boîte de réception TikTok du créateur — nécessite
+    seulement video.upload. Le créateur doit ouvrir l'app pour finaliser la
+    publication. NOTE: cet endpoint ne supporte pas de caption/titre via
+    l'API ; le créateur devra la saisir manuellement dans l'app.
+    """
+    if caption:
+        logger.info("TikTok inbox upload: la légende ne peut pas être envoyée via l'API, le créateur devra la saisir dans l'app.")
+
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    payload = {"source_info": {"source": "PULL_FROM_URL", "video_url": video_url}}
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        init_response = await client.post(
+            "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/", headers=headers, json=payload,
+        )
+    await _raise_for_status_or_502(init_response, "TikTok")
+
+    init_data = init_response.json()
+    if init_data.get("error", {}).get("code") != "ok":
+        raise HTTPException(status_code=502, detail=f"TikTok inbox upload init failed: {init_data}")
+
+    publish_id = ((init_data.get("data") or {}).get("publish_id") or "").strip()
+    if not publish_id:
+        raise HTTPException(status_code=502, detail="TikTok publish_id missing")
+
+    result = await poll_tiktok_status(access_token, publish_id, success_statuses=_TIKTOK_INBOX_SUCCESS_STATUSES)
+    result["mode"] = "inbox"
+    if result.get("status") == "SEND_TO_USER_INBOX":
+        result["note"] = "Video sent to the creator's TikTok inbox; they must open the app to finish posting."
+    return result
 
 
 async def publish_to_tiktok_photo(token: str, image_urls: List[str], caption: str) -> Dict[str, Any]:
@@ -6439,7 +6550,9 @@ async def publish_to_tiktok_photo(token: str, image_urls: List[str], caption: st
     return response.json()
 
 
-async def poll_tiktok_status(access_token: str, publish_id: str, max_attempts: int = 20):
+async def poll_tiktok_status(
+    access_token: str, publish_id: str, max_attempts: int = 20, success_statuses=("PUBLISH_COMPLETE",),
+):
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     delay = 2.0
     for _ in range(max_attempts):
@@ -6450,7 +6563,7 @@ async def poll_tiktok_status(access_token: str, publish_id: str, max_attempts: i
         await _raise_for_status_or_502(response, "TikTok")
         data = response.json().get("data") or {}
         status = data.get("status")
-        if status == "PUBLISH_COMPLETE":
+        if status in success_statuses:
             return {"success": True, "publish_id": publish_id, "status": status}
         if status == "FAILED":
             return {"success": False, "publish_id": publish_id, "status": status, "error": data.get("fail_reason") or "unknown"}
@@ -6503,7 +6616,6 @@ async def get_facebook_long_lived_token(short_lived_token: str) -> str:
     if not token:
         raise HTTPException(status_code=502, detail="Facebook did not return a long-lived access_token")
     return token
-
 
 # --------------------------------------------------------------------------
 # Instagram (Login direct -> graph.instagram.com)

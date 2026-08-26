@@ -20,7 +20,7 @@ AMAZON_S3_POST_REQUEST_PRICE    = float(os.environ.get("AMAZON_S3_POST_REQUEST_P
 AMAZON_S3_LIST_REQUEST_PRICE    = float(os.environ.get("AMAZON_S3_LIST_REQUEST_PRICE",    "0.0004"))
 
 DATA_IMPULSE_PRICE_BY_GO        = float(os.environ.get("DATA_IMPULSE_PRICE_BY_GO",        "1"))
-VIREL_VPS_PRICE_BY_MINUTE       = float(os.environ.get("VIREL_VPS_PRICE_BY_MINUTE",       "0.01"))
+VIREEL_VPS_PRICE_BY_MINUTE       = float(os.environ.get("VIREEL_VPS_PRICE_BY_MINUTE",       "0.01"))
 
 ASSEMBLY_ESTIMATE_COST_PER_MINUTE = float(os.environ.get("ASSEMBLY_ESTIMATE_COST_PER_MINUTE", "0.21"))
 OPEN_IA_ESTIMATE_COST_PER_MINUTE  = float(os.environ.get("OPEN_IA_ESTIMATE_COST_PER_MINUTE",  "0.15"))
@@ -76,7 +76,7 @@ def estimate_reel_cost_usd(
         + 1 * AMAZON_S3_LIST_REQUEST_PRICE
     )
 
-    vps_usd = duration_minutes * VIREL_VPS_PRICE_BY_MINUTE
+    vps_usd = duration_minutes * VIREEL_VPS_PRICE_BY_MINUTE
 
     dataimpulse_usd = (
         youtube_download_gb * DATA_IMPULSE_PRICE_BY_GO
@@ -114,7 +114,7 @@ def estimate_caption_cost_usd(
         + 1 * AMAZON_S3_PUT_REQUEST_PRICE
         + 2 * AMAZON_S3_GET_REQUEST_PRICE
     )
-    vps_usd      = duration_minutes * VIREL_VPS_PRICE_BY_MINUTE
+    vps_usd      = duration_minutes * VIREEL_VPS_PRICE_BY_MINUTE
     assembly_usd = duration_minutes * ASSEMBLY_ESTIMATE_COST_PER_MINUTE if uses_assembly else 0.0
     openai_usd   = duration_minutes * OPEN_IA_ESTIMATE_COST_PER_MINUTE  if uses_openai  else 0.0
     gemini_usd   = duration_minutes * GEMINI_ESTIMATE_COST_PER_MINUTE   if uses_gemini  else 0.0
@@ -140,7 +140,7 @@ def estimate_publication_cost_usd(
         video_size_gb * AMAZON_S3_GO_PRICE
         + platform_count * AMAZON_S3_GET_REQUEST_PRICE
     )
-    vps_usd   = 1.0 * VIREL_VPS_PRICE_BY_MINUTE
+    vps_usd   = 1.0 * VIREEL_VPS_PRICE_BY_MINUTE
     total_usd = s3_usd + vps_usd
 
     return {
