@@ -4207,13 +4207,32 @@ def _resolve_social_platforms(platforms: Optional[List[str]]) -> List[str]:
     return deduped
 
 
-def _resolve_local_video_path(job_id: str, video_ref: str, clip_index: int) -> str:
+def _resolve_local_video_path(job_id: str, video_ref: str, clip_index: int) -> Optional[str]:
     ref = (video_ref or "").split("?")[0]
     filename = ref.split("/")[-1] or f"{job_id}_{clip_index + 1}.mp4"
     candidate = os.path.join(OUTPUT_DIR, job_id, filename)
     if not os.path.exists(candidate):
-        raise HTTPException(status_code=404, detail=f"Video file not found: {candidate}")
+        return None
     return candidate
+
+
+async def _resolve_clip_for_social_post(job_id: str, clip_index: int) -> Dict[str, Any]:
+    """Resolve clip data from live in-memory job first, then persisted metadata fallback."""
+    job = jobs.get(job_id)
+    if job and "result" in job and isinstance(job["result"].get("clips"), list):
+        try:
+            return job["result"]["clips"][clip_index]
+        except Exception:
+            pass
+
+    _, metadata = await _get_or_build_job_metadata(job_id, clip_index)
+    shorts = (metadata or {}).get("shorts") or []
+    if not isinstance(shorts, list) or clip_index < 0 or clip_index >= len(shorts):
+        raise HTTPException(status_code=404, detail="Job not found")
+    clip = shorts[clip_index]
+    if not isinstance(clip, dict):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    return clip
 
 
 def _resolve_public_video_url(video_ref: str, request: Request, job_id: str, clip_index: int) -> str:
@@ -4232,22 +4251,12 @@ def _resolve_public_video_url(video_ref: str, request: Request, job_id: str, cli
     return f"{base_url}/videos/{job_id}/{ref}"
 
 @app.post("/api/social/post")
-async def post_to_socials(req: SocialPostRequest, request: Request):
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[req.job_id]
-    if 'result' not in job or 'clips' not in job['result']:
-        raise HTTPException(status_code=400, detail="Job result not available")
-        
+async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: str = Depends(get_user_id_header)):
     selected_platforms = _resolve_social_platforms(req.platforms)
-    user_id = _resolve_request_user_id(req.user_id, request)
+    user_id = _resolve_request_user_id(req.user_id, user_id_header)
     publish_priority = await _resolve_user_job_priority(user_id)
 
-    try:
-        clip = job['result']['clips'][req.clip_index]
-    except Exception:
-        raise HTTPException(status_code=404, detail="Clip not found")
+    clip = await _resolve_clip_for_social_post(req.job_id, req.clip_index)
 
     video_ref = str(clip.get('video_url') or '').strip()
     if not video_ref:
@@ -4278,7 +4287,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
                 text=final_description,
                 caption=final_description,
                 video_url=public_video_url,
-                video_file=local_video_path,
+                video_file=local_video_path or "",
             )
 
             platform_result = await publish_post(account, publish_payload)

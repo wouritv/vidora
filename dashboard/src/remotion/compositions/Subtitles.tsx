@@ -81,34 +81,13 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
     extrapolateRight: "clamp",
   });
   const activeIndex = getActiveWordIndex(block.words, currentTimeMs);
-  const firstWord = block.words[0];
-  const blockStyle = {
-    ...style,
-    positionX: Number.isFinite(Number(firstWord?.linePositionX)) ? Number(firstWord?.linePositionX) : style.positionX,
-    positionY: Number.isFinite(Number(firstWord?.linePositionY)) ? Number(firstWord?.linePositionY) : style.positionY,
-    fontSize: Number.isFinite(Number(firstWord?.lineFontSize)) ? Number(firstWord?.lineFontSize) : style.fontSize,
-    fontFamily: String(firstWord?.lineFontFamily || style.fontFamily || "Arial"),
-    fontColor: String(firstWord?.lineFontColor || style.fontColor),
-    highlightColor: String(firstWord?.lineHighlightColor || style.highlightColor),
-    animation: firstWord?.lineAnimation || style.animation,
-    bold: typeof firstWord?.lineBold === "boolean" ? firstWord.lineBold : style.bold,
-    italic: typeof firstWord?.lineItalic === "boolean" ? firstWord.lineItalic : style.italic,
-    borderColor: String(firstWord?.lineBorderColor || style.borderColor),
-    borderWidth: Number.isFinite(Number(firstWord?.lineBorderWidth)) ? Number(firstWord?.lineBorderWidth) : style.borderWidth,
-    bgColor: String(firstWord?.lineBgColor || style.bgColor),
-    bgOpacity: Number.isFinite(Number(firstWord?.lineBgOpacity)) ? Number(firstWord?.lineBgOpacity) : style.bgOpacity,
-    textShadowColor: String(firstWord?.lineTextShadowColor || style.textShadowColor),
-    shadowBlur: Number.isFinite(Number(firstWord?.lineShadowBlur)) ? Number(firstWord?.lineShadowBlur) : style.shadowBlur,
-    shadowOffsetX: Number.isFinite(Number(firstWord?.lineShadowOffsetX)) ? Number(firstWord?.lineShadowOffsetX) : style.shadowOffsetX,
-    shadowOffsetY: Number.isFinite(Number(firstWord?.lineShadowOffsetY)) ? Number(firstWord?.lineShadowOffsetY) : style.shadowOffsetY,
-    textCase: firstWord?.lineTextCase || style.textCase,
-  };
-  const blockFontFamily = String(firstWord?.lineFontFamily || style.fontFamily || "Arial");
+  const blockStyle = style;
+  const blockFontFamily = String(style.fontFamily || "Arial");
   const fontStack = getFontStack(blockFontFamily);
   const blockPositionX = blockStyle.positionX;
   const blockPositionY = blockStyle.positionY;
   const blockFontSize = blockStyle.fontSize;
-  const blockEmoji = typeof firstWord?.lineEmoji === "string" ? firstWord.lineEmoji.trim() : "";
+  const blockEmoji = "";
 
   const hasBg = blockStyle.bgOpacity > 0;
   const bgStyle: React.CSSProperties = hasBg
@@ -137,7 +116,7 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           display: "flex",
           flexWrap: "wrap",
           justifyContent: "center",
-          gap: "6px 8px",
+          gap: "10px 14px",
           maxWidth: "85%",
           boxShadow: flashPulse > 0
             ? `0 0 ${Math.round(26 * flashPulse)}px rgba(16,185,129,${0.45 * flashPulse})`
@@ -379,6 +358,8 @@ const WordSpan: React.FC<WordSpanProps> = ({
           fontSize,
           fontWeight: style.bold ? 700 : 500,
           fontStyle: style.italic ? "italic" : "normal",
+          letterSpacing: "0.02em",
+          lineHeight: 1.28,
           color: animation === "karaoke" && isActive ? undefined : color,
           textShadow: combinedShadow,
           transform,

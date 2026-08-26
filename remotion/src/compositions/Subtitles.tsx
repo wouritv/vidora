@@ -100,7 +100,7 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           display: "flex",
           flexWrap: "wrap",
           justifyContent: "center",
-          gap: "6px 8px",
+          gap: "10px 14px",
           maxWidth: "85%",
           ...bgStyle,
         }}
@@ -287,6 +287,8 @@ const WordSpan: React.FC<WordSpanProps> = ({
           fontSize: style.fontSize,
           fontWeight: style.bold ? 700 : 500,
           fontStyle: style.italic ? "italic" : "normal",
+          letterSpacing: "0.02em",
+          lineHeight: 1.28,
           color: animation === "karaoke" && isActive ? undefined : color,
           textShadow:
             animation === "karaoke"
