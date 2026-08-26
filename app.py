@@ -144,7 +144,7 @@ PLATFORM_CONFIG = {
         "token_url": "https://graph.facebook.com/v19.0/oauth/access_token",
         "client_id": os.getenv("FACEBOOK_CLIENT_ID"),
         "client_secret": os.getenv("FACEBOOK_CLIENT_SECRET"),
-        "scopes": ["pages_manage_posts", "pages_read_engagement"],
+        "scopes": ["pages_show_list", "pages_manage_posts", "pages_read_engagement"],
     },
     "instagram": {
         "auth_url": "https://www.instagram.com/oauth/authorize",
@@ -6107,11 +6107,20 @@ async def callback(platform: str, code: Optional[str] = None, state: str = "", e
                             "pages": pages,
                             "user_token": token_data["access_token"],
                             "user_token_expires_in": token_data.get("expires_in", 5184000),
+                            "user_id": state_data.get("user_id"),
                         }
                     )
+                return _oauth_popup_response(
+                    False,
+                    key,
+                    "No manageable Facebook Pages found. Ensure you are Page admin/editor and grant pages_show_list, pages_manage_posts, pages_read_engagement.",
+                )
             except Exception as e:
-                # En cas d'erreur, on continue avec le fallback utilisateur
-                print(f"⚠️ Erreur lors de la récupération des pages Facebook: {e}")
+                return _oauth_popup_response(
+                    False,
+                    key,
+                    f"Facebook pages fetch failed: {e}",
+                )
 
         identity = await fetch_platform_identity(key, token_data["access_token"])
         await _upsert_social_account(
