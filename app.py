@@ -222,11 +222,12 @@ _PAGE_SELECTION_TTL_SECONDS = 600  # 10 minutes pour que l'utilisateur choisisse
 
 _oauth_state_secret = os.environ.get("OAUTH_STATE_SECRET")
 if not _oauth_state_secret:
+    # Keep startup resilient: reuse SECRET_KEY when a dedicated OAuth state secret is absent.
+    _oauth_state_secret = SECRET_KEY
     if _is_pytest_runtime():
-        _oauth_state_secret = SECRET_KEY
         logger.warning("OAUTH_STATE_SECRET not set; using SECRET_KEY as test fallback")
     else:
-        raise RuntimeError("OAUTH_STATE_SECRET must be set")
+        logger.warning("OAUTH_STATE_SECRET not set; using SECRET_KEY fallback")
 
 _page_selection_serializer = URLSafeTimedSerializer(
     _oauth_state_secret,  # réutilise ta clé secrète OAuth existante
@@ -5632,6 +5633,7 @@ def _build_page_selection_payload(platform: str, page_selection_data: Dict[str, 
         "pages": {p.get("page_id"): p.get("page_access_token") for p in raw_pages},
         "user_token": page_selection_data.get("user_token"),
         "user_token_expires_in": page_selection_data.get("user_token_expires_in"),
+        "user_id": page_selection_data.get("user_id"),
     })
 
     return {
@@ -5640,7 +5642,6 @@ def _build_page_selection_payload(platform: str, page_selection_data: Dict[str, 
         "pages": display_pages,
         "selection_token": selection_token,
     }
-
 
 
 def _public_request_base_url(request: Request) -> str:
@@ -5964,7 +5965,7 @@ class SelectFacebookPageRequest(BaseModel):
 
 
 @app.post("/api/auth/facebook/select-page")
-async def select_facebook_page(payload: SelectFacebookPageRequest, current_user=Depends(get_current_user)):
+async def select_facebook_page(payload: SelectFacebookPageRequest):
     try:
         data = _page_selection_serializer.loads(payload.selection_token, max_age=_PAGE_SELECTION_TTL_SECONDS)
     except SignatureExpired:
@@ -5975,6 +5976,10 @@ async def select_facebook_page(payload: SelectFacebookPageRequest, current_user=
     if data.get("platform") != "facebook":
         raise HTTPException(status_code=400, detail="Invalid selection token platform")
 
+    user_id = data.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid selection token: missing user_id")
+
     page_token = (data.get("pages") or {}).get(payload.page_id)
     if not page_token:
         raise HTTPException(status_code=400, detail="This page was not part of the original selection")
@@ -5982,7 +5987,7 @@ async def select_facebook_page(payload: SelectFacebookPageRequest, current_user=
     identity = await fetch_platform_identity("facebook", page_token)
 
     await _upsert_social_account(
-        user_id=current_user.id,
+        user_id=user_id,
         platform="facebook",
         access_token=page_token,
         refresh_token=None,  # les Page tokens n'ont pas de refresh_token classique
