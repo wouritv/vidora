@@ -6488,7 +6488,15 @@ async def upload_youtube_video(
 # TikTok
 # --------------------------------------------------------------------------
 
+# Tant que l'app n'a pas passé l'audit TikTok, seul le scope video.upload est
+# accordé -> on doit utiliser l'endpoint "inbox" (dépôt dans la boîte de
+# réception du créateur, qui doit finaliser lui-même la publication dans
+# l'app). video.publish (endpoint /video/init/, publication directe) ne sera
+# disponible qu'une fois l'app passée en production/auditée par TikTok.
+# Passe TIKTOK_DIRECT_POST_ENABLED=true dans l'environnement une fois
+# l'audit validé et le scope video.publish accordé.
 TIKTOK_DIRECT_POST_ENABLED = os.environ.get("TIKTOK_DIRECT_POST_ENABLED", "false").strip().lower() == "true"
+
 # Statuts terminaux considérés comme un succès selon le flow utilisé.
 _TIKTOK_DIRECT_SUCCESS_STATUSES = ("PUBLISH_COMPLETE",)
 # En mode inbox, la vidéo est traitée puis déposée en boîte de réception ;
@@ -6507,31 +6515,104 @@ async def publish_to_tiktok(access_token: str, video_url: str, caption: str, pri
 
 
 async def _publish_to_tiktok_direct(access_token: str, video_url: str, caption: str, privacy_level: str) -> Dict[str, Any]:
-    """Publication directe sur le profil — nécessite le scope video.publish (app auditée)."""
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-    payload = {
-        "post_info": {
-            "title": caption, "privacy_level": privacy_level, "disable_duet": False,
-            "disable_comment": False, "disable_stitch": False,
-            "brand_content_toggle": False, "brand_organic_toggle": False,
-        },
-        "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
-    }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        init_response = await client.post("https://open.tiktokapis.com/v2/post/publish/video/init/", headers=headers, json=payload)
-    await _raise_for_status_or_502(init_response, "TikTok")
+    """
+    Publication directe sur le profil — nécessite le scope video.publish
+    (app auditée). Utilise FILE_UPLOAD (téléchargement local + envoi par
+    chunks) plutôt que PULL_FROM_URL, pour ne jamais dépendre de la
+    vérification de domaine TikTok (utile notamment pour des URLs S3 sur
+    un domaine partagé qu'on ne peut pas prouver posséder).
+    """
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    temp_path = os.path.join(UPLOAD_DIR, f"tiktok_publish_{uuid.uuid4().hex}.mp4")
+    await _download_to_file(video_url, temp_path)
 
-    init_data = init_response.json()
-    if init_data.get("error", {}).get("code") != "ok":
-        raise HTTPException(status_code=502, detail=f"TikTok publish init failed: {init_data}")
+    try:
+        file_size = os.path.getsize(temp_path)
+        chunk_size, total_chunk_count = _tiktok_compute_chunks(file_size)
 
-    publish_id = ((init_data.get("data") or {}).get("publish_id") or "").strip()
-    if not publish_id:
-        raise HTTPException(status_code=502, detail="TikTok publish_id missing")
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        init_payload = {
+            "post_info": {
+                "title": caption, "privacy_level": privacy_level, "disable_duet": False,
+                "disable_comment": False, "disable_stitch": False,
+                "brand_content_toggle": False, "brand_organic_toggle": False,
+            },
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": file_size,
+                "chunk_size": chunk_size,
+                "total_chunk_count": total_chunk_count,
+            },
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            init_response = await client.post(
+                "https://open.tiktokapis.com/v2/post/publish/video/init/", headers=headers, json=init_payload,
+            )
+        await _raise_for_status_or_502(init_response, "TikTok")
 
-    result = await poll_tiktok_status(access_token, publish_id, success_statuses=_TIKTOK_DIRECT_SUCCESS_STATUSES)
-    result["mode"] = "direct_post"
-    return result
+        init_data = init_response.json()
+        if init_data.get("error", {}).get("code") != "ok":
+            raise HTTPException(status_code=502, detail=f"TikTok publish init failed: {init_data}")
+
+        data = init_data.get("data") or {}
+        publish_id = (data.get("publish_id") or "").strip()
+        upload_url = data.get("upload_url")
+        if not publish_id or not upload_url:
+            raise HTTPException(status_code=502, detail="TikTok direct post init response missing publish_id or upload_url")
+
+        await _tiktok_upload_file_chunks(upload_url, temp_path, file_size, chunk_size, total_chunk_count)
+
+        result = await poll_tiktok_status(access_token, publish_id, success_statuses=_TIKTOK_DIRECT_SUCCESS_STATUSES)
+        result["mode"] = "direct_post"
+        return result
+    finally:
+        _cleanup_temp_file(temp_path)
+
+
+TIKTOK_CHUNK_SIZE = 10_000_000  # 10 Mo, dans la plage autorisée par TikTok (5-64 Mo par chunk)
+TIKTOK_WHOLE_UPLOAD_THRESHOLD = 5_000_000  # en dessous, TikTok exige un upload en un seul morceau
+
+
+def _tiktok_compute_chunks(file_size: int) -> "tuple[int, int]":
+    """Renvoie (chunk_size, total_chunk_count) en respectant les règles TikTok."""
+    if file_size <= TIKTOK_WHOLE_UPLOAD_THRESHOLD or file_size < TIKTOK_CHUNK_SIZE:
+        return file_size, 1
+    return TIKTOK_CHUNK_SIZE, file_size // TIKTOK_CHUNK_SIZE
+
+
+async def _tiktok_upload_file_chunks(upload_url: str, video_path: str, file_size: int, chunk_size: int, total_chunk_count: int) -> None:
+    """Envoie le fichier local par chunks séquentiels, avec retry par chunk."""
+    with open(video_path, "rb") as file_handle:
+        for i in range(total_chunk_count):
+            first_byte = i * chunk_size
+            last_byte = file_size - 1 if i == total_chunk_count - 1 else first_byte + chunk_size - 1
+            file_handle.seek(first_byte)
+            chunk = file_handle.read(last_byte - first_byte + 1)
+
+            last_error: Optional[Exception] = None
+            for attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(timeout=120.0) as client:
+                        response = await client.put(
+                            upload_url,
+                            headers={
+                                "Content-Type": "video/mp4",
+                                "Content-Length": str(len(chunk)),
+                                "Content-Range": f"bytes {first_byte}-{last_byte}/{file_size}",
+                            },
+                            content=chunk,
+                        )
+                    if response.status_code in (200, 201, 206):
+                        break
+                    response.raise_for_status()
+                except httpx.HTTPError as e:
+                    last_error = e
+                    logger.warning(
+                        "TikTok chunk upload failed (bytes %s-%s, attempt %s/3): %s", first_byte, last_byte, attempt + 1, e,
+                    )
+                    await asyncio.sleep(2 ** attempt)
+            else:
+                raise HTTPException(status_code=502, detail=f"TikTok chunk upload failed after retries: {last_error}")
 
 
 async def _publish_to_tiktok_inbox(access_token: str, video_url: str, caption: str) -> Dict[str, Any]:
@@ -6540,46 +6621,84 @@ async def _publish_to_tiktok_inbox(access_token: str, video_url: str, caption: s
     seulement video.upload. Le créateur doit ouvrir l'app pour finaliser la
     publication. NOTE: cet endpoint ne supporte pas de caption/titre via
     l'API ; le créateur devra la saisir manuellement dans l'app.
+
+    Utilise FILE_UPLOAD (téléchargement local puis envoi par chunks) plutôt
+    que PULL_FROM_URL : évite la vérification de domaine TikTok, nécessaire
+    pour des URLs S3 sur un domaine partagé (*.amazonaws.com) qu'on ne peut
+    pas prouver posséder.
     """
     if caption:
         logger.info("TikTok inbox upload: la légende ne peut pas être envoyée via l'API, le créateur devra la saisir dans l'app.")
 
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-    payload = {"source_info": {"source": "PULL_FROM_URL", "video_url": video_url}}
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    temp_path = os.path.join(UPLOAD_DIR, f"tiktok_publish_{uuid.uuid4().hex}.mp4")
+    await _download_to_file(video_url, temp_path)
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        init_response = await client.post(
-            "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/", headers=headers, json=payload,
-        )
-    await _raise_for_status_or_502(init_response, "TikTok")
+    try:
+        file_size = os.path.getsize(temp_path)
+        chunk_size, total_chunk_count = _tiktok_compute_chunks(file_size)
 
-    init_data = init_response.json()
-    if init_data.get("error", {}).get("code") != "ok":
-        raise HTTPException(status_code=502, detail=f"TikTok inbox upload init failed: {init_data}")
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        init_payload = {
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": file_size,
+                "chunk_size": chunk_size,
+                "total_chunk_count": total_chunk_count,
+            }
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            init_response = await client.post(
+                "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/", headers=headers, json=init_payload,
+            )
+        await _raise_for_status_or_502(init_response, "TikTok")
 
-    publish_id = ((init_data.get("data") or {}).get("publish_id") or "").strip()
-    if not publish_id:
-        raise HTTPException(status_code=502, detail="TikTok publish_id missing")
+        init_data = init_response.json()
+        if init_data.get("error", {}).get("code") != "ok":
+            raise HTTPException(status_code=502, detail=f"TikTok inbox upload init failed: {init_data}")
 
-    result = await poll_tiktok_status(access_token, publish_id, success_statuses=_TIKTOK_INBOX_SUCCESS_STATUSES)
-    result["mode"] = "inbox"
-    if result.get("status") == "SEND_TO_USER_INBOX":
-        result["note"] = "Video sent to the creator's TikTok inbox; they must open the app to finish posting."
-    return result
+        data = init_data.get("data") or {}
+        publish_id = (data.get("publish_id") or "").strip()
+        upload_url = data.get("upload_url")
+        if not publish_id or not upload_url:
+            raise HTTPException(status_code=502, detail="TikTok inbox init response missing publish_id or upload_url")
+
+        await _tiktok_upload_file_chunks(upload_url, temp_path, file_size, chunk_size, total_chunk_count)
+
+        result = await poll_tiktok_status(access_token, publish_id, success_statuses=_TIKTOK_INBOX_SUCCESS_STATUSES)
+        result["mode"] = "inbox"
+        if result.get("status") == "SEND_TO_USER_INBOX":
+            result["note"] = "Video sent to the creator's TikTok inbox; they must open the app to finish posting."
+        return result
+    finally:
+        _cleanup_temp_file(temp_path)
 
 
 async def publish_to_tiktok_photo(token: str, image_urls: List[str], caption: str) -> Dict[str, Any]:
-    headers = {"Authorization": f"Bearer {token}"}
+    """
+    LIMITATION API TikTok : contrairement aux vidéos, l'endpoint photo
+    (/v2/post/publish/content/init/) n'accepte QUE "source": "PULL_FROM_URL"
+    — TikTok ne propose pas d'upload binaire pour les photos. Le domaine
+    hébergeant image_urls doit donc être vérifié dans le TikTok Developer
+    Portal (même prérequis que pour PULL_FROM_URL vidéo), il n'y a pas
+    d'alternative FILE_UPLOAD possible ici.
+    """
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    post_mode = "DIRECT_POST" if TIKTOK_DIRECT_POST_ENABLED else "MEDIA_UPLOAD"
     payload = {
-        "post_info": {"caption": caption},
-        "source_info": {"source": "PULL_FROM_URL", "photo_images": image_urls},
-        "post_mode": "DIRECT_POST",
+        "post_info": {"title": caption, "description": caption},
+        "source_info": {"source": "PULL_FROM_URL", "photo_images": image_urls, "photo_cover_index": 0},
+        "post_mode": post_mode,
         "media_type": "PHOTO",
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post("https://open.tiktokapis.com/v2/post/publish/content/init/", json=payload, headers=headers)
     await _raise_for_status_or_502(response, "TikTok")
-    return response.json()
+
+    init_data = response.json()
+    if init_data.get("error", {}).get("code") != "ok":
+        raise HTTPException(status_code=502, detail=f"TikTok photo publish init failed: {init_data}")
+    return init_data
 
 
 async def poll_tiktok_status(
@@ -6602,6 +6721,7 @@ async def poll_tiktok_status(
         await asyncio.sleep(delay)
         delay = min(delay * 1.5, 30.0)
     return {"success": False, "publish_id": publish_id, "status": "TIMEOUT", "error": "timeout"}
+
 
 
 # --------------------------------------------------------------------------
