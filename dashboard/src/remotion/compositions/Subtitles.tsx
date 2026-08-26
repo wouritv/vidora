@@ -143,7 +143,6 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
         {block.words.map((word, i) => (
           <WordSpan
             key={`${word.startMs}-${word.endMs}-${word.text}-${i}`}
-            wordColor={word.color}
             word={word.text}
             isActive={i === activeIndex}
             style={blockStyle}
@@ -162,7 +161,6 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
 };
 
 interface WordSpanProps {
-  wordColor?: string;
   word: string;
   isActive: boolean;
   style: SubtitleConfig["style"];
@@ -176,7 +174,6 @@ interface WordSpanProps {
 }
 
 const WordSpan: React.FC<WordSpanProps> = ({
-  wordColor,
   word,
   isActive,
   style,
@@ -210,7 +207,7 @@ const WordSpan: React.FC<WordSpanProps> = ({
   });
 
   let transform = "";
-  let color = wordColor || style.fontColor;
+  let color = style.fontColor;
   let extraStyle: React.CSSProperties = {};
   let opacity = 1;
   let displayWord = word;
@@ -222,9 +219,7 @@ const WordSpan: React.FC<WordSpanProps> = ({
   }
 
   if (isActive) {
-    if (!wordColor) {
-      color = style.highlightColor;
-    }
+    color = style.highlightColor;
 
     switch (animation) {
       case "pop": {
