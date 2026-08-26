@@ -307,9 +307,59 @@ export default function SettingsPage() {
     setTimeout(() => setCopiedId(false), 2000);
   };
 
+  const finalizeFacebookPageSelection = async (oauthPayload) => {
+    const selectionToken = oauthPayload?.selection_token;
+    const pages = Array.isArray(oauthPayload?.pages)
+      ? oauthPayload.pages.filter((page) => page?.page_id)
+      : [];
+
+    if (!selectionToken || pages.length === 0) {
+      throw new Error(t('settings.facebookPagesMissing', 'No Facebook page available for selection.'));
+    }
+
+    let selectedPage = pages[0];
+    if (pages.length > 1) {
+      const menu = pages
+        .map((page, index) => `${index + 1}. ${page.page_name || page.page_id}`)
+        .join('\n');
+      const rawChoice = window.prompt(
+        `${t('settings.selectFacebookPage', 'Select a Facebook page to connect:')}\n\n${menu}`,
+        '1',
+      );
+
+      if (rawChoice === null) {
+        throw new Error(t('settings.facebookSelectionCanceled', 'Facebook page selection canceled.'));
+      }
+
+      const selectedIndex = Number(rawChoice) - 1;
+      if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= pages.length) {
+        throw new Error(t('settings.invalidFacebookPageSelection', 'Invalid Facebook page selection.'));
+      }
+      selectedPage = pages[selectedIndex];
+    }
+
+    const response = await fetch(getApiUrl('/api/auth/facebook/select-page'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Id': user.id,
+      },
+      body: JSON.stringify({
+        selection_token: selectionToken,
+        page_id: selectedPage.page_id,
+      }),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.detail || t('settings.facebookConnectFailed', 'Unable to connect selected Facebook page.'));
+    }
+  };
+
   const connectPlatform = async (platform) => {
     if (!user?.id) return;
     setOauthLoading((prev) => ({ ...prev, [platform]: true }));
+    setSocialError('');
     try {
       const res = await fetch(getApiUrl(`/api/auth/${platform}/connect?user_id=${encodeURIComponent(user.id)}`));
       if (!res.ok) {
@@ -339,6 +389,18 @@ export default function SettingsPage() {
         function handleMessage(event) {
           const data = event.data || {};
           if (data.platform !== platform) return;
+
+          if (data.type === 'oauth_page_selection') {
+            window.clearInterval(closePoll);
+            window.clearTimeout(timeoutId);
+            window.removeEventListener('message', handleMessage);
+
+            finalizeFacebookPageSelection(data)
+              .then(() => resolve())
+              .catch((error) => reject(error));
+            return;
+          }
+
           if (data.type === 'oauth_success') {
             window.clearInterval(closePoll);
             window.clearTimeout(timeoutId);
