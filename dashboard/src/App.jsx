@@ -41,6 +41,8 @@ const getProcessLabel = (status) => {
 
 const normalizeStatus = (status) => {
   if (status === 'queued') return 'processing';
+  if (status === 'retry_wait') return 'processing';
+  if (status === 'retry_enqueued') return 'processing';
   if (status === 'completed') return 'complete';
   if (status === 'failed') return 'error';
   return status;
@@ -358,6 +360,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       setLogs([]);
       setProcessingMedia(null);
       setShowCompletionPanel(false);
+      setHasNotifiedCompletion(false);
       return;
     }
 
@@ -734,7 +737,18 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                         </button>
                         <button
                           type="button"
-                          onClick={() => navigate('/dashboard/reel-generator?new=1')}
+                          onClick={() => {
+                            localStorage.removeItem(SESSION_KEY);
+                            setStatus('idle');
+                            setJobId(null);
+                            setResults(null);
+                            setPartialClips([]);
+                            setLogs([]);
+                            setProcessingMedia(null);
+                            setShowCompletionPanel(false);
+                            setHasNotifiedCompletion(false);
+                            navigate('/dashboard/reel-generator');
+                          }}
                           className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
                         >
                           {t('app.newOperationAction', 'New operation')}
@@ -752,7 +766,18 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                 <p className="text-sm text-slate-700 dark:text-zinc-300">{t('app.statusUnknown', 'Unknown generation status:')} <span className="font-mono text-white">{String(status)}</span></p>
                 <button
                   type="button"
-                  onClick={() => navigate('/dashboard/reel-generator?new=1')}
+                  onClick={() => {
+                    localStorage.removeItem(SESSION_KEY);
+                    setStatus('idle');
+                    setJobId(null);
+                    setResults(null);
+                    setPartialClips([]);
+                    setLogs([]);
+                    setProcessingMedia(null);
+                    setShowCompletionPanel(false);
+                    setHasNotifiedCompletion(false);
+                    navigate('/dashboard/reel-generator');
+                  }}
                   className="mt-4 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
                 >
                   {t('app.resetView', 'Reset view')}

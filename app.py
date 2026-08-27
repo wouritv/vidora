@@ -1579,12 +1579,17 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
         if result.get("retry"):
             asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
     finally:
-        # Keep generated artifacts in output/ until the periodic output sweep runs.
+        # Only remove uploaded source files (stored under UPLOAD_DIR).
+        # Downloaded files inside output/<job_id>/ must be preserved for retries;
+        # they will be cleaned up by the periodic output sweep.
         if input_path and os.path.exists(input_path):
-            try:
-                os.remove(input_path)
-            except Exception:
-                pass
+            output_job_dir = os.path.abspath(os.path.join(OUTPUT_DIR, job_id))
+            is_in_output_dir = os.path.abspath(input_path).startswith(output_job_dir)
+            if not is_in_output_dir:
+                try:
+                    os.remove(input_path)
+                except Exception:
+                    pass
 
 
 async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):
@@ -2564,15 +2569,18 @@ async def process_endpoint(
         remote_meta = _probe_remote_video_metadata(url)
         duration_seconds = float(remote_meta.get("duration_seconds") or 0.0)
         size_bytes = float(remote_meta.get("size_bytes") or 0.0)
+        is_youtube_source = _is_youtube_url(url)
 
         # If remote metadata is incomplete, download once and validate from local probe.
+        # Keep YouTube URLs in -u mode; direct HTTP fetch of watch pages returns HTML.
         if duration_seconds <= 0.0 or size_bytes <= 0.0:
-            input_path, _ = _download_input_url_to_job_dir(url, job_id)
-            duration_seconds = _probe_local_video_duration_seconds(input_path)
-            try:
-                size_bytes = float(os.path.getsize(input_path))
-            except Exception:
-                size_bytes = 0.0
+            if not is_youtube_source:
+                input_path, _ = _download_input_url_to_job_dir(url, job_id)
+                duration_seconds = _probe_local_video_duration_seconds(input_path)
+                try:
+                    size_bytes = float(os.path.getsize(input_path))
+                except Exception:
+                    size_bytes = 0.0
 
         _validate_reel_source_constraints(
             duration_seconds=duration_seconds,
@@ -2793,11 +2801,27 @@ def _sanitize_input_filename(value: Optional[str]) -> Optional[str]:
     return candidate or None
 
 
+def _is_youtube_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
+
 def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, str]:
     """Download a remote clip URL into output/<job_id> and return (path, filename)."""
     parsed = urlparse(input_url)
     if parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=400, detail="Invalid input URL")
+    if _is_youtube_url(input_url):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Les URLs YouTube standard ne peuvent pas etre telechargees directement. "
+                "Utilisez la generation Reel avec URL (mode yt-dlp) ou une URL directe de fichier video."
+            ),
+        )
 
     output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -2808,8 +2832,19 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 
     try:
         request = UrlRequest(input_url, headers={"User-Agent": "Vireel/1.0"})
-        with urlopen(request, timeout=45) as response, open(local_path, "wb") as f:
-            shutil.copyfileobj(response, f)
+        with urlopen(request, timeout=45) as response:
+            content_type = response.headers.get("Content-Type", "")
+            if "text/html" in content_type.lower():
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "L'URL fournie a retourné une page HTML au lieu d'un fichier vidéo. "
+                        "Les liens YouTube standard ne sont pas téléchargeables directement. "
+                        "Veuillez fournir une URL directe vers un fichier vidéo (mp4, mov…)."
+                    ),
+                )
+            with open(local_path, "wb") as f:
+                shutil.copyfileobj(response, f)
     except HTTPException:
         raise
     except Exception as e:
@@ -3771,12 +3806,13 @@ def _segment_to_text(segment: Dict) -> str:
                 parts.append(t)
         txt = " ".join(parts).strip()
         if txt:
-            return txt
-    return (segment.get("text") or "").strip()
-
-
-def _load_clip_segments_from_metadata(data: Dict, clip_index: int) -> List[Dict]:
-    transcript = data.get("transcript") or {}
+            if not is_youtube_source:
+                input_path, _ = _download_input_url_to_job_dir(url, job_id)
+                duration_seconds = _probe_local_video_duration_seconds(input_path)
+                try:
+                    size_bytes = float(os.path.getsize(input_path))
+                except Exception:
+                    size_bytes = 0.0
     all_segments = transcript.get("segments") or []
     shorts = data.get("shorts") or []
     if not shorts:
