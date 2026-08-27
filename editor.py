@@ -4,6 +4,7 @@ import json
 
 EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
 EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
+EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
 import re
 import subprocess
 import time
@@ -298,6 +299,29 @@ class VideoEditor:
         for pat, repl in patterns:
             s = pat.sub(repl, s)
 
+        # Rewrite fragile timeline toggles like enable='1-between(t,a,b)'.
+        # FFmpeg can parse this, but AI-generated variants are often brittle.
+        s = re.sub(
+            r"enable='\s*1\s*-\s*between\(([^)]*)\)\s*'",
+            r"enable='not(between(\1))'",
+            s,
+        )
+
+        # Normalize excessively precise floats that can trigger parser edge cases.
+        # Example: fps=30.0000708083 -> fps=30
+        def _round_float_token(match: re.Match[str]) -> str:
+            raw = match.group(0)
+            try:
+                value = float(raw)
+            except Exception:
+                return raw
+            rounded = round(value, 3)
+            if abs(rounded - round(rounded)) < 1e-6:
+                return str(int(round(rounded)))
+            return f"{rounded:.3f}".rstrip("0").rstrip(".")
+
+        s = re.sub(r"\d+\.\d{6,}", _round_float_token, s)
+
         return s
 
     def apply_edits(self, input_path, output_path, filter_data):
@@ -346,7 +370,7 @@ class VideoEditor:
             '-vf', filter_string,
             '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
             '-pix_fmt', 'yuv420p',
-            '-c:a', 'copy',
+            '-c:a', 'aac', '-b:a', EXPORT_AUDIO_BITRATE,
             output_path
         ]
         
@@ -372,9 +396,15 @@ class VideoEditor:
                 else:
                     cmd_bytes.append(arg)
             
-            subprocess.run(cmd_bytes, check=True, env=env)
+            result = subprocess.run(cmd_bytes, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg failed: {e}")
+            try:
+                stderr_text = (e.stderr or b"").decode("utf-8", errors="ignore")
+                if stderr_text:
+                    print(f"❌ FFmpeg stderr:\n{stderr_text}")
+            except Exception:
+                pass
             raise e
 
 if __name__ == "__main__":
