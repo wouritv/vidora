@@ -665,20 +665,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                             {visibleClips.length} Clips
                           </span>
                         )}
-                        {uiStatus === 'complete' && results?.cost_analysis && (
-                          <span className="text-xs bg-green-500/10 border border-green-500/20 text-green-400 px-2 py-0.5 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                            ${results.cost_analysis.total_cost.toFixed(5)}
-                          </span>
-                        )}
-                        {results?.clips?.length > 1 && uiStatus === 'complete' && (
-                          <button
-                            onClick={() => setShowScheduleWeek(true)}
-                            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-500/20 to-indigo-500/20 hover:from-purple-500/30 hover:to-indigo-500/30 border border-purple-500/30 text-purple-300 hover:text-purple-200 rounded-full text-xs font-bold transition-all"
-                          >
-                            <Calendar size={14} />
-                            {t('reels.scheduleWeek', 'Planifier la semaine')}
-                          </button>
-                        )}
+
                       </h2>
 
                       <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
