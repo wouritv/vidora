@@ -4,7 +4,7 @@
 services:
   backend:
     image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-backend:${IMAGE_TAG:-latest}
-    container_name: vireel-backend
+    container_name: vireel-prod-backend
     ports:
       - "5000:8000"
     volumes:
@@ -20,7 +20,7 @@ services:
 
   frontend:
     image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-latest}
-    container_name: vireel-frontend
+    container_name: vireel-prod-frontend
     ports:
       - "5001:5173"
     restart: unless-stopped
@@ -31,7 +31,7 @@ services:
 
   renderer:
     image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-latest}
-    container_name: vireel-renderer
+    container_name: vireel-prod-renderer
     ports:
       - "5002:3100"
     volumes:
@@ -48,7 +48,7 @@ services:
 
   pot-provider:
     image: brainicism/bgutil-ytdlp-pot-provider
-    container_name: vireel-pot-provider
+    container_name: vireel-prod-pot-provider
     restart: unless-stopped
     networks:
       - prod-network
