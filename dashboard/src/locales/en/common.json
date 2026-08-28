@@ -55,7 +55,7 @@
     "youtubeUrl": "YouTube URL",
     "uploadFile": "Upload a file",
     "uploadHint": "Click to upload or drag and drop",
-    "uploadDetail": "MP4, MOV, AVI (Max duration: 180 min, Max size: 10 GB)",
+    "uploadDetail": "MP4, MOV, AVI (Max duration: 180 min, Max size: 5 GB)",
     "ack": "I confirm that I own this content or have the rights to process it. I am responsible for any content I submit. View our",
     "terms": "Terms & Privacy",
     "generateClips": "Generate clips",

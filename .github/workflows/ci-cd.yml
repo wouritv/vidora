@@ -199,7 +199,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "docker-compose.prod.yml"
+          source: "docker-compose.staging.yml"
           target: "/var/apps/vireel"
 
       - name: Déployer via SSH
@@ -213,6 +213,6 @@ jobs:
             cd /var/apps/vireel
             export IMAGE_TAG=${{ github.sha }}
             echo "${{ secrets.NEXUS_PASSWORD }}" | docker login ${{ env.NEXUS_REGISTRY }} -u ${{ secrets.NEXUS_USERNAME }} --password-stdin
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            docker compose -f docker-compose.staging.yml pull
+            docker compose -f docker-compose.staging.yml up -d --remove-orphans
             docker image prune -f

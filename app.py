@@ -81,17 +81,17 @@ from billing import (
 )
 from job_manager import JobManager, JobType, calc_elapsed_seconds
 from pipelines import ReelProcessingPipeline, CaptionProcessingPipeline
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+import sib_api_v3_sdk
+from sib_api_v3_sdk.rest import ApiException
 import logging
 import os
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "no-reply@tonsite.com")
-SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID = os.getenv("SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID")
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+BREVO_FROM_EMAIL = os.getenv("BREVO_FROM_EMAIL", "noreply@vireel.co")
+BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID = os.getenv("BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID")
 
 load_dotenv()
 
@@ -332,7 +332,7 @@ def _estimate_transcript_duration_seconds(transcript: Dict[str, Any]) -> float:
     return max(max_end, meta_seconds)
 
 
-async def get_user_id_header(request: Request) -> str:
+def get_user_id_header(request: Request) -> str:
     user_id = request.headers.get("X-User-Id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing X-User-Id header")
@@ -404,33 +404,43 @@ async def _resolve_user_job_priority(user_id: str) -> int:
         return DEFAULT_JOB_PRIORITY
 
 
+def _preemption_sort_key(ctx: Dict[str, Any]) -> tuple[int, float]:
+    priority = _clamp_job_priority(ctx.get("priority", DEFAULT_JOB_PRIORITY))
+    started_at = float(ctx.get("started_at", 0.0) or 0.0)
+    return (priority, started_at)
+
+
+def _get_preemption_candidate() -> Optional[Dict[str, Any]]:
+    if not running_reel_jobs:
+        return None
+
+    candidate_job_id, candidate_ctx = min(
+        running_reel_jobs.items(),
+        key=lambda item: _preemption_sort_key(item[1]),
+    )
+    return {
+        "job_id": candidate_job_id,
+        "ctx": candidate_ctx,
+        "priority": _clamp_job_priority(candidate_ctx.get("priority", DEFAULT_JOB_PRIORITY)),
+    }
+
+
 async def _maybe_preempt_lower_priority_running_job(incoming_priority: int, incoming_job_id: str) -> None:
     incoming_priority = _clamp_job_priority(incoming_priority)
     async with running_reel_jobs_lock:
-        if not running_reel_jobs:
-            return
-
         if len(running_reel_jobs) < MAX_CONCURRENT_JOBS:
             return
 
-        candidate_job_id = ""
-        candidate_priority = JOB_PRIORITY_MAX
-        candidate_started_at = float("inf")
-        for running_job_id, ctx in running_reel_jobs.items():
-            running_priority = _clamp_job_priority(ctx.get("priority", DEFAULT_JOB_PRIORITY))
-            started_at = float(ctx.get("started_at", 0.0) or 0.0)
-            if (
-                running_priority < candidate_priority
-                or (running_priority == candidate_priority and started_at < candidate_started_at)
-            ):
-                candidate_job_id = running_job_id
-                candidate_priority = running_priority
-                candidate_started_at = started_at
-
-        if not candidate_job_id or incoming_priority <= candidate_priority:
+        candidate = _get_preemption_candidate()
+        if not candidate:
             return
 
-        ctx = running_reel_jobs.get(candidate_job_id) or {}
+        candidate_job_id = candidate["job_id"]
+        candidate_priority = candidate["priority"]
+        if incoming_priority <= candidate_priority:
+            return
+
+        ctx = candidate["ctx"]
         ctx["preempt_requested"] = True
         process = ctx.get("process")
 
@@ -468,6 +478,54 @@ async def _schedule_reel_retry(job_id: str, delay_seconds: int) -> None:
     await enqueue_reel_job(job_id, priority=runtime.get("priority", DEFAULT_JOB_PRIORITY))
 
 
+async def _ensure_retention_deadline_on_subscription(
+    latest_subscription: Dict[str, Any],
+    retention_deadline: datetime,
+) -> None:
+    subscription_id = latest_subscription.get("id")
+    if subscription_id and not latest_subscription.get("retention_deadline_at"):
+        await supabase_update_souscription_row(
+            str(subscription_id),
+            {"retention_deadline_at": retention_deadline.isoformat()},
+        )
+
+
+async def _zero_balances_on_subscription_expiration(
+    user_id: str,
+    latest_subscription: Dict[str, Any],
+) -> None:
+    user_data = await supabase_get_user_data(user_id) or {}
+    current_credit = float(user_data.get("credit") or 0.0)
+    current_storage = float(user_data.get("stockage") or 0.0)
+
+    if current_credit > 0.0 or current_storage > 0.0:
+        await supabase_set_user_data_balance(user_id=user_id, credit=0.0, storage=0.0)
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=current_credit,
+            storage=current_storage,
+            operation="output",
+            operation_type="subscription_expiration",
+            operation_id=str(latest_subscription.get("id") or ""),
+        )
+
+
+async def _disable_subscription_account_if_needed(
+    latest_subscription: Dict[str, Any],
+    now_utc: datetime,
+    retention_deadline: datetime,
+) -> None:
+    subscription_id = latest_subscription.get("id")
+    if subscription_id and not latest_subscription.get("account_disabled_at"):
+        await supabase_update_souscription_row(
+            str(subscription_id),
+            {
+                "account_disabled_at": now_utc.isoformat(),
+                "retention_deadline_at": retention_deadline.isoformat(),
+            },
+        )
+
+
 async def _enforce_subscription_retention_policy(user_id: str) -> Dict[str, Any]:
     """Apply subscription retention policy and zero balances after retention deadline."""
     if not user_id or not is_supabase_configured():
@@ -487,12 +545,7 @@ async def _enforce_subscription_retention_policy(user_id: str) -> Dict[str, Any]
 
     now_utc = datetime.now(timezone.utc)
     retention_deadline = end_date + timedelta(days=STORAGE_RETENTION_PERIODE_DAYS)
-
-    if latest.get("id") and not latest.get("retention_deadline_at"):
-        await supabase_update_souscription_row(
-            str(latest.get("id")),
-            {"retention_deadline_at": retention_deadline.isoformat()},
-        )
+    await _ensure_retention_deadline_on_subscription(latest, retention_deadline)
 
     if now_utc <= retention_deadline:
         return {
@@ -501,29 +554,8 @@ async def _enforce_subscription_retention_policy(user_id: str) -> Dict[str, Any]
             "retention_deadline_at": retention_deadline.isoformat(),
         }
 
-    user_data = await supabase_get_user_data(user_id) or {}
-    current_credit = float(user_data.get("credit") or 0.0)
-    current_storage = float(user_data.get("stockage") or 0.0)
-
-    if current_credit > 0.0 or current_storage > 0.0:
-        await supabase_set_user_data_balance(user_id=user_id, credit=0.0, storage=0.0)
-        await supabase_insert_user_data_history(
-            user_id=user_id,
-            credit=current_credit,
-            storage=current_storage,
-            operation="output",
-            operation_type="subscription_expiration",
-            operation_id=str(latest.get("id") or ""),
-        )
-
-    if latest.get("id") and not latest.get("account_disabled_at"):
-        await supabase_update_souscription_row(
-            str(latest.get("id")),
-            {
-                "account_disabled_at": now_utc.isoformat(),
-                "retention_deadline_at": retention_deadline.isoformat(),
-            },
-        )
+    await _zero_balances_on_subscription_expiration(user_id, latest)
+    await _disable_subscription_account_if_needed(latest, now_utc, retention_deadline)
 
     return {
         "state": "disabled",
@@ -576,6 +608,35 @@ def _resolve_local_video_from_input_ref(input_ref: Optional[str]) -> Optional[tu
     return candidate_path, ref_filename
 
 
+def _resolve_hydration_video_source(
+    source_ref: str,
+    job_id: str,
+    output_dir: str,
+) -> Optional[tuple[str, str]]:
+    local_ref = _resolve_local_video_from_input_ref(source_ref)
+    if local_ref:
+        local_video_path, local_video_name = local_ref
+        hydrated_video_path = os.path.join(output_dir, local_video_name)
+        if os.path.abspath(local_video_path) == os.path.abspath(hydrated_video_path):
+            return local_video_path, local_video_name
+        try:
+            shutil.copy(local_video_path, hydrated_video_path)
+            return hydrated_video_path, local_video_name
+        except Exception as e:
+            print(f"⚠️ Could not copy local reel for metadata hydration: {e}")
+            return None
+
+    parsed_source = urlparse(source_ref)
+    if parsed_source.scheme not in ("http", "https"):
+        return None
+
+    try:
+        return _download_input_url_to_job_dir(source_ref, job_id)
+    except Exception as e:
+        print(f"⚠️ Could not download reel for metadata hydration: {e}")
+        return None
+
+
 async def _hydrate_missing_job_metadata(
     job_id: str,
     clip_index: int,
@@ -589,27 +650,10 @@ async def _hydrate_missing_job_metadata(
     output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    local_ref = _resolve_local_video_from_input_ref(source_ref)
-    if local_ref:
-        local_video_path, local_video_name = local_ref
-        hydrated_video_path = os.path.join(output_dir, local_video_name)
-        if os.path.abspath(local_video_path) != os.path.abspath(hydrated_video_path):
-            try:
-                shutil.copy(local_video_path, hydrated_video_path)
-                local_video_path = hydrated_video_path
-            except Exception as e:
-                print(f"⚠️ Could not copy local reel for metadata hydration: {e}")
-                return None
-    else:
-        parsed_source = urlparse(source_ref)
-        if parsed_source.scheme not in ("http", "https"):
-            return None
-
-        try:
-            local_video_path, local_video_name = _download_input_url_to_job_dir(source_ref, job_id)
-        except Exception as e:
-            print(f"⚠️ Could not download reel for metadata hydration: {e}")
-            return None
+    resolved_source = _resolve_hydration_video_source(source_ref, job_id, output_dir)
+    if not resolved_source:
+        return None
+    local_video_path, local_video_name = resolved_source
 
     try:
         from main import transcribe_video
@@ -4952,36 +4996,46 @@ def _extract_session_context(session: "stripe.checkout.Session") -> dict:
 
 
 def _send_payment_confirmation_email(to_email: str, amount_total: float, label: str) -> None:
-    """Send a payment confirmation email via SendGrid. Never raises — a failed email
+    """Send a payment confirmation email via Brevo. Never raises — a failed email
     must not fail the webhook (Stripe would retry it forever otherwise)."""
     if not to_email:
         logger.warning("Skipping payment confirmation email: no customer email on session")
         return
-    if not SENDGRID_API_KEY:
-        logger.warning("Skipping payment confirmation email: SENDGRID_API_KEY is not configured")
+    if not BREVO_API_KEY:
+        logger.warning("Skipping payment confirmation email: BREVO_API_KEY is not configured")
         return
 
-    message = Mail(
-        from_email=SENDGRID_FROM_EMAIL,
-        to_emails=to_email,
-        subject="Confirmation de votre paiement",
-        html_content=(
-            f"<p>Bonjour,</p>"
-            f"<p>Nous confirmons la réception de votre paiement de "
-            f"<strong>{amount_total:.2f} €</strong> pour : {label}.</p>"
-            f"<p>Merci pour votre confiance !</p>"
-        ),
+    configuration = sib_api_v3_sdk.Configuration()
+    configuration.api_key["api-key"] = BREVO_API_KEY
+    api_instance = sib_api_v3_sdk.TransactionalEmailsApi(
+        sib_api_v3_sdk.ApiClient(configuration)
     )
-    if SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID:
-        message.template_id = SENDGRID_PAYMENT_CONFIRMATION_TEMPLATE_ID
-        message.dynamic_template_data = {
-            "amount_total": f"{amount_total:.2f}",
-            "label": label,
-        }
+
+    if BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID:
+        send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+            to=[{"email": to_email}],
+            template_id=int(BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID),
+            params={
+                "amount_total": f"{amount_total:.2f}",
+                "label": label,
+            },
+        )
+    else:
+        send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+            to=[{"email": to_email}],
+            sender={"email": BREVO_FROM_EMAIL},
+            subject="Confirmation de votre paiement",
+            html_content=(
+                f"<p>Bonjour,</p>"
+                f"<p>Nous confirmons la réception de votre paiement de "
+                f"<strong>{amount_total:.2f} €</strong> pour : {label}.</p>"
+                f"<p>Merci pour votre confiance !</p>"
+            ),
+        )
 
     try:
-        SendGridAPIClient(SENDGRID_API_KEY).send(message)
-    except Exception:
+        api_instance.send_transac_email(send_smtp_email)
+    except ApiException:
         # Log and swallow: email failure should never turn a successful payment
         # into a 500, which would make Stripe retry the whole webhook.
         logger.exception("Failed to send payment confirmation email to %s", to_email)

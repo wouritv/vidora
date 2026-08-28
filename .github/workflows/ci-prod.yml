@@ -1,0 +1,55 @@
+name: CD Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag de l'image Nexus à déployer (ex: latest, ou un SHA de commit)"
+        required: true
+        default: 'latest'
+        type: string
+
+env:
+  NEXUS_REGISTRY: 82.112.253.226:8082
+  IMAGE_PREFIX: vireel-prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production   # optionnel : permet d'ajouter une protection/approbation manuelle sur cet environnement GitHub
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Afficher la version déployée
+        run: |
+          echo "Déploiement en production du tag : ${{ github.event.inputs.image_tag }}"
+          echo "Images :"
+          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:${{ github.event.inputs.image_tag }}"
+          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-backend:${{ github.event.inputs.image_tag }}"
+          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-renderer:${{ github.event.inputs.image_tag }}"
+
+      - name: Copier les fichiers de déploiement sur le VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "docker-compose.prod.yml"
+          target: "/var/apps/vireel_prod"
+
+      - name: Déployer via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: NEXUS_REGISTRY,IMAGE_PREFIX,IMAGE_TAG
+          script: |
+            cd /var/apps/vireel_prod
+            export IMAGE_TAG=${{ github.event.inputs.image_tag }}
+            echo "${{ secrets.NEXUS_PASSWORD }}" | docker login ${{ env.NEXUS_REGISTRY }} -u ${{ secrets.NEXUS_USERNAME }} --password-stdin
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            docker image prune -f

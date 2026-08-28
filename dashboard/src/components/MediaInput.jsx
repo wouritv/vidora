@@ -157,7 +157,7 @@ export default function MediaInput({
                         className="mt-0.5 accent-primary cursor-pointer"
                     />
                     <span>
-                        {t('mediaInput.ack', 'I confirm I own this content or have the rights to process it. I am responsible for any content I submit. See our')} <a href="http://wouri-academy.com/wp-content/uploads/2026/08/politique_confidentialite.pdf" target="_blank" rel="noopener noreferrer" className="text-primary underline" onClick={(e) => e.stopPropagation()}>{t('mediaInput.terms', 'Terms & Privacy')}</a>.
+                        {t('mediaInput.ack', 'I confirm I own this content or have the rights to process it. I am responsible for any content I submit. See our')} <a href="https://docs.vireel.co/politique_confidentialite.pdf" target="_blank" rel="noopener noreferrer" className="text-primary underline" onClick={(e) => e.stopPropagation()}>{t('mediaInput.terms', 'Terms & Privacy')}</a>.
                     </span>
                 </label>
 
