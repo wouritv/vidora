@@ -19,6 +19,7 @@ import ResetPassword from "./pages/ResetPassword";
 import UpdatePassword from "./pages/UpdatePassword";
 import AbonnementPage from "./pages/AbonnementPage";
 import SocialPublicationsPage from "./pages/SocialPublicationsPage";
+import Landing from "./Landing.jsx";
 
 function RootRedirect() {
     const { isAuthenticated, loading } = useAuth();
@@ -31,7 +32,11 @@ function RootRedirect() {
         );
     }
 
-    return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
+    if (isAuthenticated) {
+        return <Navigate to="/dashboard" replace />;
+    }
+
+    return <Landing />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(
@@ -42,7 +47,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                 <LanguageProvider>
                 <BrowserRouter>
                     <Routes>
-                        <Route path="/" element={<RootRedirect />} />
+                        <Route path="/" element={<RootRedirect />} /> t
                         <Route path="/login" element={<Login />} />
                         <Route path="/reset-password" element={<ResetPassword />} />
                         <Route path="/update-password" element={<UpdatePassword />} />
