@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Loader2, MessageSquareText, Plus, X } from 'lucide-react';
+import { ArrowLeft, Loader2, MessageSquareText, Plus, RotateCcw, X } from 'lucide-react';
 import { getApiUrl } from '../config';
 import RemotionPreview from './RemotionPreview';
 import { ANIMATION_OPTIONS, COLOR_PRESETS, HIGHLIGHT_COLOR_PRESETS, FONT_OPTIONS } from '../lib/subtitleOptions';
 import { useTranslation } from '../state/LanguageContext';
+import { useAuth } from '../state/AuthContext';
 
 const DEFAULT_STYLE = {
   positionX: 50,
@@ -53,6 +54,15 @@ const makeLineId = (index) => `line-${index}-${Math.random().toString(36).slice(
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+const getResponsiveWordsPerLine = () => {
+  if (typeof window === 'undefined') return 4;
+  const width = window.innerWidth || 0;
+  if (width < 480) return 4;
+  if (width < 768) return 5;
+  if (width < 1200) return 6;
+  return 7;
+};
+
 const normalizeWord = (word = {}, lineId = '', index = 0) => ({
   id: `${lineId}-word-${index}-${Math.random().toString(36).slice(2, 6)}`,
   text: String(word.text || '').trim(),
@@ -64,16 +74,17 @@ const normalizeWord = (word = {}, lineId = '', index = 0) => ({
 
 const buildLinesFromCaptions = (captions = [], chunkSize = 4) => {
   if (!Array.isArray(captions) || !captions.length) return [];
-  const size = clamp(Number(chunkSize) || 4, 1, 10);
+  const size = clamp(Number(chunkSize) || 4, 2, 8);
+  const wordsPerBlock = size * 2;
   const lines = [];
-  for (let i = 0; i < captions.length; i += size) {
-    const id = makeLineId(i / size);
-    const words = captions.slice(i, i + size).map((word, idx) => normalizeWord(word, id, idx));
+  for (let i = 0; i < captions.length; i += wordsPerBlock) {
+    const id = makeLineId(i / wordsPerBlock);
+    const words = captions.slice(i, i + wordsPerBlock).map((word, idx) => normalizeWord(word, id, idx));
     lines.push({
       id,
       emoji: '',
       words,
-      style: { ...DEFAULT_STYLE },
+      style: { ...DEFAULT_STYLE, wordsPerLine: size },
       startMs: words[0]?.startMs ?? 0,
       endMs: words[words.length - 1]?.endMs ?? 0,
     });
@@ -142,8 +153,11 @@ export default function CaptionsModal({
   clipIndex,
   existingHook,
   existingEffects,
+  onResetStyles,
+  isResettingStyles = false,
 }) {
   const { t } = useTranslation();
+  const { user } = useAuth();
   const previewRef = useRef(null);
 
   const [lines, setLines] = useState([]);
@@ -159,6 +173,7 @@ export default function CaptionsModal({
   const [languages, setLanguages] = useState(FALLBACK_LANGUAGES);
   const [isTranslating, setIsTranslating] = useState(false);
   const [translationError, setTranslationError] = useState('');
+  const [wordsPerLineTouched, setWordsPerLineTouched] = useState(false);
   const [emojiLineId, setEmojiLineId] = useState(null);
   const [emojiGroup, setEmojiGroup] = useState('popular');
   const [emojiSearch, setEmojiSearch] = useState('');
@@ -282,10 +297,12 @@ export default function CaptionsModal({
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled) return;
-        const nextLines = buildLinesFromCaptions(data?.captions || []);
+        const responsiveWords = getResponsiveWordsPerLine();
+        const nextLines = buildLinesFromCaptions(data?.captions || [], responsiveWords);
         setLines(nextLines);
         setSelectedLineId(nextLines[0]?.id || null);
         setDurationSec(Number(data?.durationSec) > 0 ? Number(data.durationSec) : 30);
+        setWordsPerLineTouched(false);
       })
       .catch(() => {
         if (!cancelled) {
@@ -317,6 +334,16 @@ export default function CaptionsModal({
     };
   }, [clipIndex, isOpen, jobId, t, targetLanguage]);
 
+  useEffect(() => {
+    if (!isOpen || wordsPerLineTouched) return;
+    const onResize = () => {
+      if (!Array.isArray(lines) || lines.length === 0) return;
+      applyWordsPerLine(getResponsiveWordsPerLine());
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [isOpen, lines, wordsPerLineTouched]);
+
   const handleApplyTranslation = async () => {
     if (!translationEnabled || !translateText || !targetLanguage || !jobId) return;
     setIsTranslating(true);
@@ -331,15 +358,20 @@ export default function CaptionsModal({
       if (stableInput) payload.input_url = stableInput;
       const res = await fetch(getApiUrl('/api/translate/captions'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(user?.id ? { 'X-User-Id': user.id } : {}),
+        },
         body: JSON.stringify(payload),
       });
       if (!res.ok) {
-        throw new Error(await res.text());
+        const errorText = await res.text();
+        setTranslationError(errorText || t('captionsModal.translationFailed', 'Subtitle translation failed.'));
+        return;
       }
       const data = await res.json();
       const translated = Array.isArray(data?.captions) ? data.captions : [];
-      const nextLines = buildLinesFromCaptions(translated);
+      const nextLines = buildLinesFromCaptions(translated, getResponsiveWordsPerLine());
       setLines(nextLines);
       setSelectedLineId(nextLines[0]?.id || null);
       if (Number(data?.durationSec) > 0) setDurationSec(Number(data.durationSec));
@@ -524,6 +556,7 @@ export default function CaptionsModal({
                     value={selectedLineStyle.wordsPerLine || 4}
                     onChange={(e) => {
                       const value = clamp(Number(e.target.value) || 4, 2, 8);
+                      setWordsPerLineTouched(true);
                       updateLineStyle(selectedLine.id, { wordsPerLine: value });
                       applyWordsPerLine(value);
                       focusPreviewLine(selectedLine.id);
@@ -577,14 +610,25 @@ export default function CaptionsModal({
                   <MessageSquareText className="text-emerald-400" size={18} />
                   {t('captionsModal.subtitleTitle', 'Sous-titres')}
                 </h3>
+                <div className="flex items-center gap-2">
                   <button
-                  type="button"
-                  onClick={() => setShowStyleEditor(true)}
-                  disabled={!selectedLine}
+                    type="button"
+                    onClick={() => setShowStyleEditor(true)}
+                    disabled={!selectedLine}
                     className="rounded-lg border border-slate-300 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-40"
-                >
-                  {t('captionsModal.styleEditor', 'Edition de style')}
-                </button>
+                  >
+                    {t('captionsModal.styleEditor', 'Edition de style')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onResetStyles?.()}
+                    disabled={isResettingStyles}
+                    className="rounded-lg border border-rose-300/60 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-500/10 hover:bg-rose-100 dark:hover:bg-rose-500/20 px-3 py-1.5 text-xs font-semibold text-rose-700 dark:text-rose-200 disabled:opacity-40 inline-flex items-center gap-1"
+                  >
+                    {isResettingStyles ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+                    {t('captionsModal.resetVideo', 'Reset')}
+                  </button>
+                </div>
               </div>
 
               <p className="mb-3 text-xs text-slate-400 dark:text-zinc-500">{t('captionsModal.clickLineHint', 'Click a line to edit.')}</p>

@@ -47,6 +47,7 @@ from supabase_request import (
     list_captions as supabase_list_captions,
     get_caption as supabase_get_caption,
     get_caption_by_job_clip as supabase_get_caption_by_job_clip,
+    get_caption_by_job_clip_any as supabase_get_caption_by_job_clip_any,
     update_caption as supabase_update_caption,
     soft_delete_caption as supabase_soft_delete_caption,
     is_supabase_configured,
@@ -66,6 +67,11 @@ from supabase_request import (
     update_souscription_row as supabase_update_souscription_row,
     list_user_souscriptions as supabase_list_user_souscriptions,
     update_job_record as supabase_update_job_record,
+    get_transcription_by_job_clip as supabase_get_transcription_by_job_clip,
+    upsert_transcription as supabase_upsert_transcription,
+    update_transcription_translations_cache as supabase_update_transcription_translations_cache,
+    insert_style_edit_version as supabase_insert_style_edit_version,
+    delete_style_edit_versions as supabase_delete_style_edit_versions,
 )
 from billing import (
     usd_to_credits,
@@ -78,6 +84,7 @@ from billing import (
     DEFAULT_CAPTION_CREDITS,
     DEFAULT_PUBLICATION_CREDITS,
     CREDIT_UNIT_PRICE_BY_DOLLAR,
+    estimate_llm_usage_cost_usd,
 )
 from job_manager import JobManager, JobType, calc_elapsed_seconds
 from pipelines import ReelProcessingPipeline, CaptionProcessingPipeline
@@ -126,6 +133,7 @@ STRIPE_SUCCESS_URL = os.environ.get("STRIPE_SUCCESS_URL", "")
 STRIPE_CANCEL_URL = os.environ.get("STRIPE_CANCEL_URL", "")
 STORAGE_RETENTION_PERIODE_DAYS = max(0, int(os.environ.get("STORAGE_RETENTION_PERIODE", "7") or "7"))
 STORAGE_OVERAGE_TOLERANCE_PERCENT = max(0.0, float(os.environ.get("STORAGE_OVERAGE_TOLERANCE_PERCENT", "10") or "10"))
+MIN_OPERATION_START_CREDITS = float(os.environ.get("MIN_OPERATION_START_CREDITS", "1"))
 
 # Social publishing constants
 ALLOWED_YT_PRIVACY = {"public", "private", "unlisted"}
@@ -655,14 +663,17 @@ async def _hydrate_missing_job_metadata(
         return None
     local_video_path, local_video_name = resolved_source
 
-    try:
-        from main import transcribe_video
+    cached_transcription = await _load_cached_transcription(None, job_id, clip_index)
+    transcript = dict(cached_transcription.get("transcript_payload") or {}) if cached_transcription else {}
+    if not transcript:
+        try:
+            from main import transcribe_video
 
-        loop = asyncio.get_event_loop()
-        transcript = await loop.run_in_executor(None, transcribe_video, local_video_path)
-    except Exception as e:
-        print(f"⚠️ Could not transcribe reel for metadata hydration: {e}")
-        return None
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(None, transcribe_video, local_video_path)
+        except Exception as e:
+            print(f"⚠️ Could not transcribe reel for metadata hydration: {e}")
+            return None
 
     duration_sec = max(0.5, _estimate_transcript_duration_seconds(transcript))
 
@@ -695,6 +706,17 @@ async def _hydrate_missing_job_metadata(
         print(f"⚠️ Failed to write hydrated metadata: {e}")
         return None
 
+    owner_user_id = await _resolve_job_owner_user_id(job_id, clip_index)
+    if owner_user_id:
+        await _persist_transcription_cache(
+            user_id=owner_user_id,
+            job_id=job_id,
+            clip_index=clip_index,
+            source_type="hydration",
+            source_value=source_ref,
+            transcript=transcript,
+        )
+
     return metadata_path
 
 
@@ -715,6 +737,126 @@ async def _get_or_build_job_metadata(
     except Exception as e:
         print(f"⚠️ Failed to read metadata: {e}")
         return None, None
+
+
+def _transcript_full_text(transcript: Dict[str, Any]) -> str:
+    if not isinstance(transcript, dict):
+        return ""
+    text = (transcript.get("text") or "").strip()
+    if text:
+        return text
+    parts: List[str] = []
+    for segment in (transcript.get("segments") or []):
+        segment_text = (segment.get("text") or "").strip()
+        if segment_text:
+            parts.append(segment_text)
+    return " ".join(parts).strip()
+
+
+async def _load_cached_transcription(user_id: Optional[str], job_id: str, clip_index: int = 0) -> Optional[Dict[str, Any]]:
+    if not is_supabase_configured() or not user_id:
+        return None
+    try:
+        row = await supabase_get_transcription_by_job_clip(job_id, clip_index, user_id)
+    except Exception as e:
+        print(f"⚠️ Failed to load cached transcription: {e}")
+        return None
+    if not row:
+        return None
+    payload = row.get("transcript_payload")
+    if isinstance(payload, dict) and payload.get("segments"):
+        return row
+    return None
+
+
+async def _persist_transcription_cache(
+    *,
+    user_id: Optional[str],
+    job_id: str,
+    clip_index: int,
+    source_type: str,
+    source_value: str,
+    transcript: Dict[str, Any],
+    billing_details: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not is_supabase_configured() or not user_id:
+        return
+    meta = transcript.get("meta") or {}
+    payload = {
+        "user_id": user_id,
+        "job_id": job_id,
+        "clip_index": int(clip_index),
+        "source_type": source_type,
+        "source_value": source_value,
+        "transcript_provider": meta.get("provider") or "unknown",
+        "transcript_language": transcript.get("language") or "unknown",
+        "transcript_text": _transcript_full_text(transcript),
+        "transcript_payload": transcript,
+        "billing_details": billing_details or {},
+    }
+    try:
+        await supabase_upsert_transcription(payload)
+    except Exception as e:
+        print(f"⚠️ Failed to persist transcription cache: {e}")
+
+
+async def _resolve_job_owner_user_id(job_id: str, clip_index: int) -> Optional[str]:
+    in_memory = jobs.get(job_id) or {}
+    user_id = (in_memory.get("user_id") or "").strip()
+    if user_id:
+        return user_id
+
+    if not is_supabase_configured():
+        return None
+
+    try:
+        reel_row = await supabase_get_reel_by_job_clip(job_id, int(clip_index))
+        reel_user = str((reel_row or {}).get("reel_user_id") or "").strip()
+        if reel_user:
+            return reel_user
+    except Exception:
+        pass
+
+    try:
+        caption_row = await supabase_get_caption_by_job_clip_any(job_id, int(clip_index))
+        caption_user = str((caption_row or {}).get("caption_user_id") or "").strip()
+        if caption_user:
+            return caption_user
+    except Exception:
+        pass
+
+    return None
+
+
+def _append_style_version_to_metadata(
+    data: Dict[str, Any],
+    clip_index: int,
+    source_video_url: str,
+    output_video_url: str,
+    style_config: Dict[str, Any],
+) -> int:
+    history = data.get("style_history")
+    if not isinstance(history, dict):
+        history = {}
+    key = str(int(clip_index))
+    entries = history.get(key)
+    if not isinstance(entries, list):
+        entries = []
+
+    version_number = len(entries) + 1
+    entries.append(
+        {
+            "version": version_number,
+            "operation_type": "subtitle_style",
+            "created_at": int(time.time()),
+            "source_video_url": source_video_url,
+            "output_video_url": output_video_url,
+            "style_config": style_config,
+        }
+    )
+    history[key] = entries
+    data["style_history"] = history
+    return version_number
 
 
 def _active_output_paths() -> set[str]:
@@ -1156,6 +1298,11 @@ async def _persist_reels_for_job(
                 "reel_s3_key": s3_key,
                 "reel_job_id": job_id,
                 "reel_clip_index": i - 1,
+                "billing_details": {
+                    "operation": "reels",
+                    "storage_gb": round(_bytes_to_gb(clip_size_bytes), 6),
+                },
+                "total_cost_usd": 0,
             }
         )
 
@@ -1661,13 +1808,27 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
         )
 
         await pipeline.transcribing()
-        from main import transcribe_video
+        cached_transcription = await _load_cached_transcription(user_id, job_id, 0)
+        if cached_transcription:
+            transcript = dict(cached_transcription.get("transcript_payload") or {})
+            jobs[job_id]["logs"].append("Using cached transcription from database.")
+        else:
+            from main import transcribe_video
 
-        loop = asyncio.get_event_loop()
-        transcript = await loop.run_in_executor(None, transcribe_video, input_path)
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(None, transcribe_video, input_path)
+            await _persist_transcription_cache(
+                user_id=user_id,
+                job_id=job_id,
+                clip_index=0,
+                source_type="caption_upload",
+                source_value=source_name,
+                transcript=transcript,
+            )
 
         await pipeline.persisting()
         duration_sec = max(0.5, float(local_duration) or _estimate_transcript_duration_seconds(transcript))
+        caption_storage_gb = _bytes_to_gb(float(os.path.getsize(input_path) if os.path.exists(input_path) else 0))
         title = os.path.splitext(source_name)[0] or "Sous-titres"
         local_video_ref = f"/videos/{job_id}/{os.path.basename(input_path)}"
 
@@ -1739,6 +1900,12 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             },
             "input_source_type": "file",
             "input_source_value": source_name,
+            "billing_details": {
+                "operation": "captions",
+                "actual_credit": caption_required_credits,
+                "actual_storage_gb": round(caption_storage_gb, 6),
+            },
+            "total_cost_usd": 0,
         }
 
         normalized_item = {"id": f"local-{job_id}", **row_payload}
@@ -1747,16 +1914,16 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             if saved:
                 normalized_item = _normalize_caption_row(saved[0])
 
-            if caption_required_credits > 0 and user_id:
+            if user_id and (caption_required_credits > 0 or caption_storage_gb > 0):
                 debit_ok = await reel_job_manager.debit_credits_for_job(
                     job_id=job_id,
                     user_id=user_id,
                     credits=caption_required_credits,
-                    storage_delta=0.0,
+                    storage_delta=-caption_storage_gb,
                     operation_type="captions",
                 )
                 if not debit_ok:
-                    raise RuntimeError("Insufficient balance to finalize caption job")
+                    raise RuntimeError("Insufficient credit/storage balance to finalize caption job")
 
         await pipeline.rendering()
         result_payload = {
@@ -1770,7 +1937,22 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             job_id,
             result_payload,
             actual_credit=caption_required_credits,
+            actual_storage_gb=caption_storage_gb,
             consumed_quota=1.0,
+        )
+
+        await _persist_transcription_cache(
+            user_id=user_id,
+            job_id=job_id,
+            clip_index=0,
+            source_type="caption_upload",
+            source_value=source_name,
+            transcript=transcript,
+            billing_details={
+                "operation": "captions",
+                "actual_credit": caption_required_credits,
+                "actual_storage_gb": round(caption_storage_gb, 6),
+            },
         )
     except Exception as exc:
         jobs[job_id]["status"] = "failed"
@@ -1989,15 +2171,19 @@ def _estimate_caption_required_credits(
 
 
 async def _assert_user_has_required_credits(user_id: str, required_credits: float) -> float:
-    if not is_supabase_configured() or required_credits <= 0:
+    _ = required_credits
+    if not is_supabase_configured():
         return float(required_credits)
 
     user_data = await supabase_get_user_data(user_id)
     available = float(user_data.get("credit", 0)) if user_data else 0.0
-    if available < required_credits:
+    if available <= MIN_OPERATION_START_CREDITS:
         raise HTTPException(
             status_code=402,
-            detail=f"Crédits insuffisants. Requis : {required_credits} cr, disponible : {available} cr.",
+            detail=(
+                f"Crédits insuffisants pour lancer l'operation. "
+                f"Minimum requis : {MIN_OPERATION_START_CREDITS} cr, disponible : {available} cr."
+            ),
         )
     return float(required_credits)
 
@@ -3294,6 +3480,7 @@ async def persist_captioned_reel(
         await file.close()
 
     rendered_size_bytes = float(os.path.getsize(output_path) if os.path.exists(output_path) else 0)
+    rendered_storage_gb = _bytes_to_gb(rendered_size_bytes)
     rendered_duration_seconds = _probe_local_video_duration_seconds(output_path)
     caption_required_credits = _estimate_caption_required_credits(
         duration_seconds=rendered_duration_seconds,
@@ -3325,6 +3512,12 @@ async def persist_captioned_reel(
             caption_updates: Dict[str, Any] = {
                 "caption_url": new_video_url,
                 "caption_status": "termine",
+                "billing_details": {
+                    "operation": "caption_persist",
+                    "actual_credit": caption_required_credits,
+                    "actual_storage_gb": round(rendered_storage_gb, 6),
+                },
+                "total_cost_usd": 0,
             }
             bucket = os.environ.get("AWS_S3_BUCKET", "")
             if bucket and os.path.exists(output_path):
@@ -3334,14 +3527,14 @@ async def persist_captioned_reel(
                     caption_updates["caption_url"] = _caption_media_url_from_s3_key(caption_s3_key) or new_video_url
             await supabase_update_caption(str(caption_row.get("id")), user_id, caption_updates)
 
-    if is_supabase_configured() and caption_required_credits > 0:
-        debited = await supabase_deduct_user_credits(user_id, caption_required_credits)
+    if is_supabase_configured() and (caption_required_credits > 0 or rendered_storage_gb > 0):
+        debited = await supabase_deduct_user_credits(user_id, caption_required_credits, -rendered_storage_gb)
         if not debited:
-            raise HTTPException(status_code=500, detail="Failed to debit credits for captions")
+            raise HTTPException(status_code=500, detail="Failed to debit credit/storage for captions")
         await supabase_insert_user_data_history(
             user_id=user_id,
             credit=caption_required_credits,
-            storage=0.0,
+            storage=round(rendered_storage_gb, 6),
             operation="output",
             operation_type="reels",
             operation_id=f"{job_id}:captions:{clip_index}",
@@ -3526,22 +3719,7 @@ async def generate_effects_config(
 @app.post("/api/subtitle")
 async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id_header)):
     subtitle_required_credits = 0.0
-    if is_supabase_configured():
-        _sub_breakdown = estimate_caption_cost_usd(
-            duration_minutes=3.0,
-            video_size_gb=0.2,
-            uses_assembly=True,
-            uses_openai=True,
-            uses_gemini=False,
-        )
-        subtitle_required_credits = calculate_credits_for_operation(_sub_breakdown)["final_credits"]
-        _sub_user_data = await supabase_get_user_data(user_id)
-        _sub_available = float(_sub_user_data.get("credit", 0)) if _sub_user_data else 0.0
-        if _sub_available < subtitle_required_credits:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {subtitle_required_credits} cr, disponible : {_sub_available} cr.",
-            )
+    await _assert_user_has_required_credits(user_id, subtitle_required_credits)
 
     # Reload job data from disk just in case metadata was updated.
     # The in-memory job may be gone on the Reels page; metadata on disk is enough.
@@ -3562,7 +3740,10 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         raise HTTPException(status_code=404, detail="Clip not found")
         
     clip_data = clips[req.clip_index]
-    
+    source_video_url_before_edit = str(clip_data.get("video_url") or "")
+    if not clip_data.get("original_video_url"):
+        clip_data["original_video_url"] = source_video_url_before_edit
+
     # Video Path
     if req.input_filename:
         filename = _sanitize_input_filename(req.input_filename)
@@ -3672,6 +3853,38 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         print(f"⚠️ Failed to update metadata.json: {e}")
         # Non-critical, but good for persistence
 
+    style_config = {
+        "position": req.position,
+        "position_x": req.position_x,
+        "position_y": req.position_y,
+        "font_size": req.font_size,
+        "font_name": req.font_name,
+        "font_color": req.font_color,
+        "highlight_color": req.highlight_color,
+        "border_color": req.border_color,
+        "border_width": req.border_width,
+        "text_shadow_color": req.text_shadow_color,
+        "shadow_blur": req.shadow_blur,
+        "shadow_offset_x": req.shadow_offset_x,
+        "shadow_offset_y": req.shadow_offset_y,
+        "bg_color": req.bg_color,
+        "bg_opacity": req.bg_opacity,
+        "text_case": req.text_case,
+        "bold": req.bold,
+        "italic": req.italic,
+        "words_per_line": req.words_per_line,
+        "animation": req.animation,
+    }
+
+    version_number = _append_style_version_to_metadata(
+        data,
+        req.clip_index,
+        source_video_url_before_edit,
+        f"/videos/{req.job_id}/{output_filename}",
+        style_config,
+    )
+    _persist_metadata_json(metadata_path, data)
+
     if is_supabase_configured() and subtitle_required_credits > 0:
         await supabase_deduct_user_credits(user_id, subtitle_required_credits)
         await supabase_insert_user_data_history(
@@ -3683,9 +3896,31 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
             operation_id=f"{req.job_id}:subtitle:{req.clip_index}",
         )
 
+    if is_supabase_configured():
+        try:
+            await supabase_insert_style_edit_version(
+                {
+                    "user_id": user_id,
+                    "job_id": req.job_id,
+                    "clip_index": int(req.clip_index),
+                    "version_number": int(version_number),
+                    "operation_type": "subtitle_style",
+                    "source_video_url": source_video_url_before_edit,
+                    "output_video_url": f"/videos/{req.job_id}/{output_filename}",
+                    "style_config": style_config,
+                    "billing_details": {
+                        "operation": "subtitle_style",
+                        "actual_credit": subtitle_required_credits,
+                    },
+                }
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to persist style edit version: {e}")
+
     return {
         "success": True,
-        "new_video_url": f"/videos/{req.job_id}/{output_filename}"
+        "new_video_url": f"/videos/{req.job_id}/{output_filename}",
+        "version": int(version_number),
     }
 
 class HookRequest(BaseModel):
@@ -3696,6 +3931,54 @@ class HookRequest(BaseModel):
     input_url: Optional[str] = None
     position: Optional[str] = "top" # top, center, bottom
     size: Optional[str] = "M" # S, M, L
+
+
+@app.post("/api/reels/{job_id}/{clip_index}/captions/reset")
+async def reset_caption_style_history(
+    job_id: str,
+    clip_index: int,
+    user_id: str = Depends(get_user_id_header),
+):
+    metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
+    if not metadata_path or not data:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    clips = data.get("shorts") or []
+    if clip_index < 0 or clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip = clips[clip_index]
+    history = data.get("style_history") or {}
+    history_key = str(int(clip_index))
+    entries = history.get(history_key) if isinstance(history, dict) else None
+
+    original_video_url = str(clip.get("original_video_url") or "").strip()
+    if not original_video_url and isinstance(entries, list) and entries:
+        original_video_url = str(entries[0].get("source_video_url") or "").strip()
+    if not original_video_url:
+        raise HTTPException(status_code=400, detail="No original video reference found for reset")
+
+    clip["video_url"] = original_video_url
+    clips[clip_index] = clip
+    data["shorts"] = clips
+    if isinstance(history, dict):
+        history.pop(history_key, None)
+        data["style_history"] = history
+    _persist_metadata_json(metadata_path, data)
+
+    if is_supabase_configured():
+        try:
+            await supabase_delete_style_edit_versions(job_id, int(clip_index), user_id)
+        except Exception as e:
+            print(f"⚠️ Failed to delete style history versions: {e}")
+
+    return {
+        "success": True,
+        "job_id": job_id,
+        "clip_index": clip_index,
+        "video_url": original_video_url,
+        "history_cleared": True,
+    }
 
 @app.post("/api/hook")
 async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header)):
@@ -3850,13 +4133,12 @@ def _segment_to_text(segment: Dict) -> str:
                 parts.append(t)
         txt = " ".join(parts).strip()
         if txt:
-            if not is_youtube_source:
-                input_path, _ = _download_input_url_to_job_dir(url, job_id)
-                duration_seconds = _probe_local_video_duration_seconds(input_path)
-                try:
-                    size_bytes = float(os.path.getsize(input_path))
-                except Exception:
-                    size_bytes = 0.0
+            return txt
+    return (segment.get("text") or "").strip()
+
+
+def _load_clip_segments_from_metadata(data: Dict[str, Any], clip_index: int) -> List[Dict[str, Any]]:
+    transcript = data.get("transcript") or {}
     all_segments = transcript.get("segments") or []
     shorts = data.get("shorts") or []
     if not shorts:
@@ -3869,25 +4151,20 @@ def _segment_to_text(segment: Dict) -> str:
     clip_start = float(clip.get("start", 0))
     clip_end = float(clip.get("end", 0))
 
-    selected = []
+    selected: List[Dict[str, Any]] = []
     for seg in all_segments:
         s = float(seg.get("start", 0))
         e = float(seg.get("end", 0))
         if e > clip_start and s < clip_end:
-            # clip-relative timing
             rel_start = max(0.0, s - clip_start)
             rel_end = max(rel_start, e - clip_start)
             text = _segment_to_text(seg)
             if text:
-                selected.append({
-                    "start": rel_start,
-                    "end": rel_end,
-                    "text": text
-                })
+                selected.append({"start": rel_start, "end": rel_end, "text": text})
     return selected
 
 
-def _translate_text_openai(text: str, source_lang: str, target_lang: str) -> str:
+def _translate_text_openai(text: str, source_lang: str, target_lang: str) -> tuple[str, Dict[str, Any]]:
     from openai import OpenAI
 
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -3918,10 +4195,21 @@ def _translate_text_openai(text: str, source_lang: str, target_lang: str) -> str
     out = (resp.choices[0].message.content or "").strip()
     if not out:
         raise RuntimeError("OpenAI returned empty translation")
-    return out
+    usage = getattr(resp, "usage", None)
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", prompt_tokens + completion_tokens) or 0)
+    usage_payload = {
+        "provider": "openai",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cost_usd": estimate_llm_usage_cost_usd("openai", prompt_tokens, completion_tokens),
+    }
+    return out, usage_payload
 
 
-def _translate_text_gemini(text: str, source_lang: str, target_lang: str) -> str:
+def _translate_text_gemini(text: str, source_lang: str, target_lang: str) -> tuple[str, Dict[str, Any]]:
     api_key = os.environ.get("GEMINI_API_KEY")
     model = os.environ.get("GEMINI_TRANSLATE_MODEL", os.environ.get("GEMINI_MODEL"))
     if not api_key:
@@ -3947,7 +4235,33 @@ def _translate_text_gemini(text: str, source_lang: str, target_lang: str) -> str
     out = (resp.text or "").strip()
     if not out:
         raise RuntimeError("Gemini returned empty translation")
-    return out
+
+    usage_meta = getattr(resp, "usage_metadata", None)
+    if usage_meta is None and hasattr(resp, "usageMetadata"):
+        usage_meta = getattr(resp, "usageMetadata")
+
+    def _read_usage_field(source: Any, *names: str) -> int:
+        for name in names:
+            if isinstance(source, dict) and name in source:
+                return int(source.get(name) or 0)
+            if source is not None and hasattr(source, name):
+                return int(getattr(source, name) or 0)
+        return 0
+
+    prompt_tokens = _read_usage_field(usage_meta, "prompt_token_count", "promptTokenCount")
+    completion_tokens = _read_usage_field(usage_meta, "candidates_token_count", "candidatesTokenCount")
+    total_tokens = _read_usage_field(usage_meta, "total_token_count", "totalTokenCount")
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+
+    usage_payload = {
+        "provider": "gemini",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cost_usd": estimate_llm_usage_cost_usd("gemini", prompt_tokens, completion_tokens),
+    }
+    return out, usage_payload
 
 
 def _get_translation_cache(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -3979,12 +4293,12 @@ def _translate_segments_with_fallback(segments: List[Dict], source_lang: str, ta
         src_text = seg["text"]
         try:
             # Primary: OpenAI
-            dst = _translate_text_openai(src_text, source_lang, target_lang)
+            dst, usage = _translate_text_openai(src_text, source_lang, target_lang)
             provider = "openai"
         except Exception as e_openai:
             print(f"⚠️ OpenAI translation failed, fallback Gemini. Reason: {e_openai}")
             # Fallback: Gemini
-            dst = _translate_text_gemini(src_text, source_lang, target_lang)
+            dst, usage = _translate_text_gemini(src_text, source_lang, target_lang)
             provider = "gemini"
 
         translated.append({
@@ -3992,6 +4306,7 @@ def _translate_segments_with_fallback(segments: List[Dict], source_lang: str, ta
             "end": seg["end"],
             "text": dst,
             "provider": provider,
+            "usage": usage,
         })
     return translated
 
@@ -4001,10 +4316,14 @@ def _translate_segments_with_cache(
     source_lang: str,
     target_lang: str,
     translation_cache: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> tuple[List[Dict], Dict[str, int]]:
+) -> tuple[List[Dict], Dict[str, Any]]:
     translated: List[Dict] = []
     cache_hits = 0
     cache_misses = 0
+    usage_totals = {
+        "openai": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0},
+        "gemini": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0},
+    }
     cache_store = translation_cache if isinstance(translation_cache, dict) else None
 
     for seg in segments:
@@ -4018,6 +4337,7 @@ def _translate_segments_with_cache(
                 "end": seg["end"],
                 "text": cached_entry["text"],
                 "provider": cached_entry.get("provider") or "cache",
+                "usage": cached_entry.get("usage") or {},
             })
             cache_hits += 1
             continue
@@ -4030,12 +4350,31 @@ def _translate_segments_with_cache(
             cache_store[cache_key] = {
                 "text": translated_segment["text"],
                 "provider": translated_segment.get("provider") or "unknown",
+                "usage": translated_segment.get("usage") or {},
                 "source_language": _normalize_lang(source_lang) or "auto",
                 "target_language": _normalize_lang(target_lang),
                 "cached_at": int(time.time()),
             }
 
-    return translated, {"hits": cache_hits, "misses": cache_misses}
+        usage = translated_segment.get("usage") or {}
+        provider = (usage.get("provider") or translated_segment.get("provider") or "").lower()
+        bucket = usage_totals.get(provider)
+        if bucket is not None:
+            bucket["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            bucket["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            bucket["total_tokens"] += int(usage.get("total_tokens") or 0)
+            bucket["cost_usd"] = round(float(bucket["cost_usd"]) + float(usage.get("cost_usd") or 0.0), 6)
+
+    total_cost_usd = round(
+        float(usage_totals["openai"]["cost_usd"]) + float(usage_totals["gemini"]["cost_usd"]),
+        6,
+    )
+    return translated, {
+        "hits": cache_hits,
+        "misses": cache_misses,
+        "usage": usage_totals,
+        "cost_usd": total_cost_usd,
+    }
 
 
 def _translated_segments_to_caption_words(segments: List[Dict]) -> List[Dict]:
@@ -4115,7 +4454,7 @@ async def get_languages():
 
 
 @app.post("/api/translate/captions")
-async def translate_captions(req: TranslateRequest):
+async def translate_captions(req: TranslateRequest, request: Request):
     """Translate reel transcript into Remotion-friendly timed word captions."""
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
@@ -4140,6 +4479,15 @@ async def translate_captions(req: TranslateRequest):
     if not source_segments:
         raise HTTPException(status_code=400, detail="No transcript segments found for this clip range")
 
+    request_user_id = (request.headers.get("X-User-Id") or "").strip()
+    owner_user_id = request_user_id or await _resolve_job_owner_user_id(req.job_id, normalized_clip_index)
+    transcription_row = None
+    if owner_user_id and is_supabase_configured():
+        transcription_row = await _load_cached_transcription(owner_user_id, req.job_id, normalized_clip_index)
+        db_cache = (transcription_row or {}).get("translations_cache") or {}
+        if isinstance(db_cache, dict) and db_cache:
+            translation_cache = db_cache
+
     def run_translate_segments():
         return _translate_segments_with_cache(source_segments, source_lang, target_lang, translation_cache)
 
@@ -4151,6 +4499,41 @@ async def translate_captions(req: TranslateRequest):
             _persist_metadata_json(metadata_path, data)
         except Exception as e:
             print(f"⚠️ Failed to persist translation cache: {e}")
+
+    if owner_user_id and is_supabase_configured():
+        usage_payload = {
+            "operation": "translation",
+            "source_language": source_lang or "auto",
+            "target_language": target_lang,
+            "cache": {"hits": cache_stats.get("hits", 0), "misses": cache_stats.get("misses", 0)},
+            "usage": cache_stats.get("usage", {}),
+            "total_cost_usd": cache_stats.get("cost_usd", 0.0),
+        }
+        if transcription_row:
+            await supabase_update_transcription_translations_cache(
+                req.job_id,
+                normalized_clip_index,
+                owner_user_id,
+                translation_cache,
+                billing_details=usage_payload,
+            )
+        else:
+            await _persist_transcription_cache(
+                user_id=owner_user_id,
+                job_id=req.job_id,
+                clip_index=normalized_clip_index,
+                source_type="translation",
+                source_value=req.input_url or req.input_filename or req.job_id,
+                transcript=data.get("transcript") or {},
+                billing_details=usage_payload,
+            )
+            await supabase_update_transcription_translations_cache(
+                req.job_id,
+                normalized_clip_index,
+                owner_user_id,
+                translation_cache,
+                billing_details=usage_payload,
+            )
 
     captions = _translated_segments_to_caption_words(translated_segments)
     if not captions:
@@ -4167,11 +4550,15 @@ async def translate_captions(req: TranslateRequest):
         "target_language": target_lang,
         "providers": providers,
         "cache": cache_stats,
+        "billing": {
+            "usage": cache_stats.get("usage", {}),
+            "total_cost_usd": cache_stats.get("cost_usd", 0.0),
+        },
     }
 
 
 @app.post("/api/translate")
-async def translate_clip(req: TranslateRequest):
+async def translate_clip(req: TranslateRequest, request: Request):
     """
     Translate subtitles only (OpenAI first, Gemini fallback),
     keep original voice/audio track unchanged.
@@ -4182,6 +4569,14 @@ async def translate_clip(req: TranslateRequest):
     if not metadata_path or not data:
         raise HTTPException(status_code=404, detail="Metadata not found")
     translation_cache = _get_translation_cache(data)
+    request_user_id = (request.headers.get("X-User-Id") or "").strip()
+    owner_user_id = request_user_id or await _resolve_job_owner_user_id(req.job_id, req.clip_index)
+    transcription_row = None
+    if owner_user_id and is_supabase_configured():
+        transcription_row = await _load_cached_transcription(owner_user_id, req.job_id, req.clip_index)
+        db_cache = (transcription_row or {}).get("translations_cache") or {}
+        if isinstance(db_cache, dict) and db_cache:
+            translation_cache = db_cache
 
     clips = data.get("shorts", [])
     if req.clip_index >= len(clips):
@@ -4278,6 +4673,41 @@ async def translate_clip(req: TranslateRequest):
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 
+    if owner_user_id and is_supabase_configured():
+        usage_payload = {
+            "operation": "translation_subtitles_only",
+            "source_language": source_lang or "auto",
+            "target_language": target_lang,
+            "cache": {"hits": cache_stats.get("hits", 0), "misses": cache_stats.get("misses", 0)},
+            "usage": cache_stats.get("usage", {}),
+            "total_cost_usd": cache_stats.get("cost_usd", 0.0),
+        }
+        if transcription_row:
+            await supabase_update_transcription_translations_cache(
+                req.job_id,
+                req.clip_index,
+                owner_user_id,
+                translation_cache,
+                billing_details=usage_payload,
+            )
+        else:
+            await _persist_transcription_cache(
+                user_id=owner_user_id,
+                job_id=req.job_id,
+                clip_index=req.clip_index,
+                source_type="translation",
+                source_value=req.input_url or req.input_filename or req.job_id,
+                transcript=data.get("transcript") or {},
+                billing_details=usage_payload,
+            )
+            await supabase_update_transcription_translations_cache(
+                req.job_id,
+                req.clip_index,
+                owner_user_id,
+                translation_cache,
+                billing_details=usage_payload,
+            )
+
     return {
         "success": True,
         "mode": "subtitles_only",
@@ -4286,6 +4716,10 @@ async def translate_clip(req: TranslateRequest):
         "source_language": source_lang or "auto",
         "target_language": target_lang,
         "cache": cache_stats,
+        "billing": {
+            "usage": cache_stats.get("usage", {}),
+            "total_cost_usd": cache_stats.get("cost_usd", 0.0),
+        },
     }
 
 
@@ -5072,6 +5506,8 @@ async def _handle_credit_purchase(ctx: dict) -> dict:
         user_id=ctx["user_id"],
         credit_delta=credits_to_add,
         update_credit_max=True,
+        operation_type="credit_purchase",
+        operation_id=ctx["payment_reference"],
     )
     await supabase_insert_user_data_history(
         user_id=ctx["user_id"],
@@ -5105,6 +5541,8 @@ async def _allocate_plan_resources(user_id: str, abonnement: str, payment_refere
         storage=plan_storage,
         credit_max=plan_credit,
         storage_max=plan_storage,
+        operation_type="subscription",
+        operation_id=souscription_id or payment_reference,
     )
     await supabase_insert_user_data_history(
         user_id=user_id,
@@ -5455,19 +5893,7 @@ async def delete_caption(caption_id: str, user_id: str = Depends(get_user_id_hea
 
 @app.post("/api/captions/{caption_id}/share")
 async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
-    if is_supabase_configured():
-        platform_count = len(payload.platforms) if payload.platforms else 1
-        _pub_cost = calculate_credits_for_operation(
-            estimate_publication_cost_usd(platform_count=platform_count, video_size_gb=0.5)
-        )
-        _pub_required = _pub_cost["final_credits"]
-        _pub_ud = await supabase_get_user_data(user_id)
-        _pub_credits = float(_pub_ud.get("credit", 0)) if _pub_ud else 0.0
-        if _pub_credits < _pub_required:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {_pub_required} cr, disponible : {_pub_credits} cr.",
-            )
+    await _assert_user_has_required_credits(user_id, 0.0)
 
     row = await supabase_get_caption(caption_id, user_id)
     if not row:
@@ -5628,20 +6054,7 @@ async def delete_reel(reel_id: str, user_id: str = Depends(get_user_id_header)):
 
 @app.post("/api/reels/{reel_id}/share")
 async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
-    # --- Credit pre-check for publication ---
-    if is_supabase_configured():
-        platform_count = len(payload.platforms) if payload.platforms else 1
-        _pub_cost = calculate_credits_for_operation(
-            estimate_publication_cost_usd(platform_count=platform_count, video_size_gb=0.5)
-        )
-        _pub_required = _pub_cost["final_credits"]
-        _pub_ud = await supabase_get_user_data(user_id)
-        _pub_credits = float(_pub_ud.get("credit", 0)) if _pub_ud else 0.0
-        if _pub_credits < _pub_required:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Crédits insuffisants. Requis : {_pub_required} cr, disponible : {_pub_credits} cr.",
-            )
+    await _assert_user_has_required_credits(user_id, 0.0)
 
     row = await supabase_get_reel(reel_id, user_id)
     if not row:

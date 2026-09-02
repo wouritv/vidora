@@ -205,7 +205,7 @@ export default function Landing({ onLaunchApp }) {
           <div className="flex items-center gap-3">
             <button
               onClick={() => navigate("/login")}
-              className="bg-primary hover:bg-blue-600 text-white px-5 py-2 rounded-xl text-sm font-medium transition-all active:scale-[0.98] shadow-lg shadow-primary/20"
+              className="bg-primary hover:bg-blue-600 text-white dark:text-white px-5 py-2 rounded-xl text-sm font-medium transition-all active:scale-[0.98] shadow-lg shadow-primary/20"
             >{t("landing.launchApp")}</button>
           </div>
         </div>

@@ -23,8 +23,11 @@ DATA_IMPULSE_PRICE_BY_GO        = float(os.environ.get("DATA_IMPULSE_PRICE_BY_GO
 VIREEL_VPS_PRICE_BY_MINUTE       = float(os.environ.get("VIREEL_VPS_PRICE_BY_MINUTE",       "0.01"))
 
 ASSEMBLY_ESTIMATE_COST_PER_MINUTE = float(os.environ.get("ASSEMBLY_ESTIMATE_COST_PER_MINUTE", "0.21"))
-OPEN_IA_ESTIMATE_COST_PER_MINUTE  = float(os.environ.get("OPEN_IA_ESTIMATE_COST_PER_MINUTE",  "0.15"))
-GEMINI_ESTIMATE_COST_PER_MINUTE   = float(os.environ.get("GEMINI_ESTIMATE_COST_PER_MINUTE",   "0.25"))
+OPEN_IA_INPUT_TOKEN_PER_DOLLAR    = float(os.environ.get("OPEN_IA_INPUT_TOKEN_PER_DOLLAR", "400000"))
+OPEN_IA_OUTPUT_TOKEN_PER_DOLLAR   = float(os.environ.get("OPEN_IA_OUTPUT_TOKEN_PER_DOLLAR", "100000"))
+GEMINI_INPUT_TOKEN_PER_DOLLAR     = float(os.environ.get("GEMINI_INPUT_TOKEN_PER_DOLLAR", "1000000"))
+GEMINI_OUTPUT_TOKEN_PER_DOLLAR    = float(os.environ.get("GEMINI_OUTPUT_TOKEN_PER_DOLLAR", "200000"))
+
 
 # 1 USD = CREDIT_UNIT_PRICE_BY_DOLLAR credits
 CREDIT_UNIT_PRICE_BY_DOLLAR     = float(os.environ.get("CREDIT_UNIT_PRICE_BY_DOLLAR",     "100"))
@@ -49,6 +52,24 @@ def apply_majoration(credits: float) -> float:
 def usd_to_final_credits(amount_usd: float) -> float:
     """Full pipeline: USD → credits → majoated credits."""
     return apply_majoration(usd_to_credits(amount_usd))
+
+
+def estimate_llm_usage_cost_usd(provider: str, input_tokens: float, output_tokens: float) -> float:
+    """Compute real-time LLM cost from token usage and token-per-dollar env vars."""
+    p = (provider or "").strip().lower()
+    in_tokens = max(0.0, float(input_tokens or 0.0))
+    out_tokens = max(0.0, float(output_tokens or 0.0))
+
+    if p == "openai":
+        in_per_dollar = max(1.0, OPEN_IA_INPUT_TOKEN_PER_DOLLAR)
+        out_per_dollar = max(1.0, OPEN_IA_OUTPUT_TOKEN_PER_DOLLAR)
+    elif p == "gemini":
+        in_per_dollar = max(1.0, GEMINI_INPUT_TOKEN_PER_DOLLAR)
+        out_per_dollar = max(1.0, GEMINI_OUTPUT_TOKEN_PER_DOLLAR)
+    else:
+        return 0.0
+
+    return round((in_tokens / in_per_dollar) + (out_tokens / out_per_dollar), 6)
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +106,9 @@ def estimate_reel_cost_usd(
     )
 
     assembly_usd = duration_minutes * ASSEMBLY_ESTIMATE_COST_PER_MINUTE if uses_assembly else 0.0
-    openai_usd   = duration_minutes * OPEN_IA_ESTIMATE_COST_PER_MINUTE  if uses_openai  else 0.0
-    gemini_usd   = duration_minutes * GEMINI_ESTIMATE_COST_PER_MINUTE   if uses_gemini  else 0.0
+    # Real OpenAI/Gemini costs are billed from exact token usage at runtime.
+    openai_usd = 0.0 if uses_openai else 0.0
+    gemini_usd = 0.0 if uses_gemini else 0.0
 
     total_usd = s3_usd + vps_usd + dataimpulse_usd + assembly_usd + openai_usd + gemini_usd
 
@@ -116,8 +138,9 @@ def estimate_caption_cost_usd(
     )
     vps_usd      = duration_minutes * VIREEL_VPS_PRICE_BY_MINUTE
     assembly_usd = duration_minutes * ASSEMBLY_ESTIMATE_COST_PER_MINUTE if uses_assembly else 0.0
-    openai_usd   = duration_minutes * OPEN_IA_ESTIMATE_COST_PER_MINUTE  if uses_openai  else 0.0
-    gemini_usd   = duration_minutes * GEMINI_ESTIMATE_COST_PER_MINUTE   if uses_gemini  else 0.0
+    # Real OpenAI/Gemini costs are billed from exact token usage at runtime.
+    openai_usd = 0.0 if uses_openai else 0.0
+    gemini_usd = 0.0 if uses_gemini else 0.0
     total_usd    = s3_usd + vps_usd + assembly_usd + openai_usd + gemini_usd
 
     return {
@@ -177,35 +200,7 @@ def calculate_credits_for_operation(cost_breakdown_usd: Dict[str, Any]) -> Dict[
 # represent a "typical" operation so the frontend can show a quick check.
 # ---------------------------------------------------------------------------
 
-def _default_reel_credits() -> float:
-    breakdown = estimate_reel_cost_usd(
-        duration_minutes=10.0,
-        video_size_gb=1.0,
-        uses_youtube_download=True,
-        youtube_download_gb=0.5,
-        uses_openai=True,
-        uses_assembly=True,
-    )
-    return calculate_credits_for_operation(breakdown)["final_credits"]
-
-
-def _default_caption_credits() -> float:
-    breakdown = estimate_caption_cost_usd(
-        duration_minutes=10.0,
-        video_size_gb=0.5,
-        uses_assembly=True,
-        uses_openai=True,
-    )
-    return calculate_credits_for_operation(breakdown)["final_credits"]
-
-
-def _default_publication_credits() -> float:
-    breakdown = estimate_publication_cost_usd(platform_count=3, video_size_gb=0.5)
-    return calculate_credits_for_operation(breakdown)["final_credits"]
-
-
-# Pre-computed defaults – lazy import-friendly
-DEFAULT_REEL_CREDITS        = _default_reel_credits()
-DEFAULT_CAPTION_CREDITS     = _default_caption_credits()
-DEFAULT_PUBLICATION_CREDITS = _default_publication_credits()
+DEFAULT_REEL_CREDITS = 1.0
+DEFAULT_CAPTION_CREDITS = 1.0
+DEFAULT_PUBLICATION_CREDITS = 1.0
 

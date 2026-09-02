@@ -26,9 +26,14 @@ const ACTIVE_WORD_COLORS = [
 
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
   const { fps } = useVideoConfig();
+  const wordsPerLine = Math.min(
+    8,
+    Math.max(2, Number(config.style.wordsPerLine) || 4)
+  );
   const blocks = groupCaptionsIntoBlocks(config.captions, {
-    maxChars: Math.max(10, config.style.wordsPerLine * 7),
-    maxWords: config.style.wordsPerLine,
+    // Keep a single block large enough to naturally wrap on up to two lines.
+    maxChars: Math.max(24, wordsPerLine * 16),
+    maxWords: wordsPerLine * 2,
   });
 
   return (
@@ -109,15 +114,21 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
         transform: "translate(-50%, -50%)",
         display: "flex",
         justifyContent: "center",
+        width: "100%",
+        padding: "0 3.5%",
       }}
     >
       <div
         style={{
           display: "flex",
           flexWrap: "wrap",
+          alignContent: "center",
           justifyContent: "center",
           gap: "10px 14px",
-          maxWidth: "85%",
+          width: "100%",
+          maxWidth: "100%",
+          maxHeight: `${Math.round(blockFontSize * 2.7)}px`,
+          overflow: "hidden",
           boxShadow: flashPulse > 0
             ? `0 0 ${Math.round(26 * flashPulse)}px rgba(16,185,129,${0.45 * flashPulse})`
             : "none",
@@ -353,8 +364,8 @@ const WordSpan: React.FC<WordSpanProps> = ({
           fontSize,
           fontWeight: style.bold ? 700 : 500,
           fontStyle: style.italic ? "italic" : "normal",
-          letterSpacing: "0.02em",
-          lineHeight: 1.28,
+          letterSpacing: "0.03em",
+          lineHeight: 1.34,
           color: animation === "karaoke" && isActive ? undefined : color,
           textShadow: combinedShadow,
           transform,

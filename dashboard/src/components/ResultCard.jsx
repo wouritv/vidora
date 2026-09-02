@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Wand2, Type, SlidersHorizontal, X } from 'lucide-react';
+import { Share2, Camera, Clapperboard, Video, AlertCircle, Loader2, Wand2, Type, SlidersHorizontal, X, RotateCcw } from 'lucide-react';
 import { fetchAppConfig, getApiUrl, getDefaultHideSocialPlatforms } from '../config';
 import CaptionsModal from './CaptionsModal';
 import HookModal from './HookModal';
@@ -13,6 +13,15 @@ import { useTranslation } from "../state/LanguageContext";
 function readConnectedPlatformsFromSettings() {
     return getConnectedPlatforms();
 }
+
+const parseApiErrorText = (rawText) => {
+    try {
+        const parsed = JSON.parse(rawText || '{}');
+        return parsed?.detail || rawText || 'Request failed';
+    } catch {
+        return rawText || 'Request failed';
+    }
+};
 
 export default function ResultCard({ clip, index, jobId, onPlay, onPause, compactActions = false }) {
     const { t } = useTranslation();
@@ -66,6 +75,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         removeBadTakes: false,
     });
     const [isCaptioning, setIsCaptioning] = useState(false);
+    const [isResettingStyles, setIsResettingStyles] = useState(false);
     const [captionsCreditBlocked, setCaptionsCreditBlocked] = useState(false);
     const [captionsCreditError, setCaptionsCreditError] = useState('');
     const [isHooking, setIsHooking] = useState(false);
@@ -74,6 +84,10 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     const [hideSocialPlatforms, setHideSocialPlatforms] = useState(getDefaultHideSocialPlatforms());
 
     const [clipDuration, setClipDuration] = useState(Math.max(1, clipEnd - clipStart));
+    const autoEditLabel = isEditing ? t("common.editing", "Editing...") : t("common.autoEdit", "Auto Edit");
+    const hookLabel = isHooking ? t("common.adding", "Adding...") : t("common.viralhook", "Viral Hook");
+    const captionsLabel = isCaptioning ? t("common.adding", "Adding...") : t('common.subtitles', 'Subtitles');
+    const resetLabel = isResettingStyles ? t("common.loading", "Loading...") : t('captionsModal.resetVideo', 'Reset');
     const insufficientCreditsMessage = () => (
         t("common.insufficientCreditsStart", "Crédits insuffisants pour initier cette opération.")
     );
@@ -90,7 +104,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         fetch(getApiUrl(`/api/clip/${jobId}/${clipIndexForApi}/transcript`))
             .then(res => res.ok ? res.json() : null)
             .then(data => {
-                if (data && data.durationSec) setClipDuration(data.durationSec);
+                if (data?.durationSec) setClipDuration(data.durationSec);
             })
             .catch(() => {});
     }, [jobId, clipIndexForApi]);
@@ -128,7 +142,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
     // Release generated object URLs to avoid leaking browser memory.
     useEffect(() => () => {
-        if (currentVideoUrl && currentVideoUrl.startsWith('blob:')) {
+        if (currentVideoUrl?.startsWith('blob:')) {
             URL.revokeObjectURL(currentVideoUrl);
         }
     }, [currentVideoUrl]);
@@ -201,7 +215,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
                 if (effectsRes.ok) {
                     const data = await effectsRes.json();
-                    if (data.effects && data.effects.segments) {
+                    if (data?.effects?.segments) {
                         const newLayers = { ...activeLayers, effects: data.effects };
                         setActiveLayers(newLayers);
                         const blobUrl = await renderInBrowser({
@@ -236,12 +250,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
             if (!res.ok) {
                 const errText = await res.text();
-                try {
-                    const jsonErr = JSON.parse(errText);
-                    throw new Error(jsonErr.detail || errText);
-                } catch (e) {
-                    throw new Error(errText);
-                }
+                setEditError(parseApiErrorText(errText));
+                setTimeout(() => setEditError(null), 5000);
+                return;
             }
 
             const data = await res.json();
@@ -288,7 +299,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 : clipDuration;
             const captionLayer = options.remotion || null;
             if (!captionLayer || !Array.isArray(captionLayer.captions) || captionLayer.captions.length === 0) {
-                throw new Error(t('captionsModal.noCaptions', 'No captions available for this clip.'));
+                setEditError(t('captionsModal.noCaptions', 'No captions available for this clip.'));
+                setTimeout(() => setEditError(null), 5000);
+                return;
             }
 
             const newLayers = { ...activeLayers, captions: captionLayer, subtitles: null };
@@ -330,9 +343,13 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     const creditMsg = detail || t('captionsModal.insufficientCredits', 'Insufficient credits to generate captions for this reel.');
                     setCaptionsCreditBlocked(true);
                     setCaptionsCreditError(creditMsg);
-                    throw new Error(creditMsg);
+                    setEditError(creditMsg);
+                    setTimeout(() => setEditError(null), 5000);
+                    return;
                 }
-                throw new Error(detail || 'Caption persistence failed');
+                setEditError(detail || 'Caption persistence failed');
+                setTimeout(() => setEditError(null), 5000);
+                return;
             }
 
             const persistData = await persistRes.json();
@@ -406,7 +423,12 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 })
             });
 
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) {
+                const errText = await res.text();
+                setEditError(parseApiErrorText(errText));
+                setTimeout(() => setEditError(null), 5000);
+                return;
+            }
             const data = await res.json();
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
@@ -421,9 +443,45 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         }
     };
 
+    const handleResetStyles = async () => {
+        if (!hasClipContext || !jobId) {
+            setEditError(t("reels.noActionAvailable", "Actions indisponibles: ce reel est detache de son job original."));
+            setTimeout(() => setEditError(null), 5000);
+            return;
+        }
+        setIsResettingStyles(true);
+        setEditError(null);
+        try {
+            const res = await fetch(getApiUrl(`/api/reels/${jobId}/${clipIndexForApi}/captions/reset`), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                },
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                setEditError(parseApiErrorText(errText));
+                setTimeout(() => setEditError(null), 5000);
+                return;
+            }
+            const data = await res.json();
+            if (data.video_url) {
+                setCurrentVideoUrl(getApiUrl(data.video_url));
+                if (videoRef.current) videoRef.current.load();
+            }
+            setActiveLayers({ subtitles: null, captions: null, hook: null, effects: null });
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsResettingStyles(false);
+        }
+    };
+
     const handlePost = async () => {
         if (!canShare) {
-            setPostResult({ success: false, msg: insufficientCreditsMessage(publicationCostEstimate) });
+            setPostResult({ success: false, msg: insufficientCreditsMessage() });
             return;
         }
         if (!hasClipContext) {
@@ -472,12 +530,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
             if (!res.ok) {
                 const errText = await res.text();
-                try {
-                    const jsonErr = JSON.parse(errText);
-                    throw new Error(jsonErr.detail || errText);
-                } catch (e) {
-                    throw new Error(errText);
-                }
+                setPostResult({ success: false, msg: `Failed: ${parseApiErrorText(errText)}` });
+                return;
             }
 
             setPostResult({ success: true, msg: isScheduling ? t("reels.scheduledSuccessfully", "Scheduled successfully!") : t("reels.postedSuccessfully", "Posted successfully!") });
@@ -494,7 +548,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     };
 
     return (
-        <div className="bg-surface border border-slate-200 dark:border-white/5 rounded-2xl overflow-hidden flex flex-col md:flex-row group hover:border-slate-300 dark:border-white/10 transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto" style={{ animationDelay: `${index * 0.1}s` }}>
+        <div className="bg-surface border border-slate-200 dark:border-white/5 rounded-2xl overflow-hidden flex flex-col md:flex-row group hover:border-slate-300 dark:hover:border-white/10 transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto" style={{ animationDelay: `${index * 0.1}s` }}>
             {/* Left: Video Preview (Responsive Width) */}
             <div className="w-full md:w-[180px] lg:w-[200px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
                 <video
@@ -507,9 +561,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     preload="metadata"
                     onPlay={() => {
                         const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
-                        onPlay && onPlay(clipStart + currentTime);
+                        onPlay?.(clipStart + currentTime);
                     }}
-                    onPause={() => onPause && onPause()}
+                    onPause={() => onPause?.()}
                     onEnded={() => {
                         if (videoRef.current) {
                             videoRef.current.currentTime = 0;
@@ -551,7 +605,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     {/* YouTube */}
                     <div className="bg-slate-100 dark:bg-black/20 rounded-lg p-3 border border-slate-200 dark:border-white/5">
                         <div className="flex items-center gap-2 text-[10px] font-bold text-red-400 mb-1.5 uppercase tracking-wider">
-                            <Youtube size={12} className="shrink-0" /> <span className="truncate">{t("common.titleYoutube", "YouTube Title")}</span>
+                            <Clapperboard size={12} className="shrink-0" /> <span className="truncate">{t("common.titleYoutube", "YouTube Title")}</span>
                         </div>
                         <p className="text-xs text-slate-700 dark:text-zinc-300 select-all break-words">
                             {safeClip.video_title_for_youtube_short || "Viral Short Video"}
@@ -563,7 +617,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                         <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 dark:text-zinc-400 mb-1.5 uppercase tracking-wider">
                             <Video size={12} className="text-cyan-400 shrink-0" />
                             <span className="text-slate-400 dark:text-zinc-500">/</span>
-                            <Instagram size={12} className="text-pink-400 shrink-0" />
+                            <Camera size={12} className="text-pink-400 shrink-0" />
                             <span className="truncate">{t("common.caption", "Caption")}</span>
                         </div>
                         <p className="text-xs text-slate-700 dark:text-zinc-300 line-clamp-3 hover:line-clamp-none transition-all cursor-pointer select-all break-words">
@@ -588,7 +642,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 )}
 
                 {/* Actions Footer */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-auto pt-4 border-t border-slate-200 dark:border-white/5">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-auto pt-4 border-t border-slate-200 dark:border-white/5">
                     <button
                         onClick={() => setShowAutoEditModal(true)}
                         disabled={isEditing || !hasClipContext || !hasAnyEditingCredit}
@@ -596,7 +650,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                         className={`col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
                         {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {!compactActions ? (isEditing ? t("common.editing", "Editing...") : t("common.autoEdit", "Auto Edit")) : null}
+                        {!compactActions ? autoEditLabel : null}
                     </button>
 
                     <button
@@ -606,7 +660,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                         className={`col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
                         {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {!compactActions ? (isHooking ? t("common.adding", "Adding...") : t("common.viralhook", "Viral Hook")) : null}
+                        {!compactActions ? hookLabel : null}
                     </button>
 
                     <button
@@ -616,7 +670,17 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                         className={`col-span-1 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
                     >
                         {isCaptioning ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
-                        {!compactActions ? (isCaptioning ? t("common.adding", "Adding...") : t('common.subtitles', 'Subtitles')) : null}
+                        {!compactActions ? captionsLabel : null}
+                    </button>
+
+                    <button
+                        onClick={handleResetStyles}
+                        disabled={isResettingStyles || !hasClipContext}
+                        title={t('captionsModal.resetVideo', 'Reset')}
+                        className={`col-span-1 py-2 bg-rose-100 dark:bg-rose-500/10 hover:bg-rose-200 dark:hover:bg-rose-500/20 border border-rose-300/60 dark:border-rose-500/40 text-rose-700 dark:text-rose-200 rounded-lg text-xs font-bold transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 ${compactActions ? 'min-h-[40px]' : ''}`}
+                    >
+                        {isResettingStyles ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                        {!compactActions ? resetLabel : null}
                     </button>
 
                     {!hideSocialPlatforms ? (
@@ -712,6 +776,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 isOpen={showCaptionsModal}
                 onClose={() => setShowCaptionsModal(false)}
                 onGenerate={handleCaptions}
+                onResetStyles={handleResetStyles}
+                isResettingStyles={isResettingStyles}
                 isProcessing={isCaptioning}
                 creditBlocked={captionsCreditBlocked}
                 creditError={captionsCreditError}

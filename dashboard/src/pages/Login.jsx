@@ -89,7 +89,7 @@ export default function Login() {
     }
 
     return (
-        <AuthLayout title="Connexion" subtitle="Continue avec Google ou Apple">
+        <AuthLayout title={t("app.btLogin","Connexion")} subtitle={t("app.authSubtitle","Connecte-toi pour acceder au dashboard.")}>
             <main className="page auth-page">
                 <section className="card auth-card auth-surface">
                     <p className="eyebrow">{t("app.authTitle","Authentification")}</p>

@@ -23,6 +23,10 @@ SUPABASE_JOBS_TABLE = os.environ.get("SUPABASE_JOBS_TABLE", "jobs")
 SUPABASE_JOB_LOGS_TABLE = os.environ.get("SUPABASE_JOB_LOGS_TABLE", "job_logs")
 SUPABASE_USER_DATA_TABLE = os.environ.get("SUPABASE_USER_DATA_TABLE", "user_data")
 SUPABASE_USER_DATA_HISTORY_TABLE = os.environ.get("SUPABASE_USER_DATA_HISTORY_TABLE", "user_data_history")
+SUPABASE_USER_CREDIT_BANK_TABLE = os.environ.get("SUPABASE_USER_CREDIT_BANK_TABLE", "user_credit_bank")
+SUPABASE_TRANSCRIPTIONS_TABLE = os.environ.get("SUPABASE_TRANSCRIPTIONS_TABLE", "transcriptions")
+SUPABASE_STYLE_EDIT_VERSIONS_TABLE = os.environ.get("SUPABASE_STYLE_EDIT_VERSIONS_TABLE", "style_edit_versions")
+STORAGE_OVERAGE_TOLERANCE_PERCENT = max(0.0, float(os.environ.get("STORAGE_OVERAGE_TOLERANCE_PERCENT", "10") or "10"))
 
 
 class SupabaseNotConfiguredError(RuntimeError):
@@ -163,7 +167,7 @@ CAPTION_COLUMNS = (
 	"id, caption_url, caption_thumbnail_url, caption_title, caption_description, "
 	"caption_duration, caption_created_at, caption_updated_at, caption_user_id, "
 	"caption_status, caption_job_id, caption_clip_index, caption_s3_key, generation_inputs, "
-	"input_source_type, input_source_value, deleted_at"
+	"input_source_type, input_source_value, billing_details, total_cost_usd, deleted_at"
 )
 
 
@@ -249,6 +253,23 @@ async def get_caption_by_job_clip(job_id: str, clip_index: int, user_id: str) ->
 	return rows[0]
 
 
+async def get_caption_by_job_clip_any(job_id: str, clip_index: int) -> Optional[Dict[str, Any]]:
+	"""Internal helper: fetch latest caption row by job/clip regardless of owner."""
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_CAPTIONS_TABLE)
+		.select(CAPTION_COLUMNS)
+		.eq("caption_job_id", job_id)
+		.eq("caption_clip_index", int(clip_index))
+		.is_("deleted_at", "null")
+		.order("caption_updated_at", desc=True)
+		.limit(1)
+		.execute()
+	)
+	rows = response.data or []
+	return rows[0] if rows else None
+
+
 async def update_caption(caption_id: str, user_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 	if not caption_id:
 		return None
@@ -288,6 +309,110 @@ async def soft_delete_caption(caption_id: str, user_id: str) -> bool:
 		.execute()
 	)
 	return bool(response.data)
+
+
+# --------------------------------------------------------------------------
+# Transcriptions cache (transcript + translation cache)
+# --------------------------------------------------------------------------
+async def get_transcription_by_job_clip(job_id: str, clip_index: int, user_id: str) -> Optional[Dict[str, Any]]:
+	if not job_id or not user_id:
+		return None
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_TRANSCRIPTIONS_TABLE)
+		.select("*")
+		.eq("job_id", job_id)
+		.eq("clip_index", int(clip_index))
+		.eq("user_id", user_id)
+		.order("updated_at", desc=True)
+		.limit(1)
+		.execute()
+	)
+	rows = response.data or []
+	return rows[0] if rows else None
+
+
+async def upsert_transcription(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+	if not row:
+		return None
+	client = await get_client()
+	response = await client.table(SUPABASE_TRANSCRIPTIONS_TABLE).upsert(
+		row,
+		on_conflict="user_id,job_id,clip_index",
+	).execute()
+	rows = response.data or []
+	return rows[0] if rows else row
+
+
+async def update_transcription_translations_cache(
+	job_id: str,
+	clip_index: int,
+	user_id: str,
+	translations_cache: Dict[str, Any],
+	billing_details: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+	if not job_id or not user_id:
+		return None
+	client = await get_client()
+	payload: Dict[str, Any] = {
+		"translations_cache": translations_cache or {},
+		"updated_at": datetime.now(timezone.utc).isoformat(),
+	}
+	if billing_details is not None:
+		payload["billing_details"] = billing_details
+	await (
+		client.table(SUPABASE_TRANSCRIPTIONS_TABLE)
+		.update(payload)
+		.eq("job_id", job_id)
+		.eq("clip_index", int(clip_index))
+		.eq("user_id", user_id)
+		.execute()
+	)
+	return await get_transcription_by_job_clip(job_id, clip_index, user_id)
+
+
+# --------------------------------------------------------------------------
+# Style edit versions
+# --------------------------------------------------------------------------
+async def insert_style_edit_version(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+	if not row:
+		return None
+	client = await get_client()
+	response = await client.table(SUPABASE_STYLE_EDIT_VERSIONS_TABLE).insert(row).execute()
+	rows = response.data or []
+	return rows[0] if rows else row
+
+
+async def list_style_edit_versions(job_id: str, clip_index: int, user_id: str) -> List[Dict[str, Any]]:
+	if not job_id or not user_id:
+		return []
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_STYLE_EDIT_VERSIONS_TABLE)
+		.select("*")
+		.eq("job_id", job_id)
+		.eq("clip_index", int(clip_index))
+		.eq("user_id", user_id)
+		.order("version_number", desc=False)
+		.execute()
+	)
+	return response.data or []
+
+
+async def delete_style_edit_versions(job_id: str, clip_index: int, user_id: str) -> int:
+	if not job_id or not user_id:
+		return 0
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_STYLE_EDIT_VERSIONS_TABLE)
+		.delete()
+		.eq("job_id", job_id)
+		.eq("clip_index", int(clip_index))
+		.eq("user_id", user_id)
+		.execute()
+	)
+	rows = response.data or []
+	return len(rows)
 
 
 # --------------------------------------------------------------------------
@@ -340,7 +465,7 @@ def _add_one_month(dt: datetime) -> datetime:
 
 async def insert_souscription(
 	user_id: str,
-	abonnement: str,
+	abonnement: Optional[str],
 	payment_mode: str,
 	payment_amount: float,
 	payment_reference: str,
@@ -671,6 +796,8 @@ async def upsert_user_data_credits(
 	storage_delta: float = 0.0,
 	update_credit_max: bool = False,
 	update_stockage_max: bool = False,
+	operation_type: str = "credit_recharge",
+	operation_id: str = "",
 ) -> Dict[str, Any]:
 	client = await get_client()
 	existing = await get_user_data(user_id)
@@ -683,7 +810,15 @@ async def upsert_user_data_credits(
 
 		logger.info(f"Current user data for {user_id}: credit={current_credit}, stockage={current_storage}, credit_max={current_credit_max}, stockage_max={current_stockage_max}")
 
-		new_credit = float(_ceil_credit(current_credit + float(credit_delta)))
+		delta_credit = float(credit_delta)
+		current_debt = float(existing.get("credit_debt", 0) or 0.0)
+		debt_paid = 0.0
+		if delta_credit > 0 and current_debt > 0:
+			debt_paid = min(current_debt, delta_credit)
+			delta_credit -= debt_paid
+			current_debt = max(0.0, current_debt - debt_paid)
+
+		new_credit = float(_ceil_credit(current_credit + delta_credit))
 		new_storage = float(current_storage + float(storage_delta))
 		new_credit_max = max(0.0, current_credit_max)
 		new_stockage_max = max(0.0, current_stockage_max)
@@ -703,6 +838,7 @@ async def upsert_user_data_credits(
 			await client.table(SUPABASE_USER_DATA_TABLE)
 			.update({
 				"credit":     new_credit,
+				"credit_debt": current_debt,
 				"stockage":   new_storage,
 				"credit_max": new_credit_max,
 				"stockage_max": new_stockage_max,
@@ -712,6 +848,16 @@ async def upsert_user_data_credits(
 			.execute()
 		)
 		rows = response.data or []
+		if debt_paid > 0:
+			await insert_user_credit_bank_entry(
+				user_id=user_id,
+				direction="debt_payment",
+				amount=debt_paid,
+				debt_balance_after=current_debt,
+				operation_type=operation_type,
+				operation_id=operation_id,
+				metadata={"source": "upsert_user_data_credits"},
+			)
 		return rows[0] if rows else existing
 	else:
 		initial_credit = _ceil_credit(credit_delta)
@@ -719,6 +865,7 @@ async def upsert_user_data_credits(
 		payload = {
 			"user_id":  user_id,
 			"credit":   initial_credit,
+			"credit_debt": 0.0,
 			"stockage": initial_storage,
 			"credit_max": float(initial_credit),
 			"stockage_max": float(initial_storage),
@@ -734,6 +881,8 @@ async def set_user_data_balance(
 	storage: float,
 	credit_max: Optional[float] = None,
 	storage_max: Optional[float] = None,
+	operation_type: str = "subscription",
+	operation_id: str = "",
 ) -> Dict[str, Any]:
 	"""Set absolute credit/storage values for a user balance row."""
 	if not user_id:
@@ -745,6 +894,7 @@ async def set_user_data_balance(
 	payload = {
 		"user_id": user_id,
 		"credit": clamped_credit,
+		"credit_debt": 0.0,
 		"stockage": clamped_storage,
 		"credit_max": _ceil_credit(credit_max if credit_max is not None else clamped_credit),
 		"stockage_max": max(0.0, float(storage_max if storage_max is not None else max(clamped_storage, 0.0))),
@@ -752,6 +902,10 @@ async def set_user_data_balance(
 	}
 	existing = await get_user_data(user_id)
 	if existing:
+		existing_debt = float(existing.get("credit_debt", 0) or 0.0)
+		debt_paid = min(existing_debt, float(clamped_credit))
+		net_credit = max(0.0, float(clamped_credit) - debt_paid)
+		remaining_debt = max(0.0, existing_debt - debt_paid)
 		next_credit_max = payload["credit_max"]
 		next_storage_max = payload["stockage_max"]
 		if credit_max is None:
@@ -759,11 +913,12 @@ async def set_user_data_balance(
 		if storage_max is None:
 			next_storage_max = max(0.0, float(existing.get("stockage_max", max(existing.get("stockage", 0.0), 0.0)) or 0.0))
 		if clamped_credit > next_credit_max:
-			next_credit_max = clamped_credit
+			next_credit_max = _ceil_credit(net_credit)
 		response = (
 			await client.table(SUPABASE_USER_DATA_TABLE)
 			.update({
-				"credit": payload["credit"],
+				"credit": net_credit,
+				"credit_debt": remaining_debt,
 				"stockage": payload["stockage"],
 				"credit_max": next_credit_max,
 				"stockage_max": next_storage_max,
@@ -773,6 +928,16 @@ async def set_user_data_balance(
 			.execute()
 		)
 		rows = response.data or []
+		if debt_paid > 0:
+			await insert_user_credit_bank_entry(
+				user_id=user_id,
+				direction="debt_payment",
+				amount=debt_paid,
+				debt_balance_after=remaining_debt,
+				operation_type=operation_type,
+				operation_id=operation_id,
+				metadata={"source": "set_user_data_balance"},
+			)
 		return rows[0] if rows else payload
 
 	response = await client.table(SUPABASE_USER_DATA_TABLE).insert(payload).execute()
@@ -794,24 +959,72 @@ async def deduct_user_credits(
 	if not existing:
 		return False
 
-	current_credits = float(existing.get("credit", 0))
-	if current_credits < float(credits):
-		return False
+	current_credits = float(existing.get("credit", 0) or 0.0)
+	current_debt = float(existing.get("credit_debt", 0) or 0.0)
+	debit_credits = max(0.0, float(credits or 0.0))
 
-	new_credit  = max(0.0, current_credits - float(credits))
-	new_storage = float(existing.get("stockage", 0)) + float(storage_delta)
+	new_credit = current_credits - debit_credits
+	debt_delta = 0.0
+	if new_credit < 0:
+		debt_delta = abs(new_credit)
+		new_credit = 0.0
+
+	new_debt = current_debt + debt_delta
+	current_storage = float(existing.get("stockage", 0) or 0.0)
+	new_storage = current_storage + float(storage_delta)
+	storage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
+	overage_limit = (storage_max * STORAGE_OVERAGE_TOLERANCE_PERCENT) / 100.0
+	if new_storage < -overage_limit:
+		return False
 
 	await (
 		client.table(SUPABASE_USER_DATA_TABLE)
 		.update({
 			"credit":     new_credit,
+			"credit_debt": new_debt,
 			"stockage":   new_storage,
 			"updated_at": datetime.now(timezone.utc).isoformat(),
 		})
 		.eq("user_id", user_id)
 		.execute()
 	)
+
+	if debt_delta > 0:
+		await insert_user_credit_bank_entry(
+			user_id=user_id,
+			direction="debt_increase",
+			amount=debt_delta,
+			debt_balance_after=new_debt,
+			operation_type="operation",
+			operation_id="",
+			metadata={"requested_credit_debit": debit_credits},
+		)
 	return True
+
+
+async def insert_user_credit_bank_entry(
+	user_id: str,
+	direction: str,
+	amount: float,
+	debt_balance_after: float,
+	operation_type: str,
+	operation_id: str = "",
+	metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+	"""Track credit debt creation/repayment events."""
+	client = await get_client()
+	payload = {
+		"user_id": user_id,
+		"direction": (direction or "").strip().lower(),
+		"amount": float(max(0.0, amount or 0.0)),
+		"debt_balance_after": float(max(0.0, debt_balance_after or 0.0)),
+		"operation_type": operation_type,
+		"operation_id": operation_id or "",
+		"metadata": metadata or {},
+	}
+	response = await client.table(SUPABASE_USER_CREDIT_BANK_TABLE).insert(payload).execute()
+	rows = response.data or []
+	return rows[0] if rows else payload
 
 
 async def insert_user_data_history(
