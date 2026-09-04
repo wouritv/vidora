@@ -116,6 +116,9 @@ MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
 QUEUE_WORKER_COUNT = int(os.environ.get("QUEUE_WORKER_COUNT", "1"))
 REEL_JOB_MAX_ATTEMPTS = int(os.environ.get("REEL_JOB_MAX_ATTEMPTS", "2"))
 REEL_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("REEL_JOB_RETRY_DELAY_SECONDS", "15"))
+CAPTION_JOB_MAX_ATTEMPTS = int(os.environ.get("CAPTION_JOB_MAX_ATTEMPTS", "2"))
+CAPTION_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("CAPTION_JOB_RETRY_DELAY_SECONDS", "10"))
+CAPTION_TRANSCRIBE_TIMEOUT_SECONDS = int(os.environ.get("CAPTION_TRANSCRIBE_TIMEOUT_SECONDS", "1800"))
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 REEL_MAX_DURATION_MINUTES = float(os.environ.get("REEL_MAX_DURATION", "180"))
 REEL_MAX_STORAGE_GB = float(os.environ.get("REEL_MAX_STORAGE", "15"))
@@ -591,6 +594,27 @@ async def _resolve_reel_input_url(job_id: str, clip_index: int) -> Optional[str]
     return _reel_media_url_from_s3_key(row.get("reel_s3_key") or "") or row.get("reel_url") or None
 
 
+async def _resolve_caption_input_url(job_id: str, clip_index: int, user_id: Optional[str] = None) -> Optional[str]:
+    if not is_supabase_configured():
+        return None
+
+    try:
+        row = None
+        if user_id:
+            row = await supabase_get_caption_by_job_clip(job_id, int(clip_index), user_id)
+        if not row:
+            row = await supabase_get_caption_by_job_clip_any(job_id, int(clip_index))
+    except Exception as e:
+        print(f"⚠️ Supabase caption lookup failed for metadata hydration: {e}")
+        return None
+
+    if not row:
+        return None
+
+    # Prefer a fresh presigned URL from S3 key; fallback to stored URL.
+    return _caption_media_url_from_s3_key(row.get("caption_s3_key") or "") or row.get("caption_url") or None
+
+
 def _resolve_local_video_from_input_ref(input_ref: Optional[str]) -> Optional[tuple[str, str]]:
     """Resolve /videos/<job_id>/<filename> refs to local output file when possible."""
     ref = (input_ref or "").strip()
@@ -651,9 +675,15 @@ async def _hydrate_missing_job_metadata(
     job_id: str,
     clip_index: int,
     input_url: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Optional[str]:
     """Create minimal metadata for old reels by downloading and transcribing the clip on demand."""
-    source_ref = (input_url or "").strip() or await _resolve_reel_input_url(job_id, clip_index)
+    owner_user_id = (user_id or "").strip() or await _resolve_job_owner_user_id(job_id, clip_index)
+    source_ref = (
+        (input_url or "").strip()
+        or await _resolve_reel_input_url(job_id, clip_index)
+        or await _resolve_caption_input_url(job_id, clip_index, user_id=owner_user_id or None)
+    )
     if not source_ref:
         return None
 
@@ -665,7 +695,7 @@ async def _hydrate_missing_job_metadata(
         return None
     local_video_path, local_video_name = resolved_source
 
-    cached_transcription = await _load_cached_transcription(None, job_id, clip_index)
+    cached_transcription = await _load_cached_transcription(owner_user_id or None, job_id, clip_index)
     transcript = dict(cached_transcription.get("transcript_payload") or {}) if cached_transcription else {}
     if not transcript:
         try:
@@ -708,7 +738,6 @@ async def _hydrate_missing_job_metadata(
         print(f"⚠️ Failed to write hydrated metadata: {e}")
         return None
 
-    owner_user_id = await _resolve_job_owner_user_id(job_id, clip_index)
     if owner_user_id:
         await _persist_transcription_cache(
             user_id=owner_user_id,
@@ -726,10 +755,16 @@ async def _get_or_build_job_metadata(
     job_id: str,
     clip_index: int,
     input_url: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
     metadata_path = _resolve_job_metadata_path(job_id)
     if not metadata_path:
-        metadata_path = await _hydrate_missing_job_metadata(job_id, clip_index, input_url=input_url)
+        metadata_path = await _hydrate_missing_job_metadata(
+            job_id,
+            clip_index,
+            input_url=input_url,
+            user_id=user_id,
+        )
     if not metadata_path:
         return None, None
 
@@ -1771,9 +1806,12 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                              if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
                                  # Checking if file is growing? For now assume if it exists and main.py moves it there, it's done.
                                  # main.py writes to temp_... then moves to final name. So presence means ready!
-                                 clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                                 ready_clips.append(clip)
-                        
+                                 clip_copy = dict(clip)
+                                 clip_copy['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                                 clip_copy['reel_clip_index'] = i
+                                 clip_copy['reel_job_id'] = job_id
+                                 ready_clips.append(clip_copy)
+
                         if ready_clips:
                              jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
                              await pipeline.cutting_clips()
@@ -1840,6 +1878,8 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 enriched_clips: List[Dict[str, Any]] = []
                 for i, clip in enumerate(clips):
                     clip_copy = dict(clip)
+                    clip_copy['reel_clip_index'] = i
+                    clip_copy['reel_job_id'] = job_id
                     if i < len(saved_rows):
                         clip_copy['video_url'] = saved_rows[i].get('reel_playback_url') or saved_rows[i].get('reel_url')
                         clip_copy['reel_id'] = saved_rows[i].get('id')
@@ -1996,7 +2036,10 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             from main import transcribe_video
 
             loop = asyncio.get_event_loop()
-            transcript = await loop.run_in_executor(None, transcribe_video, input_path)
+            transcript = await asyncio.wait_for(
+                loop.run_in_executor(None, transcribe_video, input_path),
+                timeout=max(1, CAPTION_TRANSCRIBE_TIMEOUT_SECONDS),
+            )
             await _persist_transcription_cache(
                 user_id=user_id,
                 job_id=job_id,
@@ -2155,12 +2198,14 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
     except Exception as exc:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["logs"].append(f"Caption job failed: {exc}")
-        await reel_job_manager.fail_job(
+        result = await reel_job_manager.fail_job(
             job_id,
             str(exc),
             error_code="CAPTION_JOB_FAILED",
-            retry_delay_seconds=0,
+            retry_delay_seconds=CAPTION_JOB_RETRY_DELAY_SECONDS,
         )
+        if result.get("retry"):
+            asyncio.create_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
     finally:
         # Keep caption sources local only during processing.
         if input_path and os.path.exists(input_path):
@@ -3231,7 +3276,16 @@ async def get_status(job_id: str):
                             {
                                 'video_url': f'/videos/{job_id}/{clip_file}',
                                 'file': clip_file,
-                                'index': i,
+                                'index': (
+                                    (int(match.group(1)) - 1)
+                                    if (match := re.search(r'_clip_(\d+)\.mp4$', clip_file))
+                                    else i
+                                ),
+                                'reel_clip_index': (
+                                    (int(match.group(1)) - 1)
+                                    if (match := re.search(r'_clip_(\d+)\.mp4$', clip_file))
+                                    else i
+                                ),
                                 'status': 'generated'
                             }
                             for i, clip_file in enumerate(clip_files)
@@ -3265,10 +3319,13 @@ async def get_status(job_id: str):
                     partial_clips = []
                     for i, clip_file in enumerate(clip_files):
                         clip_path = os.path.join(output_dir, clip_file)
+                        match = re.search(r'_clip_(\d+)\.mp4$', clip_file)
+                        resolved_clip_index = (int(match.group(1)) - 1) if match else i
                         partial_clips.append({
                             'video_url': f'/videos/{job_id}/{clip_file}',
                             'file': clip_file,
-                            'index': i,
+                            'index': resolved_clip_index,
+                            'reel_clip_index': resolved_clip_index,
                             'status': 'generated'
                         })
                     response['partialClips'] = partial_clips
@@ -3634,7 +3691,7 @@ async def process_caption_endpoint(
             "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
         },
         runtime_data=dict(runtime_payload),
-        max_attempts=1,
+        max_attempts=CAPTION_JOB_MAX_ATTEMPTS,
         reserved_quota=1.0,
         priority=job_priority,
         queue_name="captions",
@@ -3674,10 +3731,10 @@ class SubtitleRequest(BaseModel):
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
-async def get_clip_transcript(job_id: str, clip_index: int):
+async def get_clip_transcript(job_id: str, clip_index: int, x_user_id: Optional[str] = Header(default=None)):
     """Return word-level captions for a specific clip, formatted for Remotion."""
     # Do not depend on in-memory jobs: Reels page must keep working after restarts.
-    _, data = await _get_or_build_job_metadata(job_id, clip_index)
+    _, data = await _get_or_build_job_metadata(job_id, clip_index, user_id=(x_user_id or None))
     if not data:
         # Graceful fallback when metadata cannot be reconstructed.
         return {

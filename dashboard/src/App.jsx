@@ -676,7 +676,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                                 // eslint-disable-next-line react/no-array-index-key
                                 key={i}
                                 clip={clip}
-                                index={i}
+                                index={Number.isFinite(Number(clip?.reel_clip_index)) ? Number(clip.reel_clip_index) : i}
                                 jobId={jobId}
                                 onPlay={(time) => handleClipPlay(time)}
                                 onPause={handleClipPause}

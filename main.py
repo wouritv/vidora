@@ -1204,10 +1204,12 @@ def _render_frame_by_strategy(
         _reset_cameraman(cameraman, original_width)
         return create_general_frame(frame, output_width, output_height)
 
-    if strategy == 'MULTI_SPEAKER':
-        scene_boxes = tracked_boxes_per_scene[current_scene_index] if current_scene_index < len(tracked_boxes_per_scene) else []
-        _reset_cameraman(cameraman, original_width)
-        return _render_multi_speaker_frame_live(frame, frame_number, cameraman, scene_boxes, output_width, output_height)
+    # Split-screen (2 speakers) is intentionally disabled for now.
+    # Keep this block commented to allow easy reactivation later.
+    # if strategy == 'MULTI_SPEAKER':
+    #     scene_boxes = tracked_boxes_per_scene[current_scene_index] if current_scene_index < len(tracked_boxes_per_scene) else []
+    #     _reset_cameraman(cameraman, original_width)
+    #     return _render_multi_speaker_frame_live(frame, frame_number, cameraman, scene_boxes, output_width, output_height)
 
     scene_range = scene_boundaries[current_scene_index] if current_scene_index < len(scene_boundaries) else (0, 0)
     is_scene_start = frame_number == scene_range[0]
@@ -1333,6 +1335,7 @@ def process_video_to_vertical(input_video, final_output_video):
     print("\n   🤖 Step 3: Analyzing Scenes for Strategy (Single vs Group)...")
     scene_strategies, tracked_boxes_per_scene = analyze_scenes_strategy(input_video, scenes)
     scene_strategies = refine_multi_speaker_scenes(input_video, scenes, scene_strategies, tracked_boxes_per_scene)
+    scene_strategies = ['TRACK' if strategy == 'MULTI_SPEAKER' else strategy for strategy in scene_strategies]
 
     print("\n   ✂️ Step 4: Processing video frames...")
     scene_boundaries = _build_scene_boundaries(scenes)

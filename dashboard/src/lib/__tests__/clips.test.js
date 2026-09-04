@@ -75,5 +75,15 @@ describe('toResultCardClip', () => {
         const clip = toResultCardClip(BASE_ITEM, '');
         expect(clip.viral_hook_text).toBe('Watch this!');
     });
+
+    it('preserves reel_clip_index for stable API actions', () => {
+        const clip = toResultCardClip({ ...BASE_ITEM, reel_clip_index: 3 }, '');
+        expect(clip.reel_clip_index).toBe(3);
+    });
+
+    it('preserves reel_job_id when provided', () => {
+        const clip = toResultCardClip({ ...BASE_ITEM, reel_job_id: 'job-123' }, '');
+        expect(clip.reel_job_id).toBe('job-123');
+    });
 });
 

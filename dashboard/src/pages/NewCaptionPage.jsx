@@ -10,6 +10,7 @@ import { useTranslation } from "../state/LanguageContext";
 function normalizeStatus(status) {
     if (status === "completed") return "complete";
     if (status === "failed") return "error";
+    if (status === "queued" || status === "created" || status === "retry_wait") return "processing";
     return status || "idle";
 }
 
@@ -23,6 +24,7 @@ export default function NewCaptionPage() {
     const [status, setStatus] = useState("idle");
     const [error, setError] = useState("");
     const lastLoggedCountRef = useRef(0);
+    const pollFailureCountRef = useRef(0);
 
     const hasCreditsForCaption = Number(credits || 0) > 0;
 
@@ -60,9 +62,16 @@ export default function NewCaptionPage() {
         const poll = async () => {
             try {
                 const response = await fetch(getApiUrl(`/api/status/${jobId}`));
-                if (!response.ok) return;
+                if (!response.ok) {
+                    pollFailureCountRef.current += 1;
+                    if (pollFailureCountRef.current >= 3) {
+                        setError("Unable to retrieve processing status. Please refresh or reopen this page.");
+                    }
+                    return;
+                }
                 const data = await response.json();
                 if (cancelled) return;
+                pollFailureCountRef.current = 0;
 
                 setStatus(normalizeStatus(data.status));
                 const backendLogs = Array.isArray(data.logs) ? data.logs : [];
@@ -113,6 +122,7 @@ export default function NewCaptionPage() {
 
         setError("");
         lastLoggedCountRef.current = 0;
+        pollFailureCountRef.current = 0;
         setStatus("processing");
         try {
             const formData = new FormData();

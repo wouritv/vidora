@@ -60,6 +60,8 @@ export function toResultCardClip(item, videoUrl) {
     return {
         start,
         end,
+        reel_clip_index: Number.isFinite(Number(item?.reel_clip_index)) ? Number(item.reel_clip_index) : undefined,
+        reel_job_id: typeof item?.reel_job_id === 'string' ? item.reel_job_id : '',
         video_url:
             videoUrl ||
             item?.media_url ||

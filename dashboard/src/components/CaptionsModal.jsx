@@ -54,6 +54,15 @@ const makeLineId = (index) => `line-${index}-${Math.random().toString(36).slice(
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+const parseApiDetail = (rawText, fallback) => {
+  try {
+    const parsed = JSON.parse(rawText || '{}');
+    return String(parsed?.detail || rawText || fallback);
+  } catch {
+    return String(rawText || fallback);
+  }
+};
+
 const getResponsiveWordsPerLine = () => {
   if (typeof window === 'undefined') return 4;
   const width = window.innerWidth || 0;
@@ -354,13 +363,22 @@ export default function CaptionsModal({
   useEffect(() => {
     if (!isOpen || !jobId || clipIndex == null || clipIndex < 0) return;
     let cancelled = false;
+
+    const headers = user?.id ? { 'X-User-Id': user.id } : {};
+
     setCaptionsLoading(true);
     setFetchError('');
     setTranslationError('');
     setEmojiLineId(null);
     setEmojiSearch('');
-    fetch(getApiUrl(`/api/clip/${jobId}/${clipIndex}/transcript`))
-      .then((res) => (res.ok ? res.json() : null))
+    fetch(getApiUrl(`/api/clip/${jobId}/${clipIndex}/transcript`), { headers })
+      .then(async (res) => {
+        if (!res.ok) {
+          const raw = await res.text();
+          throw new Error(parseApiDetail(raw, t('captionsModal.loadFailed', 'Unable to load subtitles for this clip.')));
+        }
+        return res.json();
+      })
       .then((data) => {
         if (cancelled) return;
         const responsiveWords = getResponsiveWordsPerLine();
@@ -368,22 +386,25 @@ export default function CaptionsModal({
         const nextLines = restoredLines.length > 0
           ? restoredLines
           : buildLinesFromCaptions(data?.captions || [], responsiveWords);
+        if (!nextLines.length) {
+          setFetchError(t('captionsModal.noCaptions', 'No captions available for this clip.'));
+        }
         setLines(nextLines);
         setSelectedLineId(nextLines[0]?.id || null);
         setDurationSec(Number(data?.durationSec) > 0 ? Number(data.durationSec) : 30);
         setWordsPerLineTouched(false);
       })
-      .catch(() => {
+      .catch((err) => {
         if (!cancelled) {
           setLines([]);
-          setFetchError(t('captionsModal.loadFailed', 'Unable to load subtitles for this clip.'));
+          setFetchError(err?.message || t('captionsModal.loadFailed', 'Unable to load subtitles for this clip.'));
         }
       })
       .finally(() => {
         if (!cancelled) setCaptionsLoading(false);
       });
 
-    fetch(getApiUrl('/api/translate/languages'))
+    fetch(getApiUrl('/api/translate/languages'), { headers })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled || !Array.isArray(data?.languages)) return;
@@ -393,7 +414,7 @@ export default function CaptionsModal({
         });
         if (Object.keys(mapped).length > 0) {
           setLanguages(mapped);
-          if (!mapped[targetLanguage]) setTargetLanguage(Object.keys(mapped)[0]);
+          setTargetLanguage((prev) => (mapped[prev] ? prev : Object.keys(mapped)[0]));
         }
       })
       .catch(() => {});
@@ -401,7 +422,7 @@ export default function CaptionsModal({
     return () => {
       cancelled = true;
     };
-  }, [clipIndex, isOpen, jobId, t, targetLanguage]);
+  }, [clipIndex, isOpen, jobId, t, user?.id]);
 
   useEffect(() => {
     if (!isOpen || wordsPerLineTouched) return;

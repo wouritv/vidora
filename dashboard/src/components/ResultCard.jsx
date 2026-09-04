@@ -37,7 +37,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
     const safeClip = clip && typeof clip === 'object' ? clip : {};
     const clipIndexForApi = Number.isFinite(Number(safeClip.reel_clip_index))
         ? Number(safeClip.reel_clip_index)
-        : index;
+        : Number.isFinite(Number(safeClip.caption_clip_index))
+            ? Number(safeClip.caption_clip_index)
+            : index;
     const clipStart = Number.isFinite(Number(safeClip.start)) ? Number(safeClip.start) : 0;
     const clipEnd = Number.isFinite(Number(safeClip.end)) ? Number(safeClip.end) : clipStart + 30;
     const rawVideoUrl = typeof (safeClip.reel_playback_url || safeClip.caption_playback_url || safeClip.media_url || safeClip.video_url) === 'string'
