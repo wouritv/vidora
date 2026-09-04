@@ -124,6 +124,65 @@ const flattenLines = (lines = []) => (
   }).filter((word) => word.text.length > 0)
 );
 
+const styleFromSavedWord = (word = {}, fallbackWordsPerLine = 4) => ({
+  ...DEFAULT_STYLE,
+  positionX: Number.isFinite(Number(word.linePositionX)) ? Number(word.linePositionX) : DEFAULT_STYLE.positionX,
+  positionY: Number.isFinite(Number(word.linePositionY)) ? Number(word.linePositionY) : DEFAULT_STYLE.positionY,
+  fontSize: Number.isFinite(Number(word.lineFontSize)) ? Number(word.lineFontSize) : DEFAULT_STYLE.fontSize,
+  fontFamily: String(word.lineFontFamily || DEFAULT_STYLE.fontFamily),
+  fontColor: String(word.lineFontColor || DEFAULT_STYLE.fontColor),
+  highlightColor: String(word.lineHighlightColor || DEFAULT_STYLE.highlightColor),
+  borderColor: String(word.lineBorderColor || DEFAULT_STYLE.borderColor),
+  borderWidth: Number.isFinite(Number(word.lineBorderWidth)) ? Number(word.lineBorderWidth) : DEFAULT_STYLE.borderWidth,
+  bgColor: String(word.lineBgColor || DEFAULT_STYLE.bgColor),
+  bgOpacity: Number.isFinite(Number(word.lineBgOpacity)) ? Number(word.lineBgOpacity) : DEFAULT_STYLE.bgOpacity,
+  textShadowColor: String(word.lineTextShadowColor || DEFAULT_STYLE.textShadowColor),
+  shadowBlur: Number.isFinite(Number(word.lineShadowBlur)) ? Number(word.lineShadowBlur) : DEFAULT_STYLE.shadowBlur,
+  shadowOffsetX: Number.isFinite(Number(word.lineShadowOffsetX)) ? Number(word.lineShadowOffsetX) : DEFAULT_STYLE.shadowOffsetX,
+  shadowOffsetY: Number.isFinite(Number(word.lineShadowOffsetY)) ? Number(word.lineShadowOffsetY) : DEFAULT_STYLE.shadowOffsetY,
+  textCase: String(word.lineTextCase || DEFAULT_STYLE.textCase),
+  animation: String(word.lineAnimation || DEFAULT_STYLE.animation),
+  bold: Boolean(word.lineBold ?? DEFAULT_STYLE.bold),
+  italic: Boolean(word.lineItalic ?? DEFAULT_STYLE.italic),
+  wordsPerLine: clamp(Number(fallbackWordsPerLine) || DEFAULT_STYLE.wordsPerLine, 2, 8),
+});
+
+const buildLinesFromSavedSubtitleConfig = (subtitleConfig = {}) => {
+  if (!subtitleConfig || typeof subtitleConfig !== 'object') return [];
+  const captions = Array.isArray(subtitleConfig.captions) ? subtitleConfig.captions : [];
+  if (!captions.length) return [];
+
+  const fallbackWordsPerLine = clamp(Number(subtitleConfig?.style?.wordsPerLine) || getResponsiveWordsPerLine(), 2, 8);
+  const grouped = new Map();
+  captions.forEach((word, idx) => {
+    const lineId = String(word?.lineId || `line-${Math.floor(idx / (fallbackWordsPerLine * 2))}`);
+    if (!grouped.has(lineId)) grouped.set(lineId, []);
+    grouped.get(lineId).push(word || {});
+  });
+
+  return Array.from(grouped.entries()).map(([lineId, words]) => {
+    const lineWords = words.map((word, idx) => ({
+      id: `${lineId}-word-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+      text: String(word?.text || '').trim(),
+      startMs: Number(word?.startMs) || 0,
+      endMs: Number(word?.endMs) || 0,
+      color: String(word?.color || '#FFFFFF'),
+      lineId,
+    })).filter((word) => word.text.length > 0);
+    const seedWord = words[0] || {};
+    const lineStart = lineWords[0]?.startMs ?? 0;
+    const lineEnd = lineWords[lineWords.length - 1]?.endMs ?? lineStart;
+    return {
+      id: lineId,
+      emoji: String(seedWord?.lineEmoji || ''),
+      words: lineWords,
+      style: styleFromSavedWord(seedWord, fallbackWordsPerLine),
+      startMs: lineStart,
+      endMs: lineEnd,
+    };
+  }).filter((line) => line.words.length > 0);
+};
+
 const rebalanceLineWords = (line, words) => {
   const base = words.filter((word) => String(word.text || '').trim().length > 0);
   if (!base.length) return line.words;
@@ -238,6 +297,13 @@ export default function CaptionsModal({
     setLines((prev) => prev.map((line) => ({ ...line, style: { ...sourceStyle } })));
   };
 
+  const applyLineStyleToAll = (lineId) => {
+    const sourceLine = lines.find((line) => line.id === lineId);
+    if (!sourceLine) return;
+    const sourceStyle = { ...DEFAULT_STYLE, ...(sourceLine.style || {}) };
+    setLines((prev) => prev.map((line) => ({ ...line, style: { ...sourceStyle } })));
+  };
+
   const updateWordText = (lineId, wordId, text) => {
     updateLine(lineId, (line) => {
       const words = line.words.map((word) => (word.id === wordId ? { ...word, text } : word));
@@ -298,7 +364,10 @@ export default function CaptionsModal({
       .then((data) => {
         if (cancelled) return;
         const responsiveWords = getResponsiveWordsPerLine();
-        const nextLines = buildLinesFromCaptions(data?.captions || [], responsiveWords);
+        const restoredLines = buildLinesFromSavedSubtitleConfig(data?.subtitleConfig || {});
+        const nextLines = restoredLines.length > 0
+          ? restoredLines
+          : buildLinesFromCaptions(data?.captions || [], responsiveWords);
         setLines(nextLines);
         setSelectedLineId(nextLines[0]?.id || null);
         setDurationSec(Number(data?.durationSec) > 0 ? Number(data.durationSec) : 30);
@@ -594,12 +663,6 @@ export default function CaptionsModal({
                   <button type="button" onClick={resetSelectedLineStyle} className="rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300">
                     {t('captionsModal.resetStyles', 'Reset styles')}
                   </button>
-                  <button type="button" onClick={applySelectedStyleToAll} className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200">
-                    {t('captionsModal.applyToAll', 'Apply style to all')}
-                  </button>
-                  <span className="inline-flex items-center rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-200">
-                    {t('captionsModal.autoPreviewHint', 'Auto preview is active while editing styles.')}
-                  </span>
                 </div>
               </div>
             </>
@@ -683,8 +746,12 @@ export default function CaptionsModal({
                         >
                           {t('captionsModal.addEmoji', 'Add emoji')}
                         </button>
-                        <button type="button" onClick={(e) => { e.stopPropagation(); applySelectedStyleToAll(); }} className="text-[11px] text-emerald-300">{t('captionsModal.applyToAll', 'Appliquer a tous')}</button>
-                        <button type="button" onClick={(e) => { e.stopPropagation(); setLines((prev) => prev.filter((item) => item.id !== line.id)); }} className="text-[11px] text-red-300">{t('captionsModal.deleteLine', 'Delete line')}</button>
+                        <button type="button" onClick={(e) => { e.stopPropagation(); applyLineStyleToAll(line.id); }} className="rounded-md border border-emerald-300 bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-200 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-200 dark:hover:bg-emerald-500/25">
+                          {t('captionsModal.applyToAll', 'Appliquer a tous')}
+                        </button>
+                        <button type="button" onClick={(e) => { e.stopPropagation(); setLines((prev) => prev.filter((item) => item.id !== line.id)); }} className="rounded-md border border-rose-300 bg-rose-100 px-2 py-1 text-[11px] font-semibold text-rose-800 hover:bg-rose-200 dark:border-rose-500/40 dark:bg-rose-500/15 dark:text-rose-200 dark:hover:bg-rose-500/25">
+                          {t('captionsModal.deleteLine', 'Delete line')}
+                        </button>
                       </div>
                     </div>
 
@@ -754,7 +821,7 @@ export default function CaptionsModal({
                           </button>
                         </div>
                       ))}
-                      <button type="button" onClick={(e) => { e.stopPropagation(); addWord(line.id); }} className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-200">
+                      <button type="button" onClick={(e) => { e.stopPropagation(); addWord(line.id); }} className="inline-flex items-center gap-1 rounded-md border border-emerald-300 bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-200 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-200 dark:hover:bg-emerald-500/25">
                         <Plus size={11} /> {t('captionsModal.addWord', 'Add word')}
                       </button>
                     </div>

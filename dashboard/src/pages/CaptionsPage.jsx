@@ -19,6 +19,8 @@ function toResultCardClipFromCaption(item, mediaUrl) {
         end: Math.max(1, duration),
         reel_clip_index: Number.isFinite(Number(item?.caption_clip_index)) ? Number(item.caption_clip_index) : 0,
         video_url: mediaUrl || item?.media_url || item?.caption_playback_url || item?.caption_download_url || item?.caption_url || "",
+        thumbnail_url: item?.caption_preview_url || item?.caption_thumbnail_url || "",
+        preview_image_url: item?.caption_preview_url || item?.caption_thumbnail_url || "",
         video_title_for_youtube_short: item?.caption_title || "Sans titre",
         video_description_for_tiktok: item?.caption_description || "",
         video_description_for_instagram: item?.caption_description || "",
@@ -363,7 +365,7 @@ export default function CaptionsPage() {
                     <button
                         type="button"
                         onClick={refresh}
-                        className="rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 hover:bg-white/10"
+                        className="rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10"
                     >
                         {t("settings.refresh", "Refresh")}
                     </button>
@@ -405,7 +407,7 @@ export default function CaptionsPage() {
                         {!loading && !error && items.map((item) => (
                             <tr key={item.id} className="border-b border-slate-200 dark:border-white/5 align-top">
                                 <td className="px-3 py-3">
-                                    <p className="font-semibold text-white line-clamp-2">{item.caption_title || t("generatedMedia.untitled", "Untitled")}</p>
+                                    <p className="font-semibold text-slate-900 dark:text-white line-clamp-2">{item.caption_title || t("generatedMedia.untitled", "Untitled")}</p>
                                     <p className="mt-1 text-xs text-slate-400 dark:text-zinc-500">ID: {item.id}</p>
                                 </td>
                                 <td className="px-3 py-3 text-slate-700 dark:text-zinc-300 max-w-md">
@@ -425,7 +427,7 @@ export default function CaptionsPage() {
                                         <button
                                             type="button"
                                             onClick={() => handlePreview(item)}
-                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-sky-300 dark:border-white/10 bg-sky-100 dark:bg-white/5 text-sky-800 dark:text-zinc-200 shadow-sm hover:bg-sky-200 dark:hover:bg-white/10"
                                             title={t("reels.preview", "Preview")}
                                         >
                                             <Play size={14} />
@@ -434,7 +436,7 @@ export default function CaptionsPage() {
                                         <button
                                             type="button"
                                             onClick={() => handleDownload(item)}
-                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-indigo-300 dark:border-white/10 bg-indigo-100 dark:bg-white/5 text-indigo-800 dark:text-zinc-200 shadow-sm hover:bg-indigo-200 dark:hover:bg-white/10"
                                             title={t("reels.download", "Download")}
                                         >
                                             <Download size={14} />
@@ -476,7 +478,7 @@ export default function CaptionsPage() {
                             type="button"
                             onClick={() => setPage((prev) => Math.max(1, prev - 1))}
                             disabled={page <= 1}
-                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-1.5 text-slate-700 dark:text-zinc-300 disabled:opacity-40"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-3 py-1.5 font-medium text-slate-800 dark:text-zinc-300 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-40"
                         >
                             {t("reels.previous", "Previous")}
                         </button>
@@ -485,7 +487,7 @@ export default function CaptionsPage() {
                             type="button"
                             onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
                             disabled={page >= totalPages}
-                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-1.5 text-slate-700 dark:text-zinc-300 disabled:opacity-40"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-3 py-1.5 font-medium text-slate-800 dark:text-zinc-300 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-40"
                         >
                             {t("reels.next", "Next")}
                         </button>
@@ -541,6 +543,7 @@ export default function CaptionsPage() {
                                     index={previewClipIndex}
                                     jobId={previewJobId}
                                     compactActions={false}
+                                    hideVideoPreview
                                 />
                             )}
                         </div>

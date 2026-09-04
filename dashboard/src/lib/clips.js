@@ -67,6 +67,14 @@ export function toResultCardClip(item, videoUrl) {
             item?.reel_download_url ||
             item?.reel_url ||
             '',
+        thumbnail_url:
+            item?.reel_preview_url ||
+            item?.reel_thumbnail_url ||
+            '',
+        preview_image_url:
+            item?.reel_preview_url ||
+            item?.reel_thumbnail_url ||
+            '',
         video_title_for_youtube_short: item?.reel_title || 'Sans titre',
         video_description_for_tiktok: item?.reel_description || '',
         video_description_for_instagram: item?.reel_description || '',

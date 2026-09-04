@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Share2, Camera, Clapperboard, Video, AlertCircle, Loader2, Wand2, Type, SlidersHorizontal, X, RotateCcw } from 'lucide-react';
+import { Share2, Camera, Clapperboard, Video, AlertCircle, Loader2, Wand2, Type, SlidersHorizontal, X, RotateCcw, Play } from 'lucide-react';
 import { fetchAppConfig, getApiUrl, getDefaultHideSocialPlatforms } from '../config';
 import CaptionsModal from './CaptionsModal';
 import HookModal from './HookModal';
@@ -23,7 +23,14 @@ const parseApiErrorText = (rawText) => {
     }
 };
 
-export default function ResultCard({ clip, index, jobId, onPlay, onPause, compactActions = false }) {
+const isLikelyVideoAsset = (value) => {
+    const text = String(value || '').trim().toLowerCase();
+    if (!text) return false;
+    const withoutQuery = text.split('?')[0];
+    return ['.mp4', '.mov', '.webm', '.mkv', '.m4v'].some((ext) => withoutQuery.endsWith(ext));
+};
+
+export default function ResultCard({ clip, index, jobId, onPlay, onPause, compactActions = false, hideVideoPreview = false }) {
     const { t } = useTranslation();
     const { user } = useAuth();
     const { credits, defaultCosts } = useUserCredits();
@@ -33,7 +40,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         : index;
     const clipStart = Number.isFinite(Number(safeClip.start)) ? Number(safeClip.start) : 0;
     const clipEnd = Number.isFinite(Number(safeClip.end)) ? Number(safeClip.end) : clipStart + 30;
-    const rawVideoUrl = typeof safeClip.video_url === 'string' ? safeClip.video_url : '';
+    const rawVideoUrl = typeof (safeClip.reel_playback_url || safeClip.caption_playback_url || safeClip.media_url || safeClip.video_url) === 'string'
+        ? (safeClip.reel_playback_url || safeClip.caption_playback_url || safeClip.media_url || safeClip.video_url)
+        : '';
     const connectedPlatforms = readConnectedPlatformsFromSettings();
     const defaultPlatforms = connectedPlatforms.length > 0 ? connectedPlatforms : ['tiktok', 'instagram', 'youtube'];
     const hasClipContext = Boolean(jobId) && Number.isFinite(Number(clipIndexForApi));
@@ -64,6 +73,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
     const [isEditing, setIsEditing] = useState(false);
     const [showAutoEditModal, setShowAutoEditModal] = useState(false);
+    const [showVideoPreviewModal, setShowVideoPreviewModal] = useState(false);
     const [autoEditOptions, setAutoEditOptions] = useState({
         zoom: false,
         brightness: false,
@@ -95,6 +105,11 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
     // Accumulate Remotion layers across operations
     const [activeLayers, setActiveLayers] = useState({ subtitles: null, captions: null, hook: null, effects: null });
+    const latestEditableVideoUrl = currentVideoUrl || originalVideoUrl;
+    const initialPreviewImageUrl = safeClip.preview_image_url || safeClip.thumbnail_url || safeClip.reel_preview_url || safeClip.reel_thumbnail_url || safeClip.caption_preview_url || safeClip.caption_thumbnail_url || '';
+    const [previewImageUrl, setPreviewImageUrl] = useState(initialPreviewImageUrl);
+    const [thumbnailEnsureAttempted, setThumbnailEnsureAttempted] = useState(false);
+    const [isThumbnailRegenerating, setIsThumbnailRegenerating] = useState(false);
 
     const resolveTextLayer = (layers) => layers?.captions || layers?.subtitles || null;
 
@@ -105,6 +120,12 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data?.durationSec) setClipDuration(data.durationSec);
+                if (data?.remotionLayers && typeof data.remotionLayers === 'object') {
+                    setActiveLayers((prev) => ({
+                        ...prev,
+                        ...(data.remotionLayers || {}),
+                    }));
+                }
             })
             .catch(() => {});
     }, [jobId, clipIndexForApi]);
@@ -139,6 +160,58 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             setCaptionsCreditError('');
         }
     }, [showCaptionsModal]);
+
+    useEffect(() => {
+        setPreviewImageUrl(initialPreviewImageUrl);
+    }, [initialPreviewImageUrl]);
+
+    useEffect(() => {
+        setThumbnailEnsureAttempted(false);
+    }, [jobId, clipIndexForApi]);
+
+    useEffect(() => {
+        const needsImageFallback = !previewImageUrl || isLikelyVideoAsset(previewImageUrl);
+        if (!hideVideoPreview || !hasClipContext || !needsImageFallback || thumbnailEnsureAttempted) return;
+
+        const controller = new AbortController();
+        let cancelled = false;
+        setThumbnailEnsureAttempted(true);
+        setIsThumbnailRegenerating(true);
+
+        // Prevent stuck loading badge if backend hangs on legacy thumbnail generation.
+        const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+
+        fetch(getApiUrl(`/api/clip/${jobId}/${clipIndexForApi}/preview-image/ensure`), {
+            headers: {
+                ...(user?.id ? { 'X-User-Id': user.id } : {}),
+            },
+            signal: controller.signal,
+        })
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data) => {
+                if (cancelled) return;
+                const nextImage = typeof data?.preview_image_url === 'string' ? data.preview_image_url : '';
+                if (nextImage) setPreviewImageUrl(nextImage);
+            })
+            .catch(() => {})
+            .finally(() => {
+                window.clearTimeout(timeoutId);
+                if (!cancelled) setIsThumbnailRegenerating(false);
+            });
+
+        return () => {
+            cancelled = true;
+            controller.abort();
+            window.clearTimeout(timeoutId);
+        };
+    }, [thumbnailEnsureAttempted, hideVideoPreview, hasClipContext, previewImageUrl, jobId, clipIndexForApi, user?.id]);
+
+    useEffect(() => {
+        const hasValidPreviewImage = Boolean(previewImageUrl) && !isLikelyVideoAsset(previewImageUrl);
+        if (hasValidPreviewImage) {
+            setIsThumbnailRegenerating(false);
+        }
+    }, [previewImageUrl]);
 
     // Release generated object URLs to avoid leaking browser memory.
     useEffect(() => () => {
@@ -320,6 +393,8 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             const renderedBlob = await fetch(blobUrl).then((res) => res.blob());
             const formData = new FormData();
             formData.append('file', renderedBlob, `captioned_${jobId}_${clipIndexForApi}.mp4`);
+            formData.append('subtitle_config', JSON.stringify(captionLayer));
+            formData.append('remotion_layers', JSON.stringify(newLayers));
 
             const persistRes = await fetch(getApiUrl(`/api/reels/${jobId}/${clipIndexForApi}/captions/persist`), {
                 method: 'POST',
@@ -353,6 +428,9 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             }
 
             const persistData = await persistRes.json();
+            if (persistData?.preview_image_url) {
+                setPreviewImageUrl(String(persistData.preview_image_url));
+            }
             if (persistData.new_video_url) {
                 if (blobUrl.startsWith('blob:')) {
                     URL.revokeObjectURL(blobUrl);
@@ -551,31 +629,59 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
         <div className="bg-surface border border-slate-200 dark:border-white/5 rounded-2xl overflow-hidden flex flex-col md:flex-row group hover:border-slate-300 dark:hover:border-white/10 transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto" style={{ animationDelay: `${index * 0.1}s` }}>
             {/* Left: Video Preview (Responsive Width) */}
             <div className="w-full md:w-[180px] lg:w-[200px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
-                <video
-                    key={currentVideoUrl || 'empty-video-src'}
-                    ref={videoRef}
-                    src={currentVideoUrl}
-                    controls
-                    className="w-full h-full object-cover"
-                    playsInline
-                    preload="metadata"
-                    onPlay={() => {
-                        const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
-                        onPlay?.(clipStart + currentTime);
-                    }}
-                    onPause={() => onPause?.()}
-                    onEnded={() => {
-                        if (videoRef.current) {
-                            videoRef.current.currentTime = 0;
-                            videoRef.current.play();
-                        }
-                    }}
-                />
+                {hideVideoPreview ? (
+                    previewImageUrl ? (
+                        <img src={previewImageUrl} alt={`Clip ${index + 1}`} className="w-full h-full object-cover" loading="lazy" />
+                    ) : (
+                        <div className="relative h-full w-full overflow-hidden bg-zinc-900">
+                            <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-zinc-800 via-zinc-700 to-zinc-800" />
+                            <div className="absolute inset-x-4 bottom-4 h-2 rounded bg-zinc-600/70" />
+                            <div className="absolute inset-x-10 bottom-8 h-2 rounded bg-zinc-600/50" />
+                        </div>
+                    )
+                ) : (
+                    <video
+                        key={currentVideoUrl || 'empty-video-src'}
+                        ref={videoRef}
+                        src={currentVideoUrl}
+                        controls
+                        className="w-full h-full object-cover"
+                        playsInline
+                        preload="metadata"
+                        onPlay={() => {
+                            const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
+                            onPlay?.(clipStart + currentTime);
+                        }}
+                        onPause={() => onPause?.()}
+                        onEnded={() => {
+                            if (videoRef.current) {
+                                videoRef.current.currentTime = 0;
+                                videoRef.current.play();
+                            }
+                        }}
+                    />
+                )}
                 <div className="absolute top-3 left-3 flex gap-2">
-                    <span className="bg-black/60 backdrop-blur-md text-white text-[10px] font-bold px-2 py-1 rounded-md border border-slate-300 dark:border-white/10 uppercase tracking-wide">
+                    <span className="bg-gradient-to-r from-indigo-600/95 to-blue-600/95 text-white text-[10px] font-bold px-2 py-1 rounded-md border border-indigo-300/40 shadow-md uppercase tracking-wide">
                         Clip {index + 1}
                     </span>
                 </div>
+                {hideVideoPreview && currentVideoUrl ? (
+                    <button
+                        type="button"
+                        onClick={() => setShowVideoPreviewModal(true)}
+                        className="absolute bottom-3 right-3 inline-flex items-center gap-1 rounded-md border border-cyan-200/50 bg-gradient-to-r from-cyan-600/95 to-sky-600/95 px-2 py-1 text-[10px] font-semibold text-white shadow-md hover:from-cyan-500 hover:to-sky-500"
+                    >
+                        <Play size={12} />
+                        Preview
+                    </button>
+                ) : null}
+                {hideVideoPreview && isThumbnailRegenerating ? (
+                    <span className="absolute bottom-3 left-3 inline-flex items-center gap-1 rounded-md border border-amber-300/40 bg-amber-500/25 px-2 py-1 text-[10px] font-semibold text-amber-50 shadow-sm">
+                        <Loader2 size={11} className="animate-spin" />
+                        thumbnail regenerating...
+                    </span>
+                ) : null}
 
                 {/* Auto Edit Overlay if Processing */}
                 {isEditing && (
@@ -781,7 +887,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 isProcessing={isCaptioning}
                 creditBlocked={captionsCreditBlocked}
                 creditError={captionsCreditError}
-                videoUrl={originalVideoUrl}
+                videoUrl={latestEditableVideoUrl}
                 jobId={jobId}
                 clipIndex={clipIndexForApi}
                 existingHook={activeLayers.hook}
@@ -793,11 +899,31 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 onClose={() => setShowHookModal(false)}
                 onGenerate={handleHook}
                 isProcessing={isHooking}
-                videoUrl={originalVideoUrl}
+                videoUrl={latestEditableVideoUrl}
                 initialText={safeClip.viral_hook_text}
                 durationInSeconds={Math.max(1, clipEnd - clipStart)}
                 existingSubtitles={resolveTextLayer(activeLayers)}
             />
+
+            {showVideoPreviewModal && currentVideoUrl ? (
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-md overflow-hidden rounded-2xl border border-slate-300 dark:border-white/10 bg-white dark:bg-zinc-950">
+                        <div className="flex items-center justify-between border-b border-slate-300 dark:border-white/10 px-4 py-3">
+                            <p className="text-sm font-semibold text-slate-900 dark:text-white">{t('reels.preview', 'Preview')}</p>
+                            <button
+                                type="button"
+                                onClick={() => setShowVideoPreviewModal(false)}
+                                className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-slate-200 dark:hover:bg-white/10"
+                            >
+                                <X size={14} />
+                            </button>
+                        </div>
+                        <div className="bg-black p-3">
+                            <video src={currentVideoUrl} controls className="mx-auto max-h-[75vh] w-full rounded-lg" playsInline preload="metadata" />
+                        </div>
+                    </div>
+                </div>
+            ) : null}
 
 
         </div>

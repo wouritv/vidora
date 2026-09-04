@@ -493,8 +493,8 @@ def analyze_scenes_strategy(video_path, scenes):
     tracked_boxes_per_scene = []
 
     for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
-        start_f = start.get_frames()
-        end_f = end.get_frames()
+        start_f = start.frame_num
+        end_f = end.frame_num
 
         # Garde-fou scènes très courtes (< ~0.5s)
         if end_f - start_f < max(3, int(fps * 0.5)):
@@ -701,6 +701,10 @@ def refine_multi_speaker_scenes(video_path, scenes, strategies, tracked_boxes_pe
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     refined = strategies.copy()
+    audio_rms_full = _extract_audio_rms(video_path, fps)
+    if audio_rms_full is None or audio_rms_full.size < 3:
+        cap.release()
+        return refined
 
     for idx, (start, end) in enumerate(tqdm(scenes, desc="   Refining MULTI_SPEAKER scenes")):
         if strategies[idx] != 'MULTI_SPEAKER':
@@ -710,10 +714,11 @@ def refine_multi_speaker_scenes(video_path, scenes, strategies, tracked_boxes_pe
         if len(tracked_boxes) < 2:
             continue
 
-        start_f = start.get_frames()
-        end_f = end.get_frames()
-        audio_rms = _extract_audio_rms(video_path, fps)
-        if audio_rms is None or audio_rms.size < 3:
+        start_f = start.frame_num
+        end_f = end.frame_num
+        # Align audio to the current scene to correlate the correct time range.
+        audio_rms = audio_rms_full[start_f:end_f]
+        if audio_rms.size < 3:
             continue
 
         mouth_signals = _track_mouth_signals(cap, start_f, end_f, tracked_boxes)
@@ -1108,8 +1113,13 @@ def _prepare_temp_paths(final_output_video):
 
 def _cleanup_existing_outputs(*paths):
     for path in paths:
-        if os.path.exists(path):
-            os.remove(path)
+        if not path:
+            continue
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except FileNotFoundError:
+            continue
 
 
 def _fallback_single_scene(input_video, fps):
@@ -1129,7 +1139,7 @@ def _compute_output_dimensions(original_height):
 
 
 def _build_scene_boundaries(scenes):
-    return [(start.get_frames(), end.get_frames()) for start, end in scenes]
+    return [(start.frame_num, end.frame_num) for start, end in scenes]
 
 
 def _advance_scene_index(frame_number, current_scene_index, scene_boundaries):

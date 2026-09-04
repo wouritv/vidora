@@ -681,6 +681,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                                 onPlay={(time) => handleClipPlay(time)}
                                 onPause={handleClipPause}
                                 compactActions={true}
+                                hideVideoPreview
                               />
                             ))}
                           </div>
