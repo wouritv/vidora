@@ -47,7 +47,7 @@ export default function ResetPassword() {
             <main className="page auth-page">
                 <section className="card auth-card auth-surface">
                     <p className="eyebrow">{t("app.password","Mot de passe")}</p>
-                    <h1>{t("app.btReset","Reinitialiser")}</h1>
+                    <h1 className="auth-title">{t("app.btReset","Reinitialiser")}</h1>
                     <p className="hint">
                         {t("app.resetSubtitle","Saisis l'adresse email du compte pour recevoir le lien de reinitialisation.")}
                     </p>

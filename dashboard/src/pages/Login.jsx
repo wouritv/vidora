@@ -93,7 +93,7 @@ export default function Login() {
             <main className="page auth-page">
                 <section className="card auth-card auth-surface">
                     <p className="eyebrow">{t("app.authTitle","Authentification")}</p>
-                    <h1>{mode === "signin" ? t("app.btLogin","Connexion") : t("app.btRegister","Creation de compte")}</h1>
+                    <h1 className="auth-title">{mode === "signin" ? t("app.btLogin","Connexion") : t("app.btRegister","Creation de compte")}</h1>
                     <p className="hint">{t("app.authSubtitle","Connecte-toi pour acceder au dashboard.")}</p>
 
                     <form onSubmit={handleAuth} className="form auth-form">

@@ -308,7 +308,7 @@ export default function AbonnementPage() {
                         <h2 className="text-xl font-semibold">{t("abonnement.fillCredit","Recharger des crédits")}</h2>
                         <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">
                             1 EUR = {CREDIT_RATE} {t("abonnement.creditRate","crédits · solde actuel ")} :{" "}
-                            <span className="text-white font-semibold">{credits.toLocaleString()} / {Number(creditMax || 0).toLocaleString()} cr</span>
+                            <span className="text-slate-900 dark:text-white font-semibold">{credits.toLocaleString()} / {Number(creditMax || 0).toLocaleString()} cr</span>
                         </p>
                     </div>
                 </div>
@@ -321,8 +321,8 @@ export default function AbonnementPage() {
                                 onClick={() => setBuyAmount(amt)}
                                 className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition ${
                                     buyAmount === amt
-                                        ? "border-yellow-400 bg-yellow-400/10 text-yellow-300"
-                                        : "border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300 hover:border-slate-400 dark:border-white/20"
+                                        ? "border-amber-300 dark:border-yellow-400 bg-amber-100 dark:bg-yellow-400/10 text-amber-800 dark:text-yellow-300"
+                                        : "border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300 hover:border-slate-400 dark:hover:border-white/20"
                                 }`}
                             >
                                 {amt}€
@@ -342,7 +342,7 @@ export default function AbonnementPage() {
                             min="1"
                             value={buyAmount}
                             onChange={(e) => setBuyAmount(Math.max(1, Number(e.target.value) || 1))}
-                            className="w-20 px-3 py-1.5 bg-white/10 border border-slate-400 dark:border-white/20 rounded-lg text-white text-sm text-center focus:outline-none focus:border-yellow-500/50"
+                            className="w-20 px-3 py-1.5 bg-white/10 border border-slate-400 dark:border-white/20 rounded-lg text-slate-900 dark:text-white text-sm text-center focus:outline-none focus:border-yellow-500/50"
                         />
                         <button
                             onClick={() => setBuyAmount(buyAmount + 1)}
@@ -355,12 +355,12 @@ export default function AbonnementPage() {
 
                     <div className="ml-auto flex items-center gap-3">
                         <span className="text-sm text-slate-500 dark:text-zinc-400">
-                            = <span className="text-yellow-300 font-semibold">{creditsToAdd.toLocaleString()} crédits</span>
+                            = <span className="text-amber-700 dark:text-yellow-300 font-semibold">{creditsToAdd.toLocaleString()} crédits</span>
                         </span>
                         <button
                             onClick={handleBuyCredits}
                             disabled={buyLoading || !user?.id}
-                            className="flex items-center gap-2 px-4 py-2 bg-yellow-500/20 border border-yellow-500/30 hover:bg-yellow-500/30 disabled:opacity-60 text-yellow-300 rounded-xl text-sm font-semibold transition"
+                            className="flex items-center gap-2 px-4 py-2 bg-amber-500 border border-amber-600 hover:bg-amber-400 disabled:opacity-60 text-white dark:bg-yellow-500/20 dark:border-yellow-500/30 dark:hover:bg-yellow-500/30 dark:text-yellow-300 rounded-xl text-sm font-semibold transition"
                         >
                             {buyLoading ? <Loader2 size={16} className="animate-spin" /> : <CreditCardIcon size={16} />}
                             {buyLoading ? t("abonnement.redirection","Redirection...") : t("abonnement.payer","Payer")}

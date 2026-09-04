@@ -28,6 +28,18 @@
 
 .auth-page h1 { margin: 8px 0; font-size: clamp(1.7rem, 2.7vw, 2.2rem); }
 
+.auth-page .auth-title {
+    color: #0b1220;
+    font-weight: 900;
+    letter-spacing: -0.01em;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.dark .auth-page .auth-title {
+    color: var(--ink);
+    text-shadow: none;
+}
+
 .auth-page.page {
     min-height: 100vh;
     padding: 28px;

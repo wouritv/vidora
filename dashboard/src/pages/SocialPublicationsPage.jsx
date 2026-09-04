@@ -13,15 +13,41 @@ const PLATFORMS = [
 ];
 
 
-const getPlatformIcon = (platform) => {
-    const icons = {
-        facebook: "📘",
-        instagram: "📷",
-        tiktok: "🎵",
-        youtube: "▶️",
-        linkedin: "💼",
+const getPlatformIconColorClass = (platform) => {
+    const colors = {
+        facebook: "text-[#1877F2]",
+        instagram: "text-[#E4405F]",
+        tiktok: "text-slate-900 dark:text-white",
+        youtube: "text-[#FF0000]",
+        linkedin: "text-[#0A66C2]",
     };
-    return icons[platform] || "📱";
+    return colors[platform] || "text-slate-500 dark:text-zinc-400";
+};
+
+const PLATFORM_BRAND_PATHS = {
+    facebook:
+        "M24 12.073C24 5.405 18.627 0 12 0S0 5.405 0 12.073c0 6.016 4.388 10.993 10.125 11.854V15.49H7.078v-3.417h3.047V9.469c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.931-1.956 1.887v2.198h3.328l-.532 3.417h-2.796v8.437C19.612 23.066 24 18.089 24 12.073z",
+    instagram:
+        "M7.75 2C4.575 2 2 4.575 2 7.75v8.5C2 19.425 4.575 22 7.75 22h8.5C19.425 22 22 19.425 22 16.25v-8.5C22 4.575 19.425 2 16.25 2h-8.5zm0 1.8h8.5a3.95 3.95 0 0 1 3.95 3.95v8.5a3.95 3.95 0 0 1-3.95 3.95h-8.5a3.95 3.95 0 0 1-3.95-3.95v-8.5a3.95 3.95 0 0 1 3.95-3.95zm9.45 1.35a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4zM12 6.65A5.35 5.35 0 1 0 12 17.35 5.35 5.35 0 0 0 12 6.65zm0 1.8A3.55 3.55 0 1 1 12 15.55 3.55 3.55 0 0 1 12 8.45z",
+    tiktok:
+        "M19.589 6.686a4.793 4.793 0 0 1-3.77-4.245V2h-3.445v13.672a2.896 2.896 0 0 1-5.201 1.743l-.002-.001.002.001a2.895 2.895 0 0 1 3.183-4.51v-3.5a6.329 6.329 0 0 0-5.394 10.692 6.33 6.33 0 0 0 10.857-4.424V8.687a8.182 8.182 0 0 0 4.773 1.526V6.79a4.831 4.831 0 0 1-1.003-.104z",
+    youtube:
+        "M23.498 6.186a2.997 2.997 0 0 0-2.11-2.12C19.53 3.545 12 3.545 12 3.545s-7.53 0-9.389.52a2.997 2.997 0 0 0-2.11 2.121C0 8.051 0 12 0 12s0 3.949.502 5.814a2.997 2.997 0 0 0 2.11 2.12c1.859.52 9.389.52 9.389.52s7.53 0 9.389-.52a2.997 2.997 0 0 0 2.11-2.12C24 15.949 24 12 24 12s0-3.949-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z",
+    linkedin:
+        "M20.447 20.452H16.89v-5.569c0-1.328-.024-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.345V9h3.414v1.561h.049c.476-.9 1.637-1.85 3.367-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 1 1 0-4.124 2.062 2.062 0 0 1 0 4.124zM7.119 20.452H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z",
+    default:
+        "M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm0 2a8 8 0 0 1 8 8 7.907 7.907 0 0 1-1.54 4.7A11.117 11.117 0 0 0 12 14.6a11.117 11.117 0 0 0-6.46 2.1A7.907 7.907 0 0 1 4 12a8 8 0 0 1 8-8zm0 16a7.963 7.963 0 0 1-4.89-1.67 9.145 9.145 0 0 1 9.78 0A7.963 7.963 0 0 1 12 20z",
+};
+
+const PlatformBrandIcon = ({ platform }) => {
+    const className = `h-5 w-5 ${getPlatformIconColorClass(platform)}`;
+    const path = PLATFORM_BRAND_PATHS[platform] || PLATFORM_BRAND_PATHS.default;
+
+    return (
+        <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+            <path d={path} />
+        </svg>
+    );
 };
 
 const getPlatformHost = (platform) => {
@@ -67,7 +93,9 @@ const SocialPublicationCard = ({ pub, badge, t, deletingId, onDeletePublication 
         >
             <div className="p-4 border-b border-slate-200 dark:border-white/5 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                    <span className="text-2xl">{getPlatformIcon(pub.platform)}</span>
+                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-white dark:bg-zinc-900/70 border border-slate-200 dark:border-white/10">
+                        <PlatformBrandIcon platform={pub.platform} />
+                    </span>
                     <div>
                         <p className="text-xs uppercase font-semibold text-slate-500 dark:text-zinc-400 tracking-wider">{pub.platform}</p>
                     </div>
@@ -289,14 +317,10 @@ const fetchSocialPublications = async ({
     };
 };
 
-const renderPublicationCount = (total) => {
-    if (total <= 0) return null;
-
-    return (
-        <div className="text-sm text-slate-500 dark:text-zinc-400">
-            <span className="font-semibold text-slate-900 dark:text-white">{total}</span> publication{total !== 1 ? "s" : ""}
-        </div>
-    );
+const getPublicationCountLabel = (total, t) => {
+    return total === 1
+        ? t("social.publicationCount", "publication")
+        : t("social.publicationsCount", "publications");
 };
 
 export default function SocialPublicationsPage() {
@@ -399,7 +423,6 @@ export default function SocialPublicationsPage() {
                         <h1 className="text-3xl font-black tracking-tight">{t('social.socialPublications', 'Publications sociales')}</h1>
                         <p className="text-sm text-slate-500 dark:text-zinc-400 mt-1">{t('social.realTimeTracking', 'Suivi en temps réel de vos publications')}</p>
                     </div>
-                    {renderPublicationCount(total)}
                 </div>
 
                 {/* Filtres */}
@@ -517,26 +540,29 @@ export default function SocialPublicationsPage() {
             </div>
 
             {/* Pagination */}
-            {totalPages > 1 && (
-                <div className="border-t border-slate-200 dark:border-white/5 bg-background/50 backdrop-blur-md px-6 py-4 shrink-0 flex items-center justify-between">
+            {total > 0 && (
+                <div className="border-t border-slate-300 dark:border-white/10 bg-background/50 backdrop-blur-md px-6 py-4 shrink-0 flex items-center justify-between text-sm">
                     <p className="text-sm text-slate-500 dark:text-zinc-400">
-                        Page <span className="font-semibold text-slate-900 dark:text-white">{page}</span> sur{" "}
-                        <span className="font-semibold text-slate-900 dark:text-white">{totalPages}</span>
+                        <span className="font-semibold text-slate-900 dark:text-white">{total}</span>{" "}
+                        {getPublicationCountLabel(total, t)}
                     </p>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-2">
                         <button
+                            type="button"
                             onClick={() => setPage(Math.max(1, page - 1))}
                             disabled={page === 1}
-                            className="px-3 py-2 rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium text-slate-800 dark:text-white transition-colors shadow-sm"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-3 py-1.5 font-medium text-slate-800 dark:text-zinc-300 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-40"
                         >
-                            {t("common.previous","Précédent")}
+                            {t("common.previous", "Previous")}
                         </button>
+                        <span className="text-slate-500 dark:text-zinc-400">{t("common.page", "Page")} {page} / {totalPages}</span>
                         <button
+                            type="button"
                             onClick={() => setPage(Math.min(totalPages, page + 1))}
                             disabled={page === totalPages}
-                            className="px-3 py-2 rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium text-slate-800 dark:text-white transition-colors shadow-sm"
+                            className="rounded-lg border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-3 py-1.5 font-medium text-slate-800 dark:text-zinc-300 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-40"
                         >
-                            {t("common.next","Suivant")}
+                            {t("common.next", "Next")}
                         </button>
                     </div>
                 </div>

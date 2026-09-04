@@ -644,7 +644,7 @@ export default function SettingsPage() {
                 className={`p-4 rounded-lg border-2 transition-all ${
                   isConnected
                     ? 'border-green-500/50 bg-green-500/5'
-                    : 'border-slate-300 dark:border-white/10 hover:border-slate-400 dark:border-white/20 bg-white/5'
+                    : 'border-slate-300 dark:border-white/10 hover:border-slate-400 dark:hover:border-white/20 bg-white/5'
                 }`}
               >
                 <div className="flex items-start justify-between mb-3">
@@ -653,19 +653,19 @@ export default function SettingsPage() {
                       <NetworkIcon size={20} className="text-white" />
                     </div>
                     <div>
-                      <p className="font-medium">{network.name}</p>
-                      <p className="text-xs text-slate-400 dark:text-zinc-500">{network.description}</p>
+                      <p className="font-medium text-slate-900 dark:text-white">{network.name}</p>
+                      <p className="text-xs text-slate-600 dark:text-zinc-400">{network.description}</p>
                     </div>
                   </div>
                   {isConnected && (
-                    <div className="px-2 py-1 bg-green-500/20 border border-green-500/30 rounded text-xs text-green-400 font-medium flex items-center gap-1">
+                    <div className="px-2 py-1 rounded text-xs font-medium flex items-center gap-1 bg-emerald-100 dark:bg-green-500/20 border border-emerald-300 dark:border-green-500/30 text-emerald-800 dark:text-green-400">
                       <Check size={12} /> {t('settings.connected', 'Connected')}
                     </div>
                   )}
                 </div>
 
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs text-slate-400 dark:text-zinc-500 truncate">
+                  <p className="text-xs text-slate-600 dark:text-zinc-400 truncate">
                     {account?.platform_account_name || (isConnected ? t('settings.connected', 'Connected') : t('settings.notConnected', 'Not connected'))}
                   </p>
                   {isConnected ? (
@@ -673,7 +673,7 @@ export default function SettingsPage() {
                       type="button"
                       disabled={isBusy}
                       onClick={() => disconnectPlatform(network.id)}
-                      className="rounded-md border border-slate-400 dark:border-white/20 px-2 py-1 text-xs text-zinc-200 hover:bg-white/10 disabled:opacity-60"
+                      className="rounded-md border border-rose-300 dark:border-red-500/30 bg-rose-100 dark:bg-red-500/10 px-2 py-1 text-xs text-rose-800 dark:text-red-300 hover:bg-rose-200 dark:hover:bg-red-500/20 disabled:opacity-60"
                     >
                       {isBusy ? '...' : t('settings.disconnect', 'Disconnect')}
                     </button>
@@ -745,20 +745,20 @@ export default function SettingsPage() {
           <>
             <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-4 mb-4 text-sm">
               <p className="text-slate-700 dark:text-zinc-300">
-                {t('settings.status', 'Status')}: <span className="font-semibold text-white">{subscription ? t('settings.active', 'Active') : t('settings.inactive', 'Inactive')}</span>
+                {t('settings.status', 'Status')}: <span className="font-semibold text-slate-900 dark:text-white">{subscription ? t('settings.active', 'Active') : t('settings.inactive', 'Inactive')}</span>
               </p>
               {subscription ? (
-                <p className="text-slate-500 dark:text-zinc-400 mt-1">
-                  {t('abonnement.currentPlan', 'Current plan')}: <span className="text-white font-medium">{currentPlanLabel}</span>
+                <p className="text-slate-600 dark:text-zinc-400 mt-1">
+                  {t('abonnement.currentPlan', 'Current plan')}: <span className="text-slate-900 dark:text-white font-medium">{currentPlanLabel}</span>
                 </p>
               ) : null}
               {subscription?.payment_end_date ? (
-                <p className="text-slate-500 dark:text-zinc-400 mt-1">
+                <p className="text-slate-600 dark:text-zinc-400 mt-1">
                   {t('settings.periodEnd', 'Period end')}: {new Date(subscription.payment_end_date).toLocaleDateString('fr-FR')}
                 </p>
               ) : null}
               {subscription?.retention_deadline_at ? (
-                <p className="text-amber-300 mt-1">
+                <p className="text-amber-700 dark:text-amber-300 mt-1">
                   {t('settings.retentionUntil', 'Content retention until')}: {new Date(subscription.retention_deadline_at).toLocaleDateString('fr-FR')}
                 </p>
               ) : null}
@@ -768,40 +768,40 @@ export default function SettingsPage() {
               <button
                 onClick={() => runSubAction('cancel')}
                 disabled={!subscription || subActionLoading === 'cancel'}
-                className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300 hover:bg-red-500/20 disabled:opacity-40"
+                className="rounded-lg border border-rose-300 dark:border-red-500/30 bg-rose-100 dark:bg-red-500/10 px-3 py-2 text-xs text-rose-800 dark:text-red-300 hover:bg-rose-200 dark:hover:bg-red-500/20 disabled:opacity-40"
               >
                 {subActionLoading === 'cancel' ? '...' : t('settings.cancelRenewal', 'Cancel renewal')}
               </button>
               <button
                 onClick={() => runSubAction('reactivate')}
                 disabled={subActionLoading === 'reactivate'}
-                className="rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-300 hover:bg-green-500/20 disabled:opacity-40"
+                className="rounded-lg border border-emerald-300 dark:border-green-500/30 bg-emerald-100 dark:bg-green-500/10 px-3 py-2 text-xs text-emerald-800 dark:text-green-300 hover:bg-emerald-200 dark:hover:bg-green-500/20 disabled:opacity-40"
               >
                 {subActionLoading === 'reactivate' ? '...' : t('settings.reactivate', 'Reactivate')}
               </button>
               <button
                 onClick={() => runSubAction('pause')}
                 disabled={!subscription || subActionLoading === 'pause'}
-                className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300 hover:bg-amber-500/20 disabled:opacity-40"
+                className="rounded-lg border border-amber-300 dark:border-amber-500/30 bg-amber-100 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-500/20 disabled:opacity-40"
               >
                 <span className="inline-flex items-center gap-1"><PauseCircle size={12} /> {subActionLoading === 'pause' ? '...' : t('settings.pause', 'Pause')}</span>
               </button>
               <button
                 onClick={() => runSubAction('resume')}
                 disabled={!subscription || subActionLoading === 'resume'}
-                className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-40"
+                className="rounded-lg border border-sky-300 dark:border-blue-500/30 bg-sky-100 dark:bg-blue-500/10 px-3 py-2 text-xs text-sky-800 dark:text-blue-300 hover:bg-sky-200 dark:hover:bg-blue-500/20 disabled:opacity-40"
               >
                 <span className="inline-flex items-center gap-1"><PlayCircle size={12} /> {subActionLoading === 'resume' ? '...' : t('settings.resume', 'Resume')}</span>
               </button>
             </div>
 
             <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-4 mb-4">
-              <p className="text-xs text-slate-500 dark:text-zinc-400 mb-2">{t('settings.changePlan', 'Change plan')}</p>
+              <p className="text-xs text-slate-600 dark:text-zinc-400 mb-2">{t('settings.changePlan', 'Change plan')}</p>
               <div className="flex flex-wrap gap-2">
                 <select
                   value={selectedPlan}
                   onChange={(e) => setSelectedPlan(e.target.value)}
-                  className="rounded-lg border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
+                  className="rounded-lg border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 px-3 py-2 text-sm text-slate-900 dark:text-white"
                 >
                   <option value="">{t('settings.selectPlan', 'Select a plan')}</option>
                   {subPlans.map((plan) => (
@@ -811,7 +811,7 @@ export default function SettingsPage() {
                 <button
                   onClick={() => selectedPlan && runSubAction('change-plan', { plan_id: selectedPlan })}
                   disabled={!selectedPlan || subActionLoading === 'change-plan'}
-                  className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary hover:bg-primary/20 disabled:opacity-40"
+                  className="rounded-lg border border-blue-700 dark:border-primary/30 bg-blue-600 dark:bg-primary/10 px-3 py-2 text-xs text-white dark:text-primary hover:bg-blue-500 dark:hover:bg-primary/20 disabled:opacity-40"
                 >
                   {subActionLoading === 'change-plan' ? '...' : t('settings.change', 'Change')}
                 </button>
@@ -859,7 +859,7 @@ export default function SettingsPage() {
           </div>
           <div>
             <h2 className="text-xl font-semibold">Recharger des crédits</h2>
-            <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">1 EUR = {CREDIT_RATE} {t("abonnement.creditRate","crédits · solde actuel ")}: <span className="text-white font-medium">{credits.toLocaleString()} / {Number(creditMax || 0).toLocaleString()} cr</span></p>
+            <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">1 EUR = {CREDIT_RATE} {t("abonnement.creditRate","crédits · solde actuel ")}: <span className="text-slate-900 dark:text-white font-medium">{credits.toLocaleString()} / {Number(creditMax || 0).toLocaleString()} cr</span></p>
           </div>
         </div>
 
@@ -872,8 +872,8 @@ export default function SettingsPage() {
                 onClick={() => setBuyAmount(amt)}
                 className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition ${
                   buyAmount === amt
-                    ? 'border-yellow-400 bg-yellow-400/10 text-yellow-300'
-                    : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300 hover:border-slate-400 dark:border-white/20'
+                    ? 'border-amber-300 dark:border-yellow-400 bg-amber-100 dark:bg-yellow-400/10 text-amber-800 dark:text-yellow-300'
+                    : 'border-slate-300 dark:border-white/10 bg-white/5 text-slate-700 dark:text-zinc-300 hover:border-slate-400 dark:hover:border-white/20'
                 }`}
               >
                 {amt}€
@@ -894,7 +894,7 @@ export default function SettingsPage() {
               min="1"
               value={buyAmount}
               onChange={(e) => setBuyAmount(Math.max(1, Number(e.target.value) || 1))}
-              className="w-20 px-3 py-1.5 bg-white/10 border border-slate-400 dark:border-white/20 rounded-lg text-white text-sm text-center focus:outline-none focus:border-yellow-500/50"
+              className="w-20 px-3 py-1.5 bg-white/10 border border-slate-400 dark:border-white/20 rounded-lg text-slate-900 dark:text-white text-sm text-center focus:outline-none focus:border-yellow-500/50"
             />
             <button
               onClick={() => setBuyAmount(buyAmount + 1)}
@@ -908,12 +908,12 @@ export default function SettingsPage() {
           {/* Summary + pay button */}
           <div className="ml-auto flex items-center gap-3">
             <span className="text-sm text-slate-500 dark:text-zinc-400">
-              = <span className="text-yellow-300 font-semibold">{creditsToAdd.toLocaleString()} crédits</span>
+              = <span className="text-amber-700 dark:text-yellow-300 font-semibold">{creditsToAdd.toLocaleString()} crédits</span>
             </span>
             <button
               onClick={handleBuyCredits}
               disabled={buyLoading || !canBuyCredits}
-              className="flex items-center gap-2 px-4 py-2 bg-yellow-500/20 border border-yellow-500/30 hover:bg-yellow-500/30 disabled:opacity-60 text-yellow-300 rounded-lg text-sm font-semibold transition"
+              className="flex items-center gap-2 px-4 py-2 bg-amber-500 border border-amber-600 hover:bg-amber-400 disabled:opacity-60 text-white dark:bg-yellow-500/20 dark:border-yellow-500/30 dark:hover:bg-yellow-500/30 dark:text-yellow-300 rounded-lg text-sm font-semibold transition"
             >
               {buyLoading ? <Loader2 size={16} className="animate-spin" /> : <CreditCardIcon size={16} />}
               {buyLoading ? 'Redirection...' : 'Payer'}
