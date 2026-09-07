@@ -2,6 +2,8 @@ import importlib
 import sys
 import types
 
+import pytest
+
 
 def _import_main_with_stubs(monkeypatch):
     cv2_mod = types.ModuleType("cv2")
@@ -75,4 +77,73 @@ def test_iou_computes_overlap_ratio(monkeypatch):
 
     assert main._iou([0, 0, 10, 10], [0, 0, 10, 10]) == 1.0
     assert main._iou([0, 0, 2, 2], [10, 10, 2, 2]) == 0.0
+
+
+def test_build_scene_sample_indices_respects_bounds(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setattr(main, "MIN_SAMPLES_PER_SCENE", 3)
+    monkeypatch.setattr(main, "MAX_SAMPLES_PER_SCENE", 5)
+    indices = main._build_scene_sample_indices(0, 100, fps=30)
+    assert len(indices) <= 5
+    assert indices[0] == 0
+
+
+def test_build_scene_sample_indices_fallback_when_empty(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    indices = main._build_scene_sample_indices(10, 10, fps=30)
+    assert indices == [10]
+
+
+def test_smooth_strategies_replaces_single_flip(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    result = main._smooth_strategies(["TRACK", "GENERAL", "TRACK"])
+    assert result == ["TRACK", "TRACK", "TRACK"]
+
+
+def test_classify_scene_strategy_thresholds(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    assert main._classify_scene_strategy(1) == "TRACK"
+    assert main._classify_scene_strategy(2) == "MULTI_SPEAKER"
+    assert main._classify_scene_strategy(4) == "MULTI_SPEAKER"
+    assert main._classify_scene_strategy(5) == "GENERAL"
+
+
+def test_looks_like_netscape_cookies(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    assert main._looks_like_netscape_cookies("") is False
+    assert main._looks_like_netscape_cookies("# Netscape HTTP Cookie File\n") is True
+    assert main._looks_like_netscape_cookies("example.com\tTRUE\t/\tFALSE\t0\tname\tvalue") is True
+    assert main._looks_like_netscape_cookies("invalid line") is False
+
+
+def test_get_video_resolution_success_and_failure(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+
+    class _CapOk:
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            if prop == main.cv2.CAP_PROP_FRAME_WIDTH:
+                return 1920
+            if prop == main.cv2.CAP_PROP_FRAME_HEIGHT:
+                return 1080
+            return 0
+
+        def release(self):
+            return None
+
+    main.cv2.CAP_PROP_FRAME_WIDTH = 3
+    main.cv2.CAP_PROP_FRAME_HEIGHT = 4
+    monkeypatch.setattr(main.cv2, "VideoCapture", lambda _: _CapOk(), raising=False)
+    assert main.get_video_resolution("video.mp4") == (1920, 1080)
+
+    class _CapBad:
+        def isOpened(self):
+            return False
+
+    monkeypatch.setattr(main.cv2, "VideoCapture", lambda _: _CapBad(), raising=False)
+    with pytest.raises(IOError):
+        main.get_video_resolution("bad.mp4")
+
 

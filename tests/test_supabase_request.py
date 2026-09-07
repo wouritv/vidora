@@ -316,3 +316,69 @@ def test_get_caption_by_job_clip_casts_index_and_returns_first_row(monkeypatch):
     assert _event_args(fake_client.events, supabase_request.SUPABASE_CAPTIONS_TABLE, "limit") == (1,)
 
 
+def test_list_projects_applies_filters_and_pagination(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_PROJECTS_TABLE: [_FakeResponse(data=[{"id": "p1"}], count=4)]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    rows, total = asyncio.run(
+        supabase_request.list_projects(
+            user_id="u-1",
+            page=2,
+            page_size=10,
+            project_type="reel",
+            status="completed",
+            query="name*",
+        )
+    )
+    assert rows == [{"id": "p1"}]
+    assert total == 4
+    assert _event_args(fake_client.events, supabase_request.SUPABASE_PROJECTS_TABLE, "range") == (10, 19)
+    eq_calls = [args for table, method, args, _ in fake_client.events if table == supabase_request.SUPABASE_PROJECTS_TABLE and method == "eq"]
+    assert ("project_type", "reel") in eq_calls
+    assert ("status", "completed") in eq_calls
+
+
+def test_get_project_returns_first_or_none(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_PROJECTS_TABLE: [
+                _FakeResponse(data=[{"id": "p1"}]),
+                _FakeResponse(data=[]),
+            ]
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+    assert asyncio.run(supabase_request.get_project("p1", "u1")) == {"id": "p1"}
+    assert asyncio.run(supabase_request.get_project("p2", "u1")) is None
+
+
+def test_update_project_status_rejects_invalid_status(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    assert asyncio.run(supabase_request.update_project_status("", "completed")) is None
+    assert asyncio.run(supabase_request.update_project_status("p1", "processing")) is None
+
+
+def test_update_project_status_builds_payload(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_PROJECTS_TABLE: [_FakeResponse(data=[{"id": "p1", "status": "completed"}])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    row = asyncio.run(supabase_request.update_project_status("p1", "completed"))
+    assert row == {"id": "p1", "status": "completed"}
+    payload = _event_args(fake_client.events, supabase_request.SUPABASE_PROJECTS_TABLE, "update")[0]
+    assert payload["status"] == "completed"
+    assert "completed_at" in payload
+    assert "updated_at" in payload
+
+
+def test_caption_status_value_defaults_to_termine(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    assert supabase_request.caption_status_value("en_cours") == "en_cours"
+    assert supabase_request.caption_status_value("echec") == "echec"
+    assert supabase_request.caption_status_value("other") == "termine"
+
+

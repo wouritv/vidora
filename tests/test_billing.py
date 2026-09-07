@@ -24,3 +24,55 @@ def test_calculate_credits_for_operation_enriches_payload():
     assert result["majoration_factor"] == billing.VIREEL_PRICE_MAJORATION
     assert result["final_credits"] == billing.apply_majoration(result["base_credits"])
 
+
+def test_apply_majoration_rounds_and_multiplies():
+    value = billing.apply_majoration(12.345)
+    assert value == round(12.345 * billing.VIREEL_PRICE_MAJORATION, 2)
+
+
+def test_estimate_reel_cost_usd_enables_optional_providers():
+    result = billing.estimate_reel_cost_usd(
+        duration_minutes=10,
+        video_size_gb=1.0,
+        uses_youtube_download=True,
+        youtube_download_gb=0.5,
+        uses_assembly=True,
+        uses_openai=True,
+        uses_gemini=True,
+    )
+
+    assert result["s3_usd"] > 0
+    assert result["vps_usd"] > 0
+    assert result["dataimpulse_usd"] > 0
+    assert result["assembly_usd"] > 0
+    assert result["total_usd"] >= result["s3_usd"] + result["vps_usd"]
+
+
+def test_estimate_reel_cost_usd_disables_optional_costs():
+    result = billing.estimate_reel_cost_usd(
+        duration_minutes=5,
+        video_size_gb=0.2,
+        uses_youtube_download=False,
+        youtube_download_gb=1.0,
+        uses_assembly=False,
+    )
+
+    assert result["dataimpulse_usd"] == 0.0
+    assert result["assembly_usd"] == 0.0
+
+
+def test_estimate_caption_cost_usd_with_and_without_assembly():
+    with_assembly = billing.estimate_caption_cost_usd(duration_minutes=5, uses_assembly=True)
+    without_assembly = billing.estimate_caption_cost_usd(duration_minutes=5, uses_assembly=False)
+
+    assert with_assembly["assembly_usd"] > 0
+    assert without_assembly["assembly_usd"] == 0.0
+    assert with_assembly["dataimpulse_usd"] == 0.0
+
+
+def test_estimate_publication_cost_usd_scales_with_platform_count():
+    one = billing.estimate_publication_cost_usd(platform_count=1, video_size_gb=0.5)
+    three = billing.estimate_publication_cost_usd(platform_count=3, video_size_gb=0.5)
+    assert three["total_usd"] > one["total_usd"]
+
+

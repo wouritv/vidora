@@ -232,3 +232,102 @@ def test_schedule_retry_after_waits_then_requeues(monkeypatch):
     queue.put.assert_awaited_once_with("job-delay")
 
 
+def test_enqueue_job_sets_status_and_logs(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+    job_manager.update_job_record = AsyncMock()
+    job_manager.append_job_log = AsyncMock()
+
+    asyncio.run(manager.enqueue_job("job-q"))
+
+    _, payload = job_manager.update_job_record.await_args.args
+    assert payload["status"] == "queued"
+    assert payload["progress"] == 0
+    assert payload["current_step"] == "queued"
+    job_manager.append_job_log.assert_awaited_once()
+
+
+def test_start_job_returns_none_when_missing(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+    job_manager.get_job_record = AsyncMock(return_value=None)
+
+    result = asyncio.run(manager.start_job("job-missing"))
+
+    assert result is None
+
+
+def test_start_job_increments_attempts(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+    job_manager.get_job_record = AsyncMock(return_value={"attempts": 2})
+    job_manager.append_job_log = AsyncMock()
+    job_manager.update_job_record = AsyncMock(return_value={"id": "job-s", "attempts": 3})
+
+    result = asyncio.run(manager.start_job("job-s"))
+
+    assert result == {"id": "job-s", "attempts": 3}
+    _, payload = job_manager.update_job_record.await_args.args
+    assert payload["status"] == "processing"
+    assert payload["attempts"] == 3
+
+
+def test_update_progress_clamps_and_optional_log(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+    job_manager.update_job_record = AsyncMock()
+    job_manager.append_job_log = AsyncMock()
+
+    asyncio.run(manager.update_progress("job-p", 999, "step", metadata=None))
+    _, payload = job_manager.update_job_record.await_args.args
+    assert payload["progress"] == 100
+    job_manager.append_job_log.assert_not_awaited()
+
+    asyncio.run(manager.update_progress("job-p", -5, "step", metadata={"a": 1}))
+    _, payload2 = job_manager.update_job_record.await_args.args
+    assert payload2["progress"] == 0
+    job_manager.append_job_log.assert_awaited()
+
+
+def test_complete_job_sets_terminal_fields_and_clears_runtime(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+    manager.runtime_jobs["job-done"] = {"tmp": True}
+    job_manager.update_job_record = AsyncMock()
+    job_manager.append_job_log = AsyncMock()
+
+    asyncio.run(
+        manager.complete_job(
+            "job-done",
+            {"ok": True},
+            actual_cost_usd=1.23,
+            actual_credit=2.2,
+            actual_storage_gb=-5,
+            consumed_quota=-1,
+            cost_breakdown={"x": 1},
+        )
+    )
+
+    _, payload = job_manager.update_job_record.await_args.args
+    assert payload["status"] == "completed"
+    assert payload["progress"] == 100
+    assert payload["actual_credit"] == 3
+    assert payload["actual_storage_gb"] == 0.0
+    assert payload["consumed_quota"] == 0.0
+    assert "job-done" not in manager.runtime_jobs
+
+
+def test_get_job_view_returns_none_when_missing(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+    job_manager.get_job_record = AsyncMock(return_value=None)
+
+    assert asyncio.run(manager.get_job_view("job-none")) is None
+
+
+def test_calc_elapsed_seconds_never_negative(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    monkeypatch.setattr(job_manager.time, "time", lambda: 50.0)
+    assert job_manager.calc_elapsed_seconds(100.0) == 0.0
+
+

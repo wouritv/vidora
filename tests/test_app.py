@@ -89,6 +89,14 @@ def test_parse_iso_datetime_accepts_zulu_and_invalid(monkeypatch):
     assert bad is None
 
 
+def test_parse_iso_datetime_handles_empty_and_naive(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    assert app._parse_iso_datetime("") is None
+    naive = app._parse_iso_datetime("2024-01-01T10:00:00")
+    assert naive is not None
+    assert naive.tzinfo is not None
+
+
 def test_clamp_job_priority_enforces_bounds(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
 
@@ -103,6 +111,39 @@ def test_is_probably_video_url_checks_extensions(monkeypatch):
     assert app._is_probably_video_url("https://cdn.example.com/v/final.MP4") is True
     assert app._is_probably_video_url("https://cdn.example.com/img.jpg") is False
     assert app._is_probably_video_url("") is False
+
+
+def test_estimate_transcript_duration_uses_max_segment_or_meta(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    transcript = {
+        "segments": [{"end": 3.5}, {"end": "9.2"}],
+        "meta": {"audio_seconds": "7.5"},
+    }
+    assert app._estimate_transcript_duration_seconds(transcript) == 9.2
+
+
+def test_get_user_id_header_success_and_missing(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _Req:
+        def __init__(self, user_id=None):
+            self.headers = {}
+            if user_id is not None:
+                self.headers["X-User-Id"] = user_id
+
+    assert app.get_user_id_header(_Req("u-1")) == "u-1"
+    with pytest.raises(app.HTTPException):
+        app.get_user_id_header(_Req())
+
+
+def test_resolve_scheduled_datetime_handles_aware_and_naive(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    aware = app._resolve_scheduled_datetime("2024-01-01T10:00:00Z", "Europe/Paris")
+    naive = app._resolve_scheduled_datetime("2024-01-01T10:00:00", "UTC")
+    bad = app._resolve_scheduled_datetime("not-a-date", "UTC")
+    assert aware is not None
+    assert naive is not None
+    assert bad is None
 
 
 def test_maybe_preempt_lower_priority_running_job_terminates_candidate(monkeypatch):
