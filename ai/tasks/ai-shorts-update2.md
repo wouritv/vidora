@@ -1,7 +1,0 @@
-### update a faire
-- sur la page des reels, ajouter une vue en grid pour visualiser les reels generes, avec la possibilite de switcher entre la vue en tableau et la vue en grid
-- pour la vue en grid, afficher la previsualisation du reel dans un format 16/9, avec le titre du reel et la description en dessous
-- au survol d'un element sur la gridview, faire apparaitre une barre flottante avec les actions possibles (visualiser, telecharger, partager, supprimer)
-- afficher aussi le status du reel (en cours, termine, echec) sur un coin de l'element reel dans la gridview
-- conserver le systeme de tri, pagination et recherche pour la gridview
-- pour les options d'edition (sous titrage), rajoute plus d'options de personnalisation (plus de polices, au lieu de mettre top, bottom et middle pour la position du texte, mettre un curseur (X et Y) qui permet de positionner le texte n'importe ou sur la video, ajouter la possibilite de changer la couleur du texte et de l'ombre du texte, option de texte en gras ou italique, option de texte en majuscule ou minuscule, option de texte en surbrillance, option de texte avec contour, option de texte avec fond transparent ou opaque, option de texte avec animation d'apparition et de disparition, animation zoom in et out, fade in et out, slide in et out, rotation, etc., epaisseur des traits de textes, option pour le nombre de mots qu'on dois afficher par ligne : entre 2 et 8)

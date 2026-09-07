@@ -1,6 +1,0 @@
-### update a faire
-- lors de la gestion des shorts, revoir le bloc qui affiche les systems logs cote ui, cela dois etre uniquement visible en backend et non en frontend.
-- Cote ui, afficher plutot une check liste des actions en cours de traitement, avec un status pour chaque action (processus demarrer, telechargement de la video, generation de la transcription, detection du nombre de reels a creer, creation des reels) et a la fin presenter tous les reels generes avec un lien pour les telecharger.
-- si pendant une generation de reels je quittes la page, dans la page tableau de bord je dois voir le statut de la generation en cours (en cours, termine, erreur) et pouvoir rouvrir la pae de de generation pour voir les details de la generation 
-  - dans le processus actuel cote ui, garder le bloc de gauche qui affiche le scan de la video lors du traitement, afficher le suivis du process dans un bloc de droite et enlever le bloc de logs systeme qui est actuellement en dessous du bloc de gauche.
-- l'affichage en popup actuel pendant le processus de generation doit etre revu, il faut afficher les popups dans un bloc de bas des 2 blocs cite plus haut et uniquement a la fin du processus de generation, avec un bouton pour fermer le popup et revenir a la page de generation.
