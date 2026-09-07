@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Sparkles, Activity, Globe, Calendar, Instagram, Youtube, ArrowLeft,
-  CheckCircle2, Clock3, Download, Film, Loader2, AlertCircle, X, Linkedin, Facebook,
+  Sparkles, Activity, ArrowLeft,
+  CheckCircle2, Clock3, Download, Film, Loader2, AlertCircle, X,
 } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -15,12 +15,6 @@ import { useTranslation } from "./state/LanguageContext";
 import { SESSION_KEY, SESSION_MAX_AGE } from "./lib/session";
 import SettingsPage from "./pages/Settings.jsx";
 import { useUserCredits } from "./state/UserCreditsContext";
-
-const TikTokIcon = ({ size = 16, className = "" }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className}>
-      <path d="M19.589 6.686a4.793 4.793 0 0 1-3.77-4.245V2h-3.445v13.672a2.896 2.896 0 0 1-5.201 1.743l-.002-.001.002.001a2.895 2.895 0 0 1 3.183-4.51v-3.5a6.329 6.329 0 0 0-5.394 10.692 6.33 6.33 0 0 0 10.857-4.424V8.687a8.182 8.182 0 0 0 4.773 1.526V6.79a4.831 4.831 0 0 1-1.003-.104z" />
-    </svg>
-);
 
 const getStatusBadgeClass = (status) => {
   if (status === 'completed') status = 'complete';
@@ -297,9 +291,10 @@ const Sidebar = ({ currentTab, onNavigate }) => (
 );
 
 
-const pollJob = async (jobId) => {
+const pollJob = async (jobId, userId = "") => {
   try {
-    const res = await fetch(getApiUrl(`/api/status/${jobId}`));
+    const headers = userId ? { "X-User-Id": userId } : undefined;
+    const res = await fetch(getApiUrl(`/api/status/${jobId}`), headers ? { headers } : undefined);
     if (!res.ok) {
       throw new Error(`Status check failed: ${res.status} ${res.statusText}`);
     }
@@ -344,7 +339,9 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
   const navigate = useNavigate();
   const location = useLocation();
   const currentTab = activeTab;
-  const forceNewOperation = new URLSearchParams(location.search).get('new') === '1';
+  const searchParams = new URLSearchParams(location.search);
+  const forceNewOperation = searchParams.get('new') === '1';
+  const projectId = searchParams.get('project_id') || '';
 
   const handleClipPause = () => setIsSyncedPlaying(false);
 
@@ -364,6 +361,91 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       return;
     }
 
+    if (projectId && user?.id) {
+      let cancelled = false;
+      const restoreProjectJob = async () => {
+        try {
+          const response = await fetch(getApiUrl(`/api/projects/${projectId}/job`), {
+            headers: { 'X-User-Id': user.id },
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (cancelled) return;
+          if (!response.ok) {
+            // Fallback for older backend versions where /projects/{id}/job may not exist yet.
+            const projectResp = await fetch(getApiUrl(`/api/projects/${projectId}`), {
+              headers: { 'X-User-Id': user.id },
+            });
+            const projectPayload = await projectResp.json().catch(() => ({}));
+            if (cancelled) return;
+            if (!projectResp.ok) {
+              setStatus('error');
+              setJobId(null);
+              setResults(null);
+              setPartialClips([]);
+              setLogs([projectPayload?.detail || payload?.detail || 'Project not found']);
+              setProcessingMedia({ type: 'url', payload: '' });
+              return;
+            }
+
+            const projectStatus = normalizeStatus(projectPayload?.status || 'processing');
+            if (projectStatus === 'complete') {
+              navigate(`/dashboard/reels/projects/${projectId}`);
+              return;
+            }
+            setJobId(null);
+            setResults(null);
+            setPartialClips([]);
+            setStatus(projectStatus === 'error' ? 'error' : 'processing');
+            setLogs(
+              projectStatus === 'error'
+                ? ['Le projet a echoue. Consultez les details de traitement.']
+                : ['Traitement du projet en cours...']
+            );
+            setProcessingMedia({ type: 'url', payload: '' });
+            return;
+          }
+
+          const linkedJob = payload?.job || null;
+          if (linkedJob?.id) {
+            setJobId(String(linkedJob.id));
+            setStatus(normalizeStatus(linkedJob.status || payload?.project_status || 'processing'));
+            setLogs(Array.isArray(linkedJob.logs) ? linkedJob.logs : []);
+            setResults(linkedJob.result || null);
+            setPartialClips(Array.isArray(linkedJob.partialClips) ? linkedJob.partialClips : []);
+          } else {
+            const projectStatus = normalizeStatus(payload?.project_status || 'processing');
+            if (projectStatus === 'complete') {
+              navigate(`/dashboard/reels/projects/${projectId}`);
+              return;
+            }
+            setJobId(null);
+            setStatus(projectStatus === 'error' ? 'error' : 'processing');
+            setResults(null);
+            setPartialClips([]);
+            setLogs(
+              projectStatus === 'error'
+                ? ['Le projet a echoue. Consultez les details de traitement.']
+                : ['Traitement du projet en cours...']
+            );
+          }
+          setProcessingMedia({ type: 'url', payload: '' });
+        } catch {
+          if (cancelled) return;
+          setStatus('error');
+          setJobId(null);
+          setResults(null);
+          setPartialClips([]);
+          setLogs(['Unable to recover this project job state.']);
+          setProcessingMedia({ type: 'url', payload: '' });
+        }
+      };
+
+      restoreProjectJob();
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const saved = localStorage.getItem(SESSION_KEY);
     if (!saved) return;
     try {
@@ -381,10 +463,13 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
     } catch {
       localStorage.removeItem(SESSION_KEY);
     }
-  }, [currentTab, forceNewOperation]);
+  }, [currentTab, forceNewOperation, projectId, user?.id, navigate]);
 
   // Session Recovery: Save state changes
   useEffect(() => {
+    if (projectId) {
+      return;
+    }
     if (status === 'idle') {
       localStorage.removeItem(SESSION_KEY);
       return;
@@ -402,7 +487,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
     } catch {
       // Ignore storage failures: never remove auth/session provider keys.
     }
-   }, [jobId, uiStatus, activeTab, processingMedia, results]);
+   }, [jobId, uiStatus, activeTab, processingMedia, results, projectId, status]);
 
 
   useEffect(() => {
@@ -413,7 +498,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       // Create interval immediately
       interval = setInterval(async () => {
         try {
-          const data = await pollJob(jobId);
+          const data = await pollJob(jobId, user?.id || "");
           const backendStatus = normalizeStatus(data.status);
 
           // Update partial clips during processing
@@ -457,7 +542,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
         interval = null;
       }
     };
-  }, [uiStatus, jobId]);
+  }, [uiStatus, jobId, user?.id]);
 
   useEffect(() => {
     if ((uiStatus === 'complete' || uiStatus === 'error') && !hasNotifiedCompletion) {
@@ -565,7 +650,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                   <button
                       type="button"
                       onClick={() => navigate("/dashboard/reels")}
-                      className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-200 hover:bg-white/10"
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10"
                   >
                     <ArrowLeft size={14} />
                     {t("app.backToList", "Back to list")}
@@ -588,11 +673,9 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
 
 
           {/* View: Dashboard (Idle) */}
-          {currentTab === 'reel-generator' && uiStatus === 'idle' && (
-              <div className="h-full flex flex-col items-center justify-center p-6 animate-[fadeIn_0.3s_ease-out]">
-                <div className="max-w-xl w-full text-center space-y-8">
-                  <div className="space-y-4">
-                  </div>
+          {currentTab === 'reel-generator' && uiStatus === 'idle' && !projectId && (
+              <div className="flex-1 overflow-y-auto px-8 pb-8 pt-2 space-y-2 animate-[fadeIn_0.3s_ease-out]">
+                <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
                   <MediaInput
                     onProcess={handleProcess}
                     isProcessing={uiStatus === 'processing'}
@@ -600,14 +683,18 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
                     disableActions={!hasAnyReelCredit}
                     creditWarning={!hasAnyReelCredit ? t("common.insufficientCreditsStart", "Crédits insuffisants pour initier cette opération.") : ""}
                   />
-                  <div className="flex items-center justify-center gap-8 text-slate-400 dark:text-zinc-500 text-sm">
-                    <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
-                    <span className="flex items-center gap-2"><Instagram size={16} /> Instagram</span>
-                    <span className="flex items-center gap-2"><TikTokIcon size={16} /> TikTok</span>
-                    <span className="flex items-center gap-2"><Facebook size={16} /> Facebook</span>
-                    <span className="flex items-center gap-2"><Linkedin size={16} /> LinkedIn</span>
-                  </div>
-                </div>
+                </section>
+              </div>
+          )}
+
+          {currentTab === 'reel-generator' && uiStatus === 'idle' && !!projectId && (
+              <div className="flex-1 overflow-y-auto p-8 animate-[fadeIn_0.3s_ease-out]">
+                <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5">
+                  <span className="inline-flex items-center gap-2 text-sm text-slate-500 dark:text-zinc-400">
+                    <Loader2 size={14} className="animate-spin" />
+                    Chargement du projet...
+                  </span>
+                </section>
               </div>
           )}
 

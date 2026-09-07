@@ -17,6 +17,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_REELS_TABLE = os.environ.get("SUPABASE_REELS_TABLE", "reels")
 SUPABASE_CAPTIONS_TABLE = os.environ.get("SUPABASE_CAPTIONS_TABLE", "captions")
+SUPABASE_PROJECTS_TABLE = os.environ.get("SUPABASE_PROJECTS_TABLE", "projects")
 SUPABASE_ABONNEMENTS_TABLE = os.environ.get("SUPABASE_ABONNEMENTS_TABLE", "abonnement")
 SUPABASE_SOUSCRIPTION_TABLE = os.environ.get("SUPABASE_SOUSCRIPTION_TABLE", "souscription")
 SUPABASE_JOBS_TABLE = os.environ.get("SUPABASE_JOBS_TABLE", "jobs")
@@ -196,13 +197,222 @@ async def soft_delete_reel(reel_id: str, user_id: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Projects
+# --------------------------------------------------------------------------
+async def create_project(
+	user_id: str,
+	name: str,
+	project_type: str,
+	source_type: str,
+	source_s3_key: str,
+	source_size: int,
+	description: Optional[str] = None,
+	source_url: Optional[str] = None,
+	source_duration: Optional[int] = None,
+	thumbnail_url: Optional[str] = None,
+	status: str = "processing",
+) -> Dict[str, Any]:
+	"""Create a new project."""
+	client = await get_client()
+	now_iso = datetime.now(timezone.utc).isoformat()
+	payload = {
+		"user_id": user_id,
+		"name": name,
+		"project_type": project_type,
+		"source_type": source_type,
+		"source_s3_key": source_s3_key,
+		"source_size": int(source_size),
+		"description": description,
+		"source_url": source_url,
+		"source_duration": source_duration,
+		"thumbnail_url": thumbnail_url,
+		"output_count": 0,
+		"status": status,
+		"created_at": now_iso,
+		"updated_at": now_iso,
+	}
+	response = await client.table(SUPABASE_PROJECTS_TABLE).insert(payload).execute()
+	rows = response.data or []
+	return rows[0] if rows else payload
+
+
+async def list_projects(
+	user_id: str,
+	page: int = 1,
+	page_size: int = 20,
+	project_type: Optional[str] = None,
+	status: Optional[str] = None,
+	query: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+	"""List projects for a user with optional filtering."""
+	page = max(page, 1)
+	page_size = min(max(page_size, 1), 100)
+	offset = (page - 1) * page_size
+
+	client = await get_client()
+	q = (
+		client.table(SUPABASE_PROJECTS_TABLE)
+		.select("*", count="exact")
+		.eq("user_id", user_id)
+		.order("created_at", desc=True)
+		.range(offset, offset + page_size - 1)
+	)
+
+	if project_type:
+		q = q.eq("project_type", project_type)
+
+	if status:
+		q = q.eq("status", status)
+
+	if query:
+		escaped = query.replace("*", "")
+		q = q.or_(f"name.ilike.*{escaped}*,description.ilike.*{escaped}*")
+
+	response = await q.execute()
+	return response.data or [], response.count or 0
+
+
+async def get_project(project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+	"""Get a project by ID (user must own it)."""
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_PROJECTS_TABLE)
+		.select("*")
+		.eq("id", project_id)
+		.eq("user_id", user_id)
+		.limit(1)
+		.execute()
+	)
+	rows = response.data or []
+	return rows[0] if rows else None
+
+
+async def update_project(
+	project_id: str,
+	user_id: str,
+	updates: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+	"""Update a project (user must own it)."""
+	if not project_id:
+		return None
+	client = await get_client()
+	payload = dict(updates or {})
+	payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+	await (
+		client.table(SUPABASE_PROJECTS_TABLE)
+		.update(payload)
+		.eq("id", project_id)
+		.eq("user_id", user_id)
+		.execute()
+	)
+	response = (
+		await client.table(SUPABASE_PROJECTS_TABLE)
+		.select("*")
+		.eq("id", project_id)
+		.eq("user_id", user_id)
+		.limit(1)
+		.execute()
+	)
+	rows = response.data or []
+	return rows[0] if rows else None
+
+
+async def update_project_status(
+	project_id: str,
+	status: str,
+) -> Optional[Dict[str, Any]]:
+	"""Update project status (completed, failed, or cancelled) and set completed_at if applicable."""
+	if not project_id or status not in ("completed", "failed", "cancelled"):
+		return None
+	client = await get_client()
+
+	payload = {
+		"status": status,
+		"updated_at": datetime.now(timezone.utc).isoformat(),
+	}
+
+	# Set completed_at when transitioning from processing to terminal state
+	if status in ("completed", "failed", "cancelled"):
+		payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+	response = (
+		await client.table(SUPABASE_PROJECTS_TABLE)
+		.update(payload)
+		.eq("id", project_id)
+		.execute()
+	)
+	rows = response.data or []
+	return rows[0] if rows else None
+
+
+async def soft_delete_project(project_id: str, user_id: str) -> bool:
+	"""Hard delete a project and all its contents (reels, captions, files on S3)."""
+	client = await get_client()
+
+	# Delete all reels associated with this project
+	await (
+		client.table(SUPABASE_REELS_TABLE)
+		.delete()
+		.eq("project_id", project_id)
+		.execute()
+	)
+
+	# Delete all captions associated with this project
+	await (
+		client.table(SUPABASE_CAPTIONS_TABLE)
+		.delete()
+		.eq("project_id", project_id)
+		.execute()
+	)
+
+	# Delete the project itself
+	response = (
+		await client.table(SUPABASE_PROJECTS_TABLE)
+		.delete()
+		.eq("id", project_id)
+		.eq("user_id", user_id)
+		.execute()
+	)
+
+	return bool(response.data)
+
+
+async def get_reels_by_project(project_id: str) -> List[Dict[str, Any]]:
+	"""Get all reels associated with a project."""
+	if not project_id:
+		return []
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_REELS_TABLE)
+		.select("*")
+		.eq("project_id", project_id)
+		.execute()
+	)
+	return response.data or []
+
+
+async def get_captions_by_project(project_id: str) -> List[Dict[str, Any]]:
+	"""Get all captions associated with a project."""
+	if not project_id:
+		return []
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_CAPTIONS_TABLE)
+		.select("*")
+		.eq("project_id", project_id)
+		.execute()
+	)
+	return response.data or []
+
+
+# --------------------------------------------------------------------------
 # IA Captions
 # --------------------------------------------------------------------------
 CAPTION_COLUMNS = (
 	"id, caption_url, caption_thumbnail_url, caption_title, caption_description, "
 	"caption_duration, caption_created_at, caption_updated_at, caption_user_id, "
 	"caption_status, caption_job_id, caption_clip_index, caption_s3_key, generation_inputs, "
-	"input_source_type, input_source_value, billing_details, total_cost_usd, deleted_at"
+	"input_source_type, input_source_value, billing_details, total_cost_usd, deleted_at, project_id"
 )
 
 
@@ -210,6 +420,34 @@ def caption_status_value(status: Optional[str]) -> str:
 	if status in {"en_cours", "termine", "echec"}:
 		return status
 	return "termine"
+
+
+async def increment_project_output_count(project_id: str) -> Optional[Dict[str, Any]]:
+	"""Increment the output_count of a project."""
+	if not project_id:
+		return None
+	client = await get_client()
+	# Fetch current project (no user_id check needed for incrementing)
+	response = (
+		await client.table(SUPABASE_PROJECTS_TABLE)
+		.select("*")
+		.eq("id", project_id)
+		.limit(1)
+		.execute()
+	)
+	rows = response.data or []
+	current = rows[0] if rows else None
+	if not current:
+		return None
+	new_count = (current.get("output_count") or 0) + 1
+	response = (
+		await client.table(SUPABASE_PROJECTS_TABLE)
+		.update({"output_count": new_count})
+		.eq("id", project_id)
+		.execute()
+	)
+	rows = response.data or []
+	return rows[0] if rows else None
 
 
 async def insert_captions(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -759,6 +997,27 @@ async def get_job_record(job_id: str, user_id: Optional[str] = None) -> Optional
 	response = await q.execute()
 	rows = response.data or []
 	return rows[0] if rows else None
+
+
+async def get_latest_job_record_by_project(project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+	"""Return the latest job row linked to a project for a specific user."""
+	if not project_id or not user_id:
+		return None
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_JOBS_TABLE)
+		.select(JOB_COLUMNS)
+		.eq("user_id", user_id)
+		.order("created_at", desc=True)
+		.limit(300)
+		.execute()
+	)
+	rows = response.data or []
+	for row in rows:
+		job_data = row.get("job_data") or {}
+		if str(job_data.get("project_id") or "") == str(project_id):
+			return row
+	return None
 
 
 async def append_job_log(job_id: str, level: str, message: str, metadata: Optional[Dict[str, Any]] = None) -> None:

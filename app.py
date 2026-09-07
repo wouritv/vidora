@@ -36,44 +36,56 @@ except ImportError:  # pragma: no cover - optional at import time
 from s3_uploader import (
     upload_file_to_s3,
     generate_presigned_url,
+    delete_s3_object,
+    get_s3_object_size,
 )
 from supabase_request import (
-    insert_reels as supabase_insert_reels,
-    list_reels as supabase_list_reels,
-    get_reel as supabase_get_reel,
-    get_reel_by_job_clip as supabase_get_reel_by_job_clip,
-    update_reel_media_by_job_clip as supabase_update_reel_media_by_job_clip,
-    soft_delete_reel as supabase_soft_delete_reel,
-    insert_captions as supabase_insert_captions,
-    list_captions as supabase_list_captions,
-    get_caption as supabase_get_caption,
-    get_caption_by_job_clip as supabase_get_caption_by_job_clip,
-    get_caption_by_job_clip_any as supabase_get_caption_by_job_clip_any,
-    update_caption as supabase_update_caption,
-    soft_delete_caption as supabase_soft_delete_caption,
-    is_supabase_configured,
-    list_abonnements as supabase_list_abonnements,
-    get_user_abonnement,
-    get_abonnement as supabase_get_abonnement,
-    insert_souscription as supabase_insert_souscription,
-    get_souscription_by_reference as supabase_get_souscription_by_reference,
-    get_client as supabase_get_client,
-    get_user_data as supabase_get_user_data,
-    upsert_user_data_credits as supabase_upsert_user_data_credits,
-    set_user_data_balance as supabase_set_user_data_balance,
-    deduct_user_credits as supabase_deduct_user_credits,
-    insert_user_data_history as supabase_insert_user_data_history,
-    get_user_data_history as supabase_get_user_data_history,
-    get_latest_user_paid_subscription as supabase_get_latest_user_paid_subscription,
-    update_souscription_row as supabase_update_souscription_row,
-    list_user_souscriptions as supabase_list_user_souscriptions,
-    update_job_record as supabase_update_job_record,
-    get_transcription_by_job_clip as supabase_get_transcription_by_job_clip,
-    upsert_transcription as supabase_upsert_transcription,
-    update_transcription_translations_cache as supabase_update_transcription_translations_cache,
-    insert_style_edit_version as supabase_insert_style_edit_version,
-    list_style_edit_versions as supabase_list_style_edit_versions,
-    delete_style_edit_versions as supabase_delete_style_edit_versions,
+	insert_reels as supabase_insert_reels,
+	list_reels as supabase_list_reels,
+	get_reel as supabase_get_reel,
+	get_reel_by_job_clip as supabase_get_reel_by_job_clip,
+	update_reel_media_by_job_clip as supabase_update_reel_media_by_job_clip,
+	soft_delete_reel as supabase_soft_delete_reel,
+	insert_captions as supabase_insert_captions,
+	list_captions as supabase_list_captions,
+	get_caption as supabase_get_caption,
+	get_caption_by_job_clip as supabase_get_caption_by_job_clip,
+	get_caption_by_job_clip_any as supabase_get_caption_by_job_clip_any,
+	update_caption as supabase_update_caption,
+	soft_delete_caption as supabase_soft_delete_caption,
+	is_supabase_configured,
+	create_project as supabase_create_project,
+	list_projects as supabase_list_projects,
+	get_project as supabase_get_project,
+	update_project as supabase_update_project,
+	update_project_status as supabase_update_project_status,
+	soft_delete_project as supabase_soft_delete_project,
+	get_reels_by_project as supabase_get_reels_by_project,
+	get_captions_by_project as supabase_get_captions_by_project,
+	increment_project_output_count as supabase_increment_project_output_count,
+	list_abonnements as supabase_list_abonnements,
+	get_user_abonnement,
+	get_abonnement as supabase_get_abonnement,
+	insert_souscription as supabase_insert_souscription,
+	get_souscription_by_reference as supabase_get_souscription_by_reference,
+	get_client as supabase_get_client,
+	get_user_data as supabase_get_user_data,
+	upsert_user_data_credits as supabase_upsert_user_data_credits,
+	set_user_data_balance as supabase_set_user_data_balance,
+	deduct_user_credits as supabase_deduct_user_credits,
+	insert_user_data_history as supabase_insert_user_data_history,
+	get_user_data_history as supabase_get_user_data_history,
+	get_latest_user_paid_subscription as supabase_get_latest_user_paid_subscription,
+	update_souscription_row as supabase_update_souscription_row,
+	list_user_souscriptions as supabase_list_user_souscriptions,
+	update_job_record as supabase_update_job_record,
+  get_latest_job_record_by_project as supabase_get_latest_job_record_by_project,
+	get_transcription_by_job_clip as supabase_get_transcription_by_job_clip,
+	upsert_transcription as supabase_upsert_transcription,
+	update_transcription_translations_cache as supabase_update_transcription_translations_cache,
+	insert_style_edit_version as supabase_insert_style_edit_version,
+	list_style_edit_versions as supabase_list_style_edit_versions,
+	delete_style_edit_versions as supabase_delete_style_edit_versions,
 )
 from billing import (
     usd_to_credits,
@@ -1347,6 +1359,17 @@ async def _finalize_failed_reel_job(
     if result_data.get("clips"):
         jobs[job_id]["result"] = result_data
     jobs[job_id]["status"] = fail_result.get("status") or "failed"
+
+    # Update project status to failed if associated with a project
+    if is_supabase_configured() and job_data:
+        project_id = job_data.get("project_id")
+        if project_id:
+            try:
+                await supabase_update_project_status(project_id, "failed")
+                logger.info(f"Project {project_id} marked as failed")
+            except Exception as e:
+                logger.warning(f"Failed to update project status to failed: {str(e)}")
+
     return fail_result
 
 
@@ -1438,6 +1461,7 @@ async def _persist_reels_for_job(
     metadata_path: str,
     clips: List[Dict[str, Any]],
     uses_youtube_source: bool = False,
+    project_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if not user_id:
         raise RuntimeError("Missing app user id for reel persistence")
@@ -1498,30 +1522,34 @@ async def _persist_reels_for_job(
             uses_youtube_source=uses_youtube_source,
         )
 
-        rows.append(
-            {
-                "reel_url": media_url,
-                "reel_thumbnail_url": thumbnail_s3_key if thumbnail_s3_key else "",
-                "reel_title": clip.get("title") or clip.get("video_title_for_youtube_short") or f"Clip {i}",
-                "reel_description": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or "",
-                "reel_duration": max(30, int(duration or 0)),
-                "reel_created_at": now_iso,
-                "reel_updated_at": now_iso,
-                "reel_user_id": user_id,
-                "reel_status": "termine",
-                "reel_size_bytes": clip_size_bytes,
-                "reel_s3_key": s3_key,
-                "reel_job_id": job_id,
-                "reel_clip_index": i - 1,
-                "billing_details": _build_billing_details(
-                    "generation_reel",
-                    reel_cost_breakdown,
-                    actual_storage_gb=_bytes_to_gb(clip_size_bytes),
-                    extra={"clip_index": i - 1},
-                ),
-                "total_cost_usd": 0,
-            }
-        )
+        reel_row = {
+            "reel_url": media_url,
+            "reel_thumbnail_url": thumbnail_s3_key if thumbnail_s3_key else "",
+            "reel_title": clip.get("title") or clip.get("video_title_for_youtube_short") or f"Clip {i}",
+            "reel_description": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or "",
+            "reel_duration": max(30, int(duration or 0)),
+            "reel_created_at": now_iso,
+            "reel_updated_at": now_iso,
+            "reel_user_id": user_id,
+            "reel_status": "termine",
+            "reel_size_bytes": clip_size_bytes,
+            "reel_s3_key": s3_key,
+            "reel_job_id": job_id,
+            "reel_clip_index": i - 1,
+            "billing_details": _build_billing_details(
+                "generation_reel",
+                reel_cost_breakdown,
+                actual_storage_gb=_bytes_to_gb(clip_size_bytes),
+                extra={"clip_index": i - 1},
+            ),
+            "total_cost_usd": 0,
+        }
+
+        # Add project_id if provided
+        if project_id:
+            reel_row["project_id"] = project_id
+
+        rows.append(reel_row)
 
         if generated_thumbnail_locally and source_thumbnail:
             try:
@@ -1534,6 +1562,14 @@ async def _persist_reels_for_job(
         raise RuntimeError("No generated clips were available for Supabase persistence")
 
     saved_rows = await supabase_insert_reels(rows)
+
+    # Update project output count if project exists
+    if project_id:
+        try:
+            await supabase_increment_project_output_count(project_id)
+        except Exception as e:
+            logger.warning(f"Failed to increment project output count: {str(e)}")
+
     return [_normalize_reel_row(row) for row in saved_rows]
 
 async def cleanup_jobs():
@@ -1737,7 +1773,7 @@ async def proxy_media(request: Request, url: str):
 
 async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = None):
     """Executes the subprocess for a specific job."""
-    
+
     cmd = job_data['cmd']
     env = job_data['env']
     output_dir = job_data['output_dir']
@@ -1754,7 +1790,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
     await reel_job_manager.start_job(job_id)
     await pipeline.starting()
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
-    
+
     try:
         process = subprocess.Popen(
             cmd,
@@ -1770,7 +1806,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
         t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
         t_log.daemon = True
         t_log.start()
-        
+
         # Async wait for process with incremental updates
         start_wait = time.time()
         while process.poll() is None:
@@ -1780,7 +1816,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 except Exception:
                     pass
             await asyncio.sleep(2)
-            
+
             # Check for partial results every 2 seconds
             # Look for metadata file
             try:
@@ -1793,11 +1829,11 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     if os.path.getsize(target_json) > 0:
                         with open(target_json, 'r') as f:
                             data = json.load(f)
-                            
+
                         base_name = os.path.basename(target_json).replace('_metadata.json', '')
                         clips = data.get('shorts', [])
                         cost_analysis = data.get('cost_analysis')
-                        
+
                         # Check which clips actually exist on disk
                         ready_clips = []
                         for i, clip in enumerate(clips):
@@ -1840,16 +1876,17 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 if _relocate_root_job_artifacts(job_id, output_dir):
                     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
             if json_files:
-                target_json = json_files[0] 
+                target_json = json_files[0]
                 with open(target_json, 'r') as f:
                     data = json.load(f)
-                
+
                 # Enhance result with video URLs
                 clips = data.get('shorts', [])
                 cost_analysis = data.get('cost_analysis')
 
                 try:
                     await pipeline.uploading_reels(len(clips))
+                    project_id = job_data.get("project_id") if job_data else None
                     saved_rows = await _persist_reels_for_job(
                         job_id=job_id,
                         user_id=user_id,
@@ -1857,6 +1894,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                         metadata_path=target_json,
                         clips=clips,
                         uses_youtube_source=source_is_url,
+                        project_id=project_id,
                     )
                 except Exception as persist_error:
                     jobs[job_id]['status'] = 'failed'
@@ -1942,6 +1980,43 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     consumed_quota=billing['processing_ratio'],
                     cost_breakdown=billing['cost_breakdown'],
                 )
+
+                # Update project status to completed if associated with a project
+                project_id = job_data.get("project_id") if job_data else None
+                if project_id and is_supabase_configured():
+                    try:
+                        await supabase_update_project_status(project_id, "completed")
+                        summary_text = ""
+                        if enriched_clips:
+                            top_clip = enriched_clips[0] if isinstance(enriched_clips[0], dict) else {}
+                            summary_text = (
+                                str(top_clip.get("video_description_for_instagram") or "")
+                                or str(top_clip.get("video_description_for_tiktok") or "")
+                                or str(top_clip.get("video_title_for_youtube_short") or "")
+                            )
+                        if not summary_text and saved_rows:
+                            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
+                            summary_text = str(first_row.get("reel_description") or "")
+
+                        thumbnail_url = ""
+                        if saved_rows:
+                            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
+                            thumbnail_url = str(first_row.get("reel_thumbnail_url") or "")
+
+                        project_updates = {
+                            "description": _build_short_project_summary(summary_text),
+                            "output_count": len(saved_rows),
+                        }
+                        source_duration_value = int(float((job_data or {}).get("source_duration_seconds") or 0.0))
+                        if source_duration_value > 0:
+                            project_updates["source_duration"] = source_duration_value
+                        if thumbnail_url:
+                            project_updates["thumbnail_url"] = thumbnail_url
+                        await supabase_update_project(project_id, user_id or "", project_updates)
+                        logger.info(f"Project {project_id} marked as completed")
+                    except Exception as e:
+                        logger.warning(f"Failed to update project status to completed: {str(e)}")
+
                 _cleanup_generated_clips_after_job(output_dir, os.path.basename(target_json).replace('_metadata.json', ''))
             else:
                  jobs[job_id]['status'] = 'failed'
@@ -2142,6 +2217,9 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             ),
             "total_cost_usd": 0,
         }
+        project_id = str(job_data.get("project_id") or "").strip()
+        if project_id:
+            row_payload["project_id"] = project_id
 
         normalized_item = {"id": f"local-{job_id}", **row_payload}
         if is_supabase_configured():
@@ -2177,6 +2255,29 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             cost_breakdown=caption_cost_breakdown,
         )
 
+        # Update project status to completed if associated with a project
+        project_id = job_data.get("project_id")
+        if project_id and is_supabase_configured():
+            try:
+                await supabase_update_project_status(project_id, "completed")
+                project_summary = _build_short_project_summary(
+                    str(normalized_item.get("caption_description") or "")
+                    or str(normalized_item.get("caption_title") or "")
+                )
+                await supabase_update_project(
+                    project_id,
+                    user_id or "",
+                    {
+                        "description": project_summary,
+                        "thumbnail_url": str(normalized_item.get("caption_thumbnail_url") or "") or None,
+                        "output_count": 1,
+                        "source_duration": int(float(job_data.get("source_duration_seconds") or local_duration or 0.0)) or None,
+                    },
+                )
+                logger.info(f"Project {project_id} marked as completed")
+            except Exception as e:
+                logger.warning(f"Failed to update project status to completed: {str(e)}")
+
         await _persist_transcription_cache(
             user_id=user_id,
             job_id=job_id,
@@ -2204,6 +2305,17 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             error_code="CAPTION_JOB_FAILED",
             retry_delay_seconds=CAPTION_JOB_RETRY_DELAY_SECONDS,
         )
+
+        # Update project status to failed if associated with a project
+        if is_supabase_configured():
+            project_id = job_data.get("project_id")
+            if project_id:
+                try:
+                    await supabase_update_project_status(project_id, "failed")
+                    logger.info(f"Project {project_id} marked as failed")
+                except Exception as e:
+                    logger.warning(f"Failed to update project status to failed: {str(e)}")
+
         if result.get("retry"):
             asyncio.create_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
     finally:
@@ -2302,25 +2414,52 @@ def _probe_local_video_duration_seconds(video_path: str) -> float:
         return 0.0
 
 
-def _probe_remote_video_metadata(url_value: str) -> Dict[str, float]:
+def _probe_remote_video_metadata(url_value: str) -> Dict[str, Any]:
     """Best-effort remote metadata probe via yt-dlp without downloading the file."""
     if not url_value:
-        return {"duration_seconds": 0.0, "size_bytes": 0.0}
+        return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
 
     try:
         cmd = ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", url_value]
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().strip()
         if not out:
-            return {"duration_seconds": 0.0, "size_bytes": 0.0}
+            return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
         payload = json.loads(out.splitlines()[-1])
         duration = float(payload.get("duration") or 0)
         size_bytes = float(payload.get("filesize") or payload.get("filesize_approx") or 0)
+        title = str(payload.get("title") or "").strip()
+        description = str(payload.get("description") or "").strip()
         return {
             "duration_seconds": max(0.0, duration),
             "size_bytes": max(0.0, size_bytes),
+            "title": title,
+            "description": description,
         }
     except Exception:
-        return {"duration_seconds": 0.0, "size_bytes": 0.0}
+        return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
+
+
+def _build_short_project_summary(raw_text: str, fallback_title: str = "") -> str:
+    """Create a short project summary from available source metadata."""
+    base = re.sub(r"\s+", " ", str(raw_text or "")).strip()
+    if not base:
+        base = re.sub(r"\s+", " ", str(fallback_title or "")).strip()
+    if not base:
+        return ""
+
+    sentence = re.split(r"[\n\r]+|(?<=[.!?])\s+", base, maxsplit=1)[0].strip()
+    compact = sentence or base
+    words = compact.split()
+    if len(words) > 18:
+        compact = " ".join(words[:18]).rstrip(" ,;:-") + "..."
+    return compact[:180]
+
+
+def _project_name_from_uploaded_file(filename: str) -> str:
+    source_name = os.path.basename(str(filename or "")).strip()
+    if not source_name:
+        return "Projet video"
+    return os.path.splitext(source_name)[0] or source_name
 
 
 def _validate_reel_source_constraints(duration_seconds: float, size_bytes: float, source_label: str) -> None:
@@ -3113,8 +3252,13 @@ async def process_endpoint(
     os.makedirs(job_output_dir, exist_ok=True)
     input_path = None
     reel_required_credits = 0.0
+    source_duration_seconds = 0.0
     source_type = "url" if url else "file"
     source_value = url if url else (file.filename if file else "")
+    project_source_type = "upload"
+    project_name = "Reel Project"
+    project_description = ""
+    remote_meta: Dict[str, Any] = {}
 
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
@@ -3124,8 +3268,14 @@ async def process_endpoint(
     if url:
         remote_meta = _probe_remote_video_metadata(url)
         duration_seconds = float(remote_meta.get("duration_seconds") or 0.0)
+        source_duration_seconds = duration_seconds
         size_bytes = float(remote_meta.get("size_bytes") or 0.0)
         is_youtube_source = _is_youtube_url(url)
+        project_source_type = "youtube" if is_youtube_source else "url"
+        youtube_title = str(remote_meta.get("title") or "").strip()
+        fallback_name = _sanitize_input_filename(url) or "Video distante"
+        project_name = youtube_title or fallback_name
+        project_description = _build_short_project_summary(str(remote_meta.get("description") or ""), fallback_title=project_name)
 
         # If remote metadata is incomplete, download once and validate from local probe.
         # Keep YouTube URLs in -u mode; direct HTTP fetch of watch pages returns HTML.
@@ -3133,6 +3283,7 @@ async def process_endpoint(
             if not is_youtube_source:
                 input_path, _ = _download_input_url_to_job_dir(url, job_id)
                 duration_seconds = _probe_local_video_duration_seconds(input_path)
+                source_duration_seconds = duration_seconds
                 try:
                     size_bytes = float(os.path.getsize(input_path))
                 except Exception:
@@ -3162,6 +3313,9 @@ async def process_endpoint(
             cmd.extend(["-u", url])
     else:
         _validate_video_extension(file.filename if file else "", context_label="reel")
+        project_source_type = "upload"
+        project_name = _project_name_from_uploaded_file(file.filename if file else "")
+        project_description = _build_short_project_summary(project_name, fallback_title=project_name)
 
         # Save uploaded file with size limit check
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
@@ -3180,6 +3334,7 @@ async def process_endpoint(
                 buffer.write(content)
 
         local_duration = _probe_local_video_duration_seconds(input_path)
+        source_duration_seconds = float(local_duration or 0.0)
         _validate_reel_source_constraints(
             duration_seconds=local_duration,
             size_bytes=float(size),
@@ -3204,6 +3359,45 @@ async def process_endpoint(
 
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 
+    # Create a project to group all generated content
+    project = None
+    if is_supabase_configured():
+        try:
+            # Determine source duration and size
+            source_size_bytes = 0
+            source_duration_seconds = None
+
+            if input_path and os.path.exists(input_path):
+                source_size_bytes = os.path.getsize(input_path)
+                source_duration_seconds = _probe_local_video_duration_seconds(input_path)
+            else:
+                source_size_bytes = int(float(remote_meta.get("size_bytes") or 0.0))
+                source_duration_seconds = float(remote_meta.get("duration_seconds") or 0.0) or None
+
+            # Upload source to S3 with project-based key structure
+            bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+            source_basename = os.path.basename(input_path) if input_path else (_sanitize_input_filename(source_value) or "video.mp4")
+            s3_source_key = f"projects/{job_id}/source/{source_basename}"
+
+            if input_path and os.path.exists(input_path):
+                upload_file_to_s3(input_path, bucket_name, s3_source_key)
+
+            # Create project record
+            project = await supabase_create_project(
+                user_id=user_id,
+                name=project_name,
+                description=project_description,
+                project_type="reel",
+                source_type=project_source_type,
+                source_s3_key=s3_source_key,
+                source_size=source_size_bytes,
+                source_url=url if url else None,
+                source_duration=int(source_duration_seconds) if source_duration_seconds else None,
+                status="processing",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create project for job {job_id}: {str(e)}")
+
     # Enqueue job runtime payload.
     runtime_payload = {
         'status': 'queued',
@@ -3218,6 +3412,8 @@ async def process_endpoint(
         'user_id': user_id,
         'priority': job_priority,
         'reel_required_credits': reel_required_credits,
+        'project_id': project.get("id") if project else None,
+        'source_duration_seconds': source_duration_seconds,
     }
 
     jobs[job_id] = dict(runtime_payload)
@@ -3239,6 +3435,8 @@ async def process_endpoint(
             "reel_max_storage_gb": REEL_MAX_STORAGE_GB,
             "attestation": attestation,
             "reel_required_credits": reel_required_credits,
+            "project_id": project.get("id") if project else None,
+            "source_duration_seconds": source_duration_seconds,
         },
         runtime_data=dict(runtime_payload),
         max_attempts=REEL_JOB_MAX_ATTEMPTS,
@@ -3251,7 +3449,11 @@ async def process_endpoint(
 
     await enqueue_reel_job(job_id, priority=job_priority)
 
-    return {"job_id": job_id, "status": "queued"}
+    return {
+        "job_id": job_id,
+        "project_id": project.get("id") if project else None,
+        "status": "queued"
+    }
 
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
@@ -3296,7 +3498,7 @@ async def get_status(job_id: str):
 
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     job = jobs[job_id]
     response = {
         "status": job['status'],
@@ -3429,7 +3631,7 @@ async def edit_clip(
 ):
     # Determine API Key
     final_api_key = req.api_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
-    
+
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
 
@@ -3495,12 +3697,12 @@ async def edit_clip(
         # Since VideoEditor uses blocking calls (subprocess, API wait)
         def run_edit():
             editor = VideoEditor(api_key=final_api_key)
-            
+
             # SAFE FILE RENAMING STRATEGY (Avoid UnicodeEncodeError in Docker)
             # Create a safe ASCII filename in the same directory
             safe_filename = f"temp_input_{req.job_id}.mp4"
             safe_input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_filename)
-            
+
             # Copy original file to safe path
             # (Copy is safer than rename if something crashes, we keep original)
             shutil.copy(input_path, safe_input_path)
@@ -3527,7 +3729,7 @@ async def edit_clip(
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 duration = frame_count / fps if fps else 0
                 cap.release()
-                
+
                 # 3. Get Plan (Filter String)
                 filter_data = editor.get_ffmpeg_filter(
                     vid_file,
@@ -3544,14 +3746,14 @@ async def edit_clip(
                 safe_output_path = os.path.join(OUTPUT_DIR, req.job_id, f"temp_output_{req.job_id}.mp4")
                 editor.apply_edits(processed_input_path, safe_output_path, filter_data)
 
-                # Move result to final destination (rename works even if dest name has unicode if filesystem supports it, 
+                # Move result to final destination (rename works even if dest name has unicode if filesystem supports it,
                 # but python might still struggle if locale is broken? No, os.rename usually handles it better than subprocess args)
                 # Actually, output_path is defined above: f"edited_{filename}"
                 # If filename has unicode, output_path has unicode.
                 # Let's hope shutil.move / os.rename works.
                 if os.path.exists(safe_output_path):
                     shutil.move(safe_output_path, output_path)
-                
+
                 return {
                     "filter": filter_data,
                     "applied_steps": applied_steps + media_steps,
@@ -3568,17 +3770,17 @@ async def edit_clip(
         # Run in thread pool
         loop = asyncio.get_event_loop()
         plan = await loop.run_in_executor(None, run_edit)
-        
-        # Update clip URL in the job result? 
+
+        # Update clip URL in the job result?
         # Or return new URL and let frontend handle it?
         # Updating job result allows persistence if page refreshes.
-        
+
         new_video_url = f"/videos/{req.job_id}/{edited_filename}"
-        
+
         # Start a new "edited" clip entry or just update the current one?
         # Let's update the current one's video_url but keep backup?
         # Or return the new URL to the frontend to display.
-        
+
         if is_supabase_configured() and edit_required_credits > 0:
             await supabase_deduct_user_credits(user_id, edit_required_credits)
             await supabase_insert_user_data_history(
@@ -3661,6 +3863,35 @@ async def process_caption_endpoint(
         raise
 
     job_priority = await _resolve_user_job_priority(user_id)
+
+    # Create a project to group all generated content
+    project = None
+    if is_supabase_configured():
+        try:
+            project_name = _project_name_from_uploaded_file(source_name)
+            project_description = _build_short_project_summary(project_name, fallback_title=project_name)
+            # Upload source to S3 with project-based key structure
+            bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+            s3_source_key = f"projects/{caption_job_id}/source/{source_name}"
+
+            if os.path.exists(input_path):
+                upload_file_to_s3(input_path, bucket_name, s3_source_key)
+
+            # Create project record
+            project = await supabase_create_project(
+                user_id=user_id,
+                name=project_name,
+                description=project_description,
+                project_type="caption",
+                source_type="upload",
+                source_s3_key=s3_source_key,
+                source_size=size_bytes,
+                source_duration=int(local_duration) if local_duration else None,
+                status="processing",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create project for caption job {caption_job_id}: {str(e)}")
+
     runtime_payload = {
         "status": "queued",
         "logs": [f"Caption job {caption_job_id} queued."],
@@ -3673,6 +3904,8 @@ async def process_caption_endpoint(
         "priority": job_priority,
         "job_kind": "caption",
         "caption_required_credits": caption_required_credits,
+        "project_id": project.get("id") if project else None,
+        "source_duration_seconds": float(local_duration or 0.0),
     }
 
     jobs[caption_job_id] = dict(runtime_payload)
@@ -3689,6 +3922,8 @@ async def process_caption_endpoint(
             "input_path": input_path,
             "caption_max_duration_minutes": CAPTION_MAX_DURATION_MINUTES,
             "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
+            "project_id": project.get("id") if project else None,
+            "source_duration_seconds": float(local_duration or 0.0),
         },
         runtime_data=dict(runtime_payload),
         max_attempts=CAPTION_JOB_MAX_ATTEMPTS,
@@ -3700,7 +3935,11 @@ async def process_caption_endpoint(
     await CaptionProcessingPipeline(reel_job_manager, caption_job_id).step(0, "queued")
     await enqueue_reel_job(caption_job_id, priority=job_priority)
 
-    return {"job_id": caption_job_id, "status": "queued"}
+    return {
+        "job_id": caption_job_id,
+        "project_id": project.get("id") if project else None,
+        "status": "queued"
+    }
 
 
 class SubtitleRequest(BaseModel):
@@ -4266,15 +4505,15 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
         raise HTTPException(status_code=404, detail="Metadata not found")
-        
+
     transcript = data.get('transcript')
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript not found in metadata. Please process a new video.")
-        
+
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
-        
+
     clip_data = clips[req.clip_index]
     source_video_url_before_edit = str(clip_data.get("video_url") or "")
     source_video_url_for_history = source_video_url_before_edit
@@ -4312,7 +4551,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         if not filename:
              base_name = os.path.basename(metadata_path).replace('_metadata.json', '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
-         
+
     input_path = os.path.join(output_dir, filename)
     if not os.path.exists(input_path) and req.input_url:
         input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
@@ -4321,16 +4560,16 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         # Try looking for edited version if url implied it?
         # Just fail if not found.
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
-        
+
     # Define outputs
     srt_filename = f"subs_{req.clip_index}_{int(time.time())}.srt"
     srt_path = os.path.join(output_dir, srt_filename)
-    
+
     # Output video
     # We create a new file "subtitled_..."
     output_filename = f"subtitled_{filename}"
     output_path = os.path.join(output_dir, output_filename)
-    
+
     try:
         # 1. Generate SRT
         # Check if this is a dubbed video - if so, transcribe it fresh
@@ -4386,11 +4625,11 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_burn)
-        
+
     except Exception as e:
         print(f"❌ Subtitle Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-        
+
     local_subtitle_url = f"/videos/{req.job_id}/{output_filename}"
     persisted_subtitle_url = local_subtitle_url
     subtitle_s3_key = ""
@@ -4422,7 +4661,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
             clips[req.clip_index]['video_url'] = persisted_subtitle_url
             # Update the main data structure
             data['shorts'] = clips
-            
+
             # Write back
             _persist_metadata_json(metadata_path, data)
             print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
@@ -4622,13 +4861,13 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
         raise HTTPException(status_code=404, detail="Metadata not found")
-        
+
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
-        
+
     clip_data = clips[req.clip_index]
-    
+
     # Video Path
     if req.input_filename:
         filename = _sanitize_input_filename(req.input_filename)
@@ -4639,7 +4878,7 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
         if not filename:
              base_name = os.path.basename(metadata_path).replace('_metadata.json', '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
-         
+
     input_path = os.path.join(output_dir, filename)
     if not os.path.exists(input_path) and req.input_url:
         input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
@@ -4662,28 +4901,28 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
     # Output video
     output_filename = f"hook_{filename}"
     output_path = os.path.join(output_dir, output_filename)
-    
+
     # Map Size to Scale
     size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
     font_scale = size_map.get(req.size, 1.0)
-    
+
     try:
         # Run in thread pool
         def run_hook():
              add_hook_to_video(input_path, req.text, output_path, position=req.position, font_scale=font_scale)
-        
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_hook)
-        
+
     except Exception as e:
         print(f"❌ Hook Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-        
+
     # Update Persistence (Same logic as subtitles)
     # Update InMemory Jobs
     if job and req.clip_index < len(job.get('result', {}).get('clips', [])):
          job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-    
+
     # Update Metadata on Disk
     try:
         if req.clip_index < len(clips):
@@ -6636,7 +6875,262 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str
     }
 
 
-@app.get("/api/reels")
+# --------------------------------------------------------------------------
+# Projects Endpoints
+# --------------------------------------------------------------------------
+
+@app.get("/api/projects")
+async def list_projects(
+	user_id: str = Depends(get_user_id_header),
+	page: int = Query(1, ge=1),
+	page_size: int = Query(20, ge=1, le=100),
+	project_type: Optional[str] = Query(None),
+	status: Optional[str] = Query(None),
+	q: Optional[str] = None,
+):
+	if not is_supabase_configured():
+		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+	rows, total = await supabase_list_projects(
+		user_id=user_id,
+		page=page,
+		page_size=page_size,
+		project_type=project_type,
+		status=status,
+		query=q,
+	)
+	return {
+		"items": rows,
+		"total": total,
+		"page": max(page, 1),
+		"page_size": min(max(page_size, 1), 100),
+	}
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
+	if not is_supabase_configured():
+		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+	project = await supabase_get_project(project_id, user_id)
+	if not project:
+		raise HTTPException(status_code=404, detail="Project not found")
+
+	return project
+
+
+class ProjectUpdateRequest(BaseModel):
+	name: Optional[str] = None
+	description: Optional[str] = None
+
+
+@app.put("/api/projects/{project_id}")
+async def update_project_endpoint(
+	project_id: str,
+	payload: ProjectUpdateRequest,
+	user_id: str = Depends(get_user_id_header),
+):
+	if not is_supabase_configured():
+		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+	# Only allow updating name and description
+	updates = {}
+	if payload.name is not None:
+		updates["name"] = payload.name
+	if payload.description is not None:
+		updates["description"] = payload.description
+
+	if not updates:
+		raise HTTPException(status_code=400, detail="No valid fields to update")
+
+	project = await supabase_update_project(project_id, user_id, updates)
+	if not project:
+		raise HTTPException(status_code=404, detail="Project not found")
+
+	return project
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
+	if not is_supabase_configured():
+		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+	project = await supabase_get_project(project_id, user_id)
+	if not project:
+		raise HTTPException(status_code=404, detail="Project not found")
+
+	bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+	total_storage_freed_bytes = 0
+
+	# Delete source S3 file and free up storage
+	source_s3_key = project.get("source_s3_key")
+	if source_s3_key:
+		try:
+			source_size = get_s3_object_size(bucket_name, source_s3_key)
+			if delete_s3_object(bucket_name, source_s3_key):
+				total_storage_freed_bytes += source_size
+				logger.info(f"Deleted project source S3 file: {source_s3_key} ({source_size} bytes)")
+		except Exception as e:
+			logger.warning(f"Failed to delete project source S3 file {source_s3_key}: {str(e)}")
+
+	# Get and delete all reels associated with the project
+	try:
+		reels = await supabase_get_reels_by_project(project_id)
+		for reel in reels:
+			# Delete reel media file
+			reel_s3_key = reel.get("reel_s3_key")
+			if reel_s3_key:
+				try:
+					reel_size = get_s3_object_size(bucket_name, reel_s3_key)
+					if delete_s3_object(bucket_name, reel_s3_key):
+						total_storage_freed_bytes += reel_size
+						logger.info(f"Deleted reel S3 file: {reel_s3_key} ({reel_size} bytes)")
+				except Exception as e:
+					logger.warning(f"Failed to delete reel S3 file {reel_s3_key}: {str(e)}")
+
+			# Delete reel thumbnail if it's an S3 key
+			reel_thumbnail_url = reel.get("reel_thumbnail_url") or reel.get("reel_thumbnail_s3_key")
+			if reel_thumbnail_url and reel_thumbnail_url.startswith("reels/"):
+				try:
+					thumb_size = get_s3_object_size(bucket_name, reel_thumbnail_url)
+					if delete_s3_object(bucket_name, reel_thumbnail_url):
+						total_storage_freed_bytes += thumb_size
+						logger.info(f"Deleted reel thumbnail S3 file: {reel_thumbnail_url} ({thumb_size} bytes)")
+				except Exception as e:
+					logger.warning(f"Failed to delete reel thumbnail S3 file {reel_thumbnail_url}: {str(e)}")
+	except Exception as e:
+		logger.warning(f"Failed to retrieve or delete reels for project {project_id}: {str(e)}")
+
+	# Get and delete all captions associated with the project
+	try:
+		captions = await supabase_get_captions_by_project(project_id)
+		for caption in captions:
+			# Delete caption media file
+			caption_s3_key = caption.get("caption_s3_key")
+			if caption_s3_key:
+				try:
+					caption_size = get_s3_object_size(bucket_name, caption_s3_key)
+					if delete_s3_object(bucket_name, caption_s3_key):
+						total_storage_freed_bytes += caption_size
+						logger.info(f"Deleted caption S3 file: {caption_s3_key} ({caption_size} bytes)")
+				except Exception as e:
+					logger.warning(f"Failed to delete caption S3 file {caption_s3_key}: {str(e)}")
+
+			# Delete caption thumbnail if it exists
+			caption_thumbnail_url = caption.get("caption_thumbnail_url")
+			if caption_thumbnail_url and caption_thumbnail_url.startswith("captions/"):
+				try:
+					thumb_size = get_s3_object_size(bucket_name, caption_thumbnail_url)
+					if delete_s3_object(bucket_name, caption_thumbnail_url):
+						total_storage_freed_bytes += thumb_size
+						logger.info(f"Deleted caption thumbnail S3 file: {caption_thumbnail_url} ({thumb_size} bytes)")
+				except Exception as e:
+					logger.warning(f"Failed to delete caption thumbnail S3 file {caption_thumbnail_url}: {str(e)}")
+	except Exception as e:
+		logger.warning(f"Failed to retrieve or delete captions for project {project_id}: {str(e)}")
+
+	# Delete database records
+	deleted = await supabase_soft_delete_project(project_id, user_id)
+	if not deleted:
+		raise HTTPException(status_code=500, detail="Failed to delete project")
+
+	# Free up user's storage quota (negative storage_delta = free up space)
+	if total_storage_freed_bytes > 0:
+		storage_freed_gb = -total_storage_freed_bytes / (1024 ** 3)  # Negative value to free up space
+		try:
+			await supabase_deduct_user_credits(user_id, 0.0, storage_delta=storage_freed_gb)
+			logger.info(f"Freed {abs(storage_freed_gb):.6f} GB for user {user_id}")
+		except Exception as e:
+			logger.warning(f"Failed to update user storage quota after project deletion: {str(e)}")
+
+	return {"deleted": True}
+
+
+@app.get("/api/projects/{project_id}/source-url")
+async def get_project_source_url(project_id: str, user_id: str = Depends(get_user_id_header)):
+	if not is_supabase_configured():
+		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+	project = await supabase_get_project(project_id, user_id)
+	if not project:
+		raise HTTPException(status_code=404, detail="Project not found")
+
+	s3_key = project.get("source_s3_key")
+	if not s3_key:
+		raise HTTPException(status_code=400, detail="No source video available")
+
+	# Generate presigned URL
+	bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+	source_url = generate_presigned_url(bucket_name, s3_key, expiration=3600)
+
+	if not source_url:
+		raise HTTPException(status_code=500, detail="Failed to generate source URL")
+
+	return {"source_url": source_url}
+
+
+@app.get("/api/projects/{project_id}/job")
+async def get_project_job(project_id: str, user_id: str = Depends(get_user_id_header)):
+  if not is_supabase_configured():
+    raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+  project = await supabase_get_project(project_id, user_id)
+  if not project:
+    raise HTTPException(status_code=404, detail="Project not found")
+
+  job_row = await supabase_get_latest_job_record_by_project(project_id, user_id)
+  if not job_row:
+    return {
+      "project_id": project_id,
+      "project_status": project.get("status"),
+      "job": None,
+    }
+
+  job_id = str(job_row.get("id") or "")
+  job_view = await reel_job_manager.get_job_view(job_id, user_id=user_id)
+  return {
+    "project_id": project_id,
+    "project_status": project.get("status"),
+    "job": job_view,
+  }
+
+
+@app.get("/api/projects/{project_id}/reels")
+async def get_project_reels(project_id: str, user_id: str = Depends(get_user_id_header)):
+	"""Get all reels for a specific project."""
+	if not is_supabase_configured():
+		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+	# Verify user owns the project
+	project = await supabase_get_project(project_id, user_id)
+	if not project:
+		raise HTTPException(status_code=404, detail="Project not found")
+
+	reels = await supabase_get_reels_by_project(project_id)
+	return {
+		"project_id": project_id,
+		"reels": [_normalize_reel_row(reel) for reel in reels],
+		"count": len(reels),
+	}
+
+
+@app.get("/api/projects/{project_id}/captions")
+async def get_project_captions(project_id: str, user_id: str = Depends(get_user_id_header)):
+	"""Get all captions for a specific project."""
+	if not is_supabase_configured():
+		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+
+	# Verify user owns the project
+	project = await supabase_get_project(project_id, user_id)
+	if not project:
+		raise HTTPException(status_code=404, detail="Project not found")
+
+	captions = await supabase_get_captions_by_project(project_id)
+	return {
+		"project_id": project_id,
+		"captions": [_normalize_caption_row(caption) for caption in captions],
+		"count": len(captions),
+	}
 async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase reels is not configured")

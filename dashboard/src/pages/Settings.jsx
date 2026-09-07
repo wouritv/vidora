@@ -824,7 +824,20 @@ export default function SettingsPage() {
                 <p className="px-3 py-4 text-xs text-slate-400 dark:text-zinc-500">{t('settings.noSubscriptionHistory', 'No subscription history.')}</p>
               ) : (
                 <div className="max-h-48 overflow-auto">
-                  <table className="w-full text-xs">
+                  <div className="space-y-2 p-2 md:hidden">
+                    {subscriptionHistory.map((row) => (
+                      <article key={row.id} className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-xs">
+                        <p className="text-slate-700 dark:text-zinc-200 font-medium">{row.abonnement_name || planNameById[String(row.abonnement || '')] || row.abonnement || '-'}</p>
+                        <p className="mt-1 text-slate-500 dark:text-zinc-400">{t('settings.date', 'Date')}: {row.payment_start_date ? new Date(row.payment_start_date).toLocaleDateString('fr-FR') : '-'}</p>
+                        <div className="mt-1 flex items-center justify-between gap-2">
+                          <span className="text-slate-600 dark:text-zinc-300">{Number(row.payment_amount || 0).toFixed(2)} $</span>
+                          <span className="text-slate-500 dark:text-zinc-400">{row.payment_status || '-'}</span>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+
+                  <table className="hidden w-full text-xs md:table">
                     <thead>
                       <tr className="text-slate-400 dark:text-zinc-500 border-b border-slate-300 dark:border-white/10">
                         <th className="px-3 py-2 text-left">{t('settings.date', 'Date')}</th>
@@ -963,7 +976,40 @@ export default function SettingsPage() {
         ) : (
           <>
             <div className="overflow-x-auto rounded-lg border border-slate-300 dark:border-white/10">
-              <table className="w-full text-xs">
+              <div className="space-y-2 p-2 md:hidden">
+                {history.map((row) => {
+                  const isInput = row.operation === 'input';
+                  return (
+                    <article key={row.id} className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-500 dark:text-zinc-400">
+                          {new Date(row.created_at).toLocaleDateString('fr-FR', {
+                            day: '2-digit', month: '2-digit', year: '2-digit',
+                            hour: '2-digit', minute: '2-digit',
+                          })}
+                        </span>
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+                          isInput
+                            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+                            : 'bg-red-500/10 border border-red-500/20 text-red-400'
+                        }`}>
+                          {isInput ? <Plus size={10} /> : <Minus size={10} />}
+                          {isInput ? 'Crédit' : 'Débit'}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-slate-700 dark:text-zinc-300 capitalize">{(row.operation_type || '').replace('_', ' ')}</p>
+                      <div className="mt-1 flex items-center justify-between gap-2">
+                        <span className={`font-mono font-semibold ${isInput ? 'text-green-400' : 'text-red-400'}`}>
+                          {isInput ? '+' : '-'}{Number(row.credit).toLocaleString()} cr
+                        </span>
+                        <span className="font-mono text-slate-500 dark:text-zinc-400">{Number(row.storage).toFixed(3)} Go</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+
+              <table className="hidden w-full text-xs md:table">
                 <thead>
                   <tr className="border-b border-slate-300 dark:border-white/10 text-slate-500 dark:text-zinc-400">
                     <th className="px-3 py-2 text-left">{t("settings.date", "Date")}</th>

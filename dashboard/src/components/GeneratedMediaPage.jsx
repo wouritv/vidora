@@ -279,7 +279,90 @@ export default function GeneratedMediaPage({
                     </button>
                 </div>
 
-                <div className="overflow-x-auto">
+                <div className="space-y-3 md:hidden">
+                    {loading && (
+                        <div className="rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-6 text-center text-slate-500 dark:text-zinc-400">
+                            <span className="inline-flex items-center gap-2"><Loader2 size={14} className="animate-spin" /> {t('reels.loading', 'Loading...')}</span>
+                        </div>
+                    )}
+
+                    {!loading && error && (
+                        <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-6 text-center text-red-300">{error}</div>
+                    )}
+
+                    {!loading && !error && items.length === 0 && (
+                        <div className="rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-3 py-6 text-center text-slate-500 dark:text-zinc-400">{emptyLabel}</div>
+                    )}
+
+                    {!loading && !error && items.map((item) => (
+                        <article key={item.id} className="rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 p-3 space-y-3">
+                            <div className="flex gap-3">
+                                {item.media_thumbnail_url ? (
+                                    <img
+                                        src={item.media_thumbnail_url}
+                                        alt={item.media_title || "thumbnail"}
+                                        className="h-16 w-10 rounded-md object-cover border border-slate-300 dark:border-white/10"
+                                    />
+                                ) : null}
+                                <div className="min-w-0 flex-1">
+                                    <p className="font-semibold text-white line-clamp-2">{item.media_title || t("generatedMedia.untitled", "Untitled")}</p>
+                                    <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400 line-clamp-3">{item.media_description || "-"}</p>
+                                </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-zinc-400">
+                                <span>{t("generatedMedia.tableDuration", "Duration")}: {item.media_duration ? `${item.media_duration}s` : "-"}</span>
+                                <span>•</span>
+                                <span>{item.media_created_at ? new Date(item.media_created_at).toLocaleString() : "-"}</span>
+                            </div>
+
+                            <div>
+                                <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClass(item.media_status)}`}>
+                                    {statusLabel(item.media_status)}
+                                </span>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => handlePreview(item)}
+                                    className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10"
+                                    title={t("reels.preview", "Preview")}
+                                >
+                                    <Play size={14} />
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleDownload(item.id)}
+                                    className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10"
+                                    title={t("reels.download", "Download")}
+                                >
+                                    <Download size={14} />
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleShare(item.id)}
+                                    disabled={sharingId === item.id || !canShare}
+                                    className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/5 p-2 text-slate-700 dark:text-zinc-300 hover:bg-white/10 disabled:opacity-60"
+                                    title={t("reels.share", "Share")}
+                                >
+                                    <Share2 size={14} />
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleDelete(item.id)}
+                                    disabled={deletingId === item.id}
+                                    className="rounded-lg border border-red-500/20 bg-red-500/10 p-2 text-red-300 hover:bg-red-500/20 disabled:opacity-60"
+                                    title={t("reels.delete", "Delete")}
+                                >
+                                    <Trash2 size={14} />
+                                </button>
+                            </div>
+                        </article>
+                    ))}
+                </div>
+
+                <div className="hidden overflow-x-auto md:block">
                     <table className="min-w-full text-sm">
                         <thead>
                             <tr className="border-b border-slate-300 dark:border-white/10 text-left text-slate-500 dark:text-zinc-400">
@@ -324,7 +407,6 @@ export default function GeneratedMediaPage({
                                                 />
                                             ) : null}
                                             <p className="font-semibold text-white line-clamp-2">{item.media_title || t("generatedMedia.untitled", "Untitled")}</p>
-                                            <p className="mt-1 text-xs text-slate-400 dark:text-zinc-500">ID: {item.id}</p>
                                         </td>
                                         <td className="px-3 py-3 text-slate-700 dark:text-zinc-300 max-w-md">
                                             <p className="line-clamp-3">{item.media_description || "-"}</p>

@@ -42,7 +42,7 @@ EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
 EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
 
 GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between {min_clip_duration_seconds} and {max_clip_duration_seconds} seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–25 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between {min_clip_duration_seconds} and {max_clip_duration_seconds} seconds long.
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).

@@ -482,12 +482,12 @@ export default function CaptionsModal({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-      <div className="bg-white dark:bg-[#121214] border border-slate-300 dark:border-white/10 p-5 md:p-6 rounded-2xl w-full max-w-7xl shadow-2xl relative flex flex-col md:flex-row gap-5 md:gap-6 max-h-[92vh]">
+      <div className="bg-white dark:bg-[#121214] border border-slate-300 dark:border-white/10 p-5 md:p-6 rounded-2xl w-full max-w-7xl shadow-2xl relative flex flex-col md:flex-row gap-5 md:gap-6 max-h-[92vh] overflow-x-hidden">
         <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 dark:text-zinc-500 hover:text-slate-700 dark:hover:text-white z-10">
           <X size={20} />
         </button>
 
-        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 md:p-5 overflow-y-auto overflow-x-hidden custom-scrollbar">
           {showStyleEditor && selectedLine ? (
             <>
               <div className="mb-4 flex items-center justify-between gap-2">
@@ -853,7 +853,7 @@ export default function CaptionsModal({
           )}
         </div>
 
-        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 md:p-5 flex flex-col gap-3">
+        <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 md:p-5 flex flex-col gap-3 overflow-x-hidden">
           <h3 className="title-contrast text-lg font-bold">{t('captionsModal.preview', 'Preview')}</h3>
           <div className="flex-1 rounded-lg border border-slate-300 dark:border-white/10 overflow-hidden bg-black min-h-[360px]">
             <RemotionPreview
