@@ -12,6 +12,7 @@ from supabase_request import (
     list_job_logs,
     update_job_record,
     deduct_user_credits as supabase_deduct_user_credits,
+    refund_user_credits as supabase_refund_user_credits,
     insert_user_data_history as supabase_insert_user_data_history,
     get_user_data as supabase_get_user_data,
 )
@@ -39,6 +40,47 @@ class JobManager:
     def __init__(self, queue_name: str = "default"):
         self.queue_name = queue_name
         self.runtime_jobs: Dict[str, Dict[str, Any]] = {}
+
+    async def reserve_credits(self, user_id: str, credits: float) -> bool:
+        """Atomically reserve ``credits`` from the user's balance at job
+        creation time, instead of merely checking that the balance covers
+        the estimate. This closes the race where several concurrent job
+        submissions could all pass a non-mutating balance check before any
+        of them is actually billed at completion (see security audit
+        finding H8). Returns False if the balance is insufficient.
+        """
+        normalized = _ceil_credit(credits)
+        if normalized <= 0:
+            return True
+        return await supabase_deduct_user_credits(user_id, normalized)
+
+    async def refund_reservation(
+        self,
+        job_id: str,
+        user_id: str,
+        reserved_credits: float,
+        operation_type: str = "reels",
+    ) -> None:
+        """Give back a reservation in full -- used when a job ends with no
+        billable output (terminal failure, cancellation)."""
+        normalized = _ceil_credit(reserved_credits)
+        if normalized <= 0:
+            return
+        await supabase_refund_user_credits(user_id, normalized)
+        await supabase_insert_user_data_history(
+            user_id=user_id,
+            credit=normalized,
+            storage=0.0,
+            operation="refund",
+            operation_type=operation_type,
+            operation_id=job_id,
+        )
+        await append_job_log(
+            job_id,
+            "INFO",
+            f"Reservation refunded: credits={normalized}",
+            {"operation_type": operation_type},
+        )
 
     async def create_job(
         self,
@@ -149,16 +191,47 @@ class JobManager:
         credits: float,
         storage_delta: float = 0.0,
         operation_type: str = "reels",
+        reserved_credits: float = 0.0,
     ) -> bool:
-        """Deduct ``credits`` from the user and record the operation in history.
+        """Bill ``credits`` (the actual cost) for a completed job.
 
-        Returns ``True`` if the deduction succeeded, ``False`` if insufficient funds.
+        If ``reserved_credits`` was already atomically debited at job
+        creation time (see reserve_credits), this settles the *delta*
+        between the actual cost and the reservation -- an extra debit if
+        the job cost more than estimated, or a refund if it cost less --
+        instead of debiting the full actual cost again (which would double
+        -charge the user on top of the reservation). Pass 0 (the default)
+        for jobs that don't use reservations, which debits the full amount
+        exactly as before.
+
+        Returns ``True`` if the settlement succeeded, ``False`` if an
+        additional debit was needed but the balance was insufficient.
         """
         normalized_credits = _ceil_credit(credits)
         normalized_storage_gb = abs(float(storage_delta or 0.0))
-        if normalized_credits <= 0 and normalized_storage_gb <= 0:
+        normalized_reserved = _ceil_credit(reserved_credits)
+        delta = normalized_credits - normalized_reserved
+
+        if delta == 0 and storage_delta == 0:
+            # Reservation exactly covered the actual cost and there's no
+            # storage change to apply -- nothing to settle, but still
+            # record what was billed for history/audit.
+            if normalized_reserved > 0:
+                await update_job_record(
+                    job_id,
+                    {"actual_credit": normalized_credits, "actual_storage_gb": normalized_storage_gb},
+                )
             return True
-        success = await supabase_deduct_user_credits(user_id, normalized_credits, storage_delta)
+
+        if delta >= 0:
+            # Reservation covered less than the actual cost (or there was no
+            # reservation): debit the remaining delta plus any storage change.
+            success = await supabase_deduct_user_credits(user_id, delta, storage_delta)
+        else:
+            # Reservation covered more than the actual cost: refund the
+            # difference, still applying any storage change.
+            success = await supabase_refund_user_credits(user_id, abs(delta), storage_delta)
+
         if success:
             await supabase_insert_user_data_history(
                 user_id=user_id,
@@ -178,14 +251,16 @@ class JobManager:
             await append_job_log(
                 job_id,
                 "INFO",
-                f"Credits/storage debited: credits={normalized_credits}, storage_gb={normalized_storage_gb}",
+                f"Credits/storage settled: actual={normalized_credits}, reserved={normalized_reserved}, "
+                f"delta={delta}, storage_gb={normalized_storage_gb}",
                 {"operation_type": operation_type},
             )
         else:
             await append_job_log(
                 job_id,
                 "WARN",
-                f"Insufficient balance to debit credits={normalized_credits}, storage_gb={normalized_storage_gb}",
+                f"Insufficient balance to settle credits: actual={normalized_credits}, reserved={normalized_reserved}, "
+                f"delta={delta}, storage_gb={normalized_storage_gb}",
                 {"user_id": user_id, "operation_type": operation_type},
             )
         return success

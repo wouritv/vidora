@@ -10,6 +10,12 @@ env:
   NEXUS_REGISTRY: 82.112.253.226:8082
   IMAGE_PREFIX: vireel
 
+# Security: least-privilege default for GITHUB_TOKEN. This pipeline only
+# builds/tests and pushes images to an external (Nexus) registry -- it
+# never needs to write to this GitHub repository itself.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------
   # 1. BUILD + UNIT TESTS + SONARQUBE
@@ -113,7 +119,7 @@ jobs:
 
 
       - name: Quality Gate SonarQube
-        uses: sonarsource/sonarqube-quality-gate-action@master
+        uses: sonarsource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa # v1.2.1
         timeout-minutes: 5
         with:
           scanMetadataReportFile: ${{ matrix.path }}/.scannerwork/report-task.txt
@@ -146,6 +152,18 @@ jobs:
       - name: Checkout du code
         uses: actions/checkout@v4
 
+      # SECURITY DEBT (audit finding H11): this registry is configured for
+      # plaintext HTTP, so NEXUS_USERNAME/NEXUS_PASSWORD and every pushed
+      # image transit the runner<->registry link unencrypted and
+      # unauthenticated at the transport level -- anyone on that network
+      # path can read the credentials or tamper with the image that later
+      # gets deployed to production. This is an infrastructure fix, not a
+      # code fix: it requires the Nexus registry itself to terminate TLS
+      # (a certificate from a public CA, or a self-signed one added to this
+      # runner's trust store / passed to docker/login-action, is enough --
+      # docker does NOT need `insecure-registries` once the registry serves
+      # valid TLS). Do not remove the two steps below until that is done,
+      # or every image push in this pipeline will start failing.
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:

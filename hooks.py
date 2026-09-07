@@ -9,6 +9,9 @@ FONT_DIR = "fonts"
 FONT_PATH = os.path.join(FONT_DIR, "NotoSerif-Bold.ttf")
 EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
 EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
+# Security: hard ceilings on ffmpeg/ffprobe subprocess calls (audit finding H13).
+FFPROBE_TIMEOUT_SECONDS = int(os.environ.get("FFPROBE_TIMEOUT_SECONDS", "60"))
+FFMPEG_STEP_TIMEOUT_SECONDS = int(os.environ.get("FFMPEG_STEP_TIMEOUT_SECONDS", str(2 * 3600)))
 
 def download_font_if_needed():
     """Downloads a serif font for the hook text if not present."""
@@ -182,7 +185,7 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
     # 1. Probe video width to scale text properly
     try:
         cmd = ['ffprobe', '-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path]
-        res = subprocess.check_output(cmd).decode().strip()
+        res = subprocess.check_output(cmd, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
         # Takes first stream if multiple
         dims = res.split('\n')[0].split('x')
         video_width = int(dims[0])
@@ -228,10 +231,16 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
             output_path
         ]
         
-        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(
+            ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+        )
         print(f"✅ Hook added to {output_path}")
         return True
-        
+
+    except subprocess.TimeoutExpired as e:
+        print(f"❌ FFmpeg timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s")
+        raise e
     except subprocess.CalledProcessError as e:
         print(f"❌ FFmpeg Error: {e.stderr.decode() if e.stderr else 'Unknown'}")
         raise e

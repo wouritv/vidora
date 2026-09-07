@@ -7,6 +7,9 @@ from dataclasses import dataclass
 EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
 EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
 EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
+# Security: hard ceiling so a pathological input can't hang a worker
+# indefinitely while burning subtitles (audit finding H13).
+FFMPEG_STEP_TIMEOUT_SECONDS = int(os.environ.get("FFMPEG_STEP_TIMEOUT_SECONDS", str(2 * 3600)))
 
 
 def transcribe_audio(video_path):
@@ -296,7 +299,12 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16, 
     ]
 
     print(f"🎬 Burning subtitles: {' '.join(cmd)}")
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=FFMPEG_STEP_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"FFmpeg timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s while burning subtitles") from exc
 
     if result.returncode != 0:
         print(f"❌ FFmpeg Subtitle Error: {result.stderr.decode()}")

@@ -126,14 +126,28 @@ async def get_reel(reel_id: str, user_id: str) -> Optional[Dict[str, Any]]:
 	return rows[0]
 
 
-async def get_reel_by_job_clip(job_id: str, clip_index: int) -> Optional[Dict[str, Any]]:
+async def get_reel_by_job_clip(
+	job_id: str,
+	clip_index: int,
+	user_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+	"""Look up a reel by (job_id, clip_index). Pass ``user_id`` whenever the
+	caller has an authenticated identity available -- it adds a second,
+	defense-in-depth ownership filter so this lookup can never return
+	another user's reel even if an upstream authorization check were ever
+	missing or buggy."""
 	client = await get_client()
-	response = (
-		await client.table(SUPABASE_REELS_TABLE)
+	q = (
+		client.table(SUPABASE_REELS_TABLE)
 		.select("*")
 		.eq("reel_job_id", job_id)
 		.eq("reel_clip_index", clip_index)
 		.is_("deleted_at", "null")
+	)
+	if user_id:
+		q = q.eq("reel_user_id", user_id)
+	response = (
+		await q
 		.order("reel_updated_at", desc=True)
 		.limit(1)
 		.execute()
@@ -151,7 +165,11 @@ async def update_reel_media_by_job_clip(
 	reel_url: str,
 	reel_s3_key: Optional[str] = None,
 	reel_thumbnail_url: Optional[str] = None,
+	user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+	"""Update a reel's media URL by (job_id, clip_index). Pass ``user_id``
+	whenever available for a defense-in-depth ownership filter (see
+	get_reel_by_job_clip)."""
 	if not job_id or clip_index is None or not reel_url:
 		return None
 
@@ -166,14 +184,16 @@ async def update_reel_media_by_job_clip(
 	if reel_thumbnail_url is not None:
 		payload["reel_thumbnail_url"] = reel_thumbnail_url
 
-	response = (
-		await client.table(SUPABASE_REELS_TABLE)
+	q = (
+		client.table(SUPABASE_REELS_TABLE)
 		.update(payload)
 		.eq("reel_job_id", job_id)
 		.eq("reel_clip_index", int(clip_index))
 		.is_("deleted_at", "null")
-		.execute()
 	)
+	if user_id:
+		q = q.eq("reel_user_id", user_id)
+	response = await q.execute()
 	rows = response.data or []
 	if not rows:
 		return None
@@ -320,8 +340,10 @@ async def update_project(
 async def update_project_status(
 	project_id: str,
 	status: str,
+	user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-	"""Update project status (completed, failed, or cancelled) and set completed_at if applicable."""
+	"""Update project status (completed, failed, or cancelled) and set completed_at if applicable.
+	Pass ``user_id`` whenever available for a defense-in-depth ownership filter."""
 	if not project_id or status not in ("completed", "failed", "cancelled"):
 		return None
 	client = await get_client()
@@ -335,12 +357,14 @@ async def update_project_status(
 	if status in ("completed", "failed", "cancelled"):
 		payload["completed_at"] = datetime.now(timezone.utc).isoformat()
 
-	response = (
-		await client.table(SUPABASE_PROJECTS_TABLE)
+	q = (
+		client.table(SUPABASE_PROJECTS_TABLE)
 		.update(payload)
 		.eq("id", project_id)
-		.execute()
 	)
+	if user_id:
+		q = q.eq("user_id", user_id)
+	response = await q.execute()
 	rows = response.data or []
 	return rows[0] if rows else None
 
@@ -348,6 +372,26 @@ async def update_project_status(
 async def soft_delete_project(project_id: str, user_id: str) -> bool:
 	"""Hard delete a project and all its contents (reels, captions, files on S3)."""
 	client = await get_client()
+
+	# Security: verify ownership BEFORE cascading any deletes. The reels/
+	# captions deletes below filter only by project_id (they have no
+	# user_id column of their own to check against project ownership), so
+	# if we deleted them first and only verified ownership on the final
+	# project delete, a caller supplying another user's project_id could
+	# have that user's reels/captions deleted even though the project row
+	# itself would survive (0 rows affected on the ownership-filtered
+	# delete). Verifying first makes the whole operation a no-op for a
+	# project the caller doesn't own.
+	owned = (
+		await client.table(SUPABASE_PROJECTS_TABLE)
+		.select("id")
+		.eq("id", project_id)
+		.eq("user_id", user_id)
+		.limit(1)
+		.execute()
+	)
+	if not owned.data:
+		return False
 
 	# Delete all reels associated with this project
 	await (
@@ -422,30 +466,32 @@ def caption_status_value(status: Optional[str]) -> str:
 	return "termine"
 
 
-async def increment_project_output_count(project_id: str) -> Optional[Dict[str, Any]]:
-	"""Increment the output_count of a project."""
+async def increment_project_output_count(
+	project_id: str,
+	user_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+	"""Increment the output_count of a project. Pass ``user_id`` whenever
+	available for a defense-in-depth ownership filter."""
 	if not project_id:
 		return None
 	client = await get_client()
-	# Fetch current project (no user_id check needed for incrementing)
-	response = (
-		await client.table(SUPABASE_PROJECTS_TABLE)
-		.select("*")
-		.eq("id", project_id)
-		.limit(1)
-		.execute()
-	)
+	q = client.table(SUPABASE_PROJECTS_TABLE).select("*").eq("id", project_id)
+	if user_id:
+		q = q.eq("user_id", user_id)
+	response = await q.limit(1).execute()
 	rows = response.data or []
 	current = rows[0] if rows else None
 	if not current:
 		return None
 	new_count = (current.get("output_count") or 0) + 1
-	response = (
-		await client.table(SUPABASE_PROJECTS_TABLE)
+	update_q = (
+		client.table(SUPABASE_PROJECTS_TABLE)
 		.update({"output_count": new_count})
 		.eq("id", project_id)
-		.execute()
 	)
+	if user_id:
+		update_q = update_q.eq("user_id", user_id)
+	response = await update_q.execute()
 	rows = response.data or []
 	return rows[0] if rows else None
 
@@ -881,17 +927,24 @@ async def list_user_souscriptions(user_id: str, limit: int = 50) -> List[Dict[st
 	return response.data or []
 
 
-async def update_souscription_row(subscription_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-	"""Update one subscription row and return it."""
+async def update_souscription_row(
+	subscription_id: str,
+	updates: Dict[str, Any],
+	user_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+	"""Update one subscription row and return it. Pass ``user_id`` whenever
+	available for a defense-in-depth ownership filter (column: ``userid``)."""
 	if not subscription_id:
 		return None
 	client = await get_client()
-	await (
+	q = (
 		client.table(SUPABASE_SOUSCRIPTION_TABLE)
 		.update(dict(updates or {}))
 		.eq("id", subscription_id)
-		.execute()
 	)
+	if user_id:
+		q = q.eq("userid", user_id)
+	await q.execute()
 	response = (
 		await client.table(SUPABASE_SOUSCRIPTION_TABLE)
 		.select(SOUSCRIPTION_COLUMNS)
@@ -959,18 +1012,23 @@ async def create_job_record(
 	return rows[0] if rows else payload
 
 
-async def update_job_record(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def update_job_record(
+	job_id: str,
+	updates: Dict[str, Any],
+	user_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+	"""Update a job row. Pass ``user_id`` whenever available for a
+	defense-in-depth ownership filter -- without it, any caller with only a
+	job_id can rewrite any user's job status/results/cost fields."""
 	if not job_id:
 		return None
 	client = await get_client()
 	payload = dict(updates or {})
 	payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-	await (
-		client.table(SUPABASE_JOBS_TABLE)
-		.update(payload)
-		.eq("id", job_id)
-		.execute()
-	)
+	q = client.table(SUPABASE_JOBS_TABLE).update(payload).eq("id", job_id)
+	if user_id:
+		q = q.eq("user_id", user_id)
+	await q.execute()
 	response = (
 		await client.table(SUPABASE_JOBS_TABLE)
 		.select(JOB_COLUMNS)
@@ -997,6 +1055,27 @@ async def get_job_record(job_id: str, user_id: Optional[str] = None) -> Optional
 	response = await q.execute()
 	rows = response.data or []
 	return rows[0] if rows else None
+
+
+ACTIVE_JOB_STATUSES = ("created", "queued", "processing", "retry_wait")
+
+
+async def count_active_jobs_for_user(user_id: str) -> int:
+	"""Count a user's jobs currently in a non-terminal state (created, queued,
+	processing, or waiting to retry). Used to cap per-user concurrent job
+	submissions so a single account can't flood the queue/disk/S3 storage
+	(see security audit finding H7)."""
+	if not user_id:
+		return 0
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_JOBS_TABLE)
+		.select("id", count="exact")
+		.eq("user_id", user_id)
+		.in_("status", list(ACTIVE_JOB_STATUSES))
+		.execute()
+	)
+	return int(response.count or 0)
 
 
 async def get_latest_job_record_by_project(project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
@@ -1319,6 +1398,73 @@ async def deduct_user_credits(
 				operation_type="operation",
 				operation_id="",
 				metadata={"requested_credit_debit": debit_credits},
+			)
+		return True
+
+	return False
+
+
+async def refund_user_credits(
+	user_id: str,
+	credits: float,
+	storage_delta: float = 0.0,
+	max_attempts: int = 5,
+) -> bool:
+	"""Add ``credits`` back to a user's balance (releasing a reservation made
+	via deduct_user_credits, e.g. on job failure/cancellation, or settling a
+	completed job whose actual cost was lower than its reservation).
+
+	Existing debt is paid down first, same as set_user_data_balance's
+	top-up logic, before any surplus is added to the spendable balance.
+	Uses the same optimistic-concurrency retry as deduct_user_credits so a
+	concurrent refund/debit can never be silently lost.
+	"""
+	if credits <= 0 and storage_delta == 0:
+		return True
+	client = await get_client()
+
+	for _ in range(max_attempts):
+		existing = await get_user_data(user_id)
+		if not existing:
+			return False
+
+		current_credits = float(existing.get("credit", 0) or 0.0)
+		current_debt = float(existing.get("credit_debt", 0) or 0.0)
+		credit_amount = max(0.0, float(credits or 0.0))
+
+		debt_paid = min(current_debt, credit_amount)
+		new_debt = current_debt - debt_paid
+		new_credit = current_credits + (credit_amount - debt_paid)
+
+		current_storage = float(existing.get("stockage", 0) or 0.0)
+		new_storage = current_storage + float(storage_delta)
+
+		response = await (
+			client.table(SUPABASE_USER_DATA_TABLE)
+			.update({
+				"credit":     new_credit,
+				"credit_debt": new_debt,
+				"stockage":   new_storage,
+				"updated_at": datetime.now(timezone.utc).isoformat(),
+			})
+			.eq("user_id", user_id)
+			.eq("credit", current_credits)
+			.eq("stockage", current_storage)
+			.execute()
+		)
+
+		if not response.data:
+			continue
+
+		if debt_paid > 0:
+			await insert_user_credit_bank_entry(
+				user_id=user_id,
+				direction="debt_payment",
+				amount=debt_paid,
+				debt_balance_after=new_debt,
+				operation_type="refund",
+				operation_id="",
+				metadata={"refunded_credit": credit_amount},
 			)
 		return True
 
