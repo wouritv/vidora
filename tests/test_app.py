@@ -70,6 +70,7 @@ def _import_app_with_stubs(monkeypatch):
     pytest.importorskip("fastapi")
     monkeypatch.setenv("SECRET_KEY", "unit-test-secret")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "unit-test-supabase-jwt-secret")
     _install_supabase_stubs(monkeypatch)
     _install_optional_dependency_stubs(monkeypatch)
 

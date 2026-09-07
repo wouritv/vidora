@@ -5,6 +5,7 @@ import RemotionPreview from './RemotionPreview';
 import { ANIMATION_OPTIONS, COLOR_PRESETS, HIGHLIGHT_COLOR_PRESETS, FONT_OPTIONS } from '../lib/subtitleOptions';
 import { useTranslation } from '../state/LanguageContext';
 import { useAuth } from '../state/AuthContext';
+import { getAuthHeaders } from '../lib/apiAuth';
 
 const DEFAULT_STYLE = {
   positionX: 50,
@@ -364,7 +365,7 @@ export default function CaptionsModal({
     if (!isOpen || !jobId || clipIndex == null || clipIndex < 0) return;
     let cancelled = false;
 
-    const headers = user?.id ? { 'X-User-Id': user.id } : {};
+    const headers = getAuthHeaders(user?.id);
 
     setCaptionsLoading(true);
     setFetchError('');
@@ -450,7 +451,7 @@ export default function CaptionsModal({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(user?.id ? { 'X-User-Id': user.id } : {}),
+          ...getAuthHeaders(user?.id),
         },
         body: JSON.stringify(payload),
       });

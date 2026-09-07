@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Download, Loader2, Plus, Play, Search, Share2, Trash2, X } from "lucide-react";
 import { getApiUrl } from "../config";
 import { useAuth } from "../state/AuthContext";
+import { getAuthHeaders } from "../lib/apiAuth";
 import { useUserCredits } from "../state/UserCreditsContext";
 import { useNavigate } from "react-router-dom";
 import { statusLabel, statusClass } from "../lib/status";
@@ -53,7 +54,7 @@ export default function GeneratedMediaPage({
 
     const fetchFreshMediaUrl = async (itemId) => {
         const response = await fetch(getApiUrl(`${mediaUrlEndpoint}/${itemId}/media-url`), {
-            headers: { "X-User-Id": user.id },
+            headers: getAuthHeaders(user.id),
         });
         if (!response.ok) return null;
         const data = await response.json();
@@ -77,7 +78,7 @@ export default function GeneratedMediaPage({
 
             try {
                 const response = await fetch(getApiUrl(`${listEndpoint}?${params.toString()}`), {
-                    headers: { "X-User-Id": user.id },
+                    headers: getAuthHeaders(user.id),
                 });
 
                 if (!response.ok) {
@@ -118,7 +119,7 @@ export default function GeneratedMediaPage({
             if (status) params.set("status", status);
 
             const response = await fetch(getApiUrl(`${listEndpoint}?${params.toString()}`), {
-                headers: { "X-User-Id": user.id },
+                headers: getAuthHeaders(user.id),
             });
             const data = await response.json();
             if (!response.ok) {
@@ -143,7 +144,7 @@ export default function GeneratedMediaPage({
         try {
             const response = await fetch(getApiUrl(`${deleteEndpoint}/${itemId}`), {
                 method: "DELETE",
-                headers: { "X-User-Id": user.id },
+                headers: getAuthHeaders(user.id),
             });
             if (!response.ok) {
                 const detail = await response.text();
@@ -192,7 +193,7 @@ export default function GeneratedMediaPage({
 
             const response = await fetch(getApiUrl(`${shareEndpoint}/${itemId}/share`), {
                 method: "POST",
-                headers: { "Content-Type": "application/json", "X-User-Id": user.id },
+                headers: { "Content-Type": "application/json", ...getAuthHeaders(user.id) },
                 body: JSON.stringify(payload),
             });
 

@@ -10,6 +10,7 @@ import MobileFilterDropdown from "../components/MobileFilterDropdown";
 import { getConnectedPlatforms } from "../lib/platforms";
 import { useTranslation } from "../state/LanguageContext";
 import { statusClass, statusLabel } from "../lib/status";
+import { getAuthHeaders } from "../lib/apiAuth";
 
 const CAPTION_STATUS_FALLBACK = "termine";
 
@@ -113,14 +114,14 @@ export default function CaptionsPage({ projectId = "", autoOpenFirst = false }) 
                 let response;
                 if (projectId) {
                     response = await fetch(getApiUrl(`/api/projects/${projectId}/captions`), {
-                        headers: { "X-User-Id": user.id },
+                        headers: { ...getAuthHeaders(user.id) },
                     });
                 } else {
                     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
                     if (query) params.set("q", query);
                     if (status) params.set("status", status);
                     response = await fetch(getApiUrl(`/api/captions?${params.toString()}`), {
-                        headers: { "X-User-Id": user.id },
+                        headers: { ...getAuthHeaders(user.id) },
                     });
                 }
                 const data = await response.json();
@@ -160,7 +161,7 @@ export default function CaptionsPage({ projectId = "", autoOpenFirst = false }) 
             }
             try {
                 const response = await fetch(getApiUrl(`/api/projects/${projectId}`), {
-                    headers: { "X-User-Id": user.id },
+                    headers: { ...getAuthHeaders(user.id) },
                 });
                 const data = await response.json();
                 if (!cancelled && response.ok) setProjectMeta(data || null);
@@ -184,14 +185,14 @@ export default function CaptionsPage({ projectId = "", autoOpenFirst = false }) 
             let response;
             if (projectId) {
                 response = await fetch(getApiUrl(`/api/projects/${projectId}/captions`), {
-                    headers: { "X-User-Id": user.id },
+                    headers: { ...getAuthHeaders(user.id) },
                 });
             } else {
                 const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
                 if (query) params.set("q", query);
                 if (status) params.set("status", status);
                 response = await fetch(getApiUrl(`/api/captions?${params.toString()}`), {
-                    headers: { "X-User-Id": user.id },
+                    headers: { ...getAuthHeaders(user.id) },
                 });
             }
             const data = await response.json();
@@ -230,7 +231,7 @@ export default function CaptionsPage({ projectId = "", autoOpenFirst = false }) 
     const fetchFreshMediaUrl = async (captionId) => {
         if (!user?.id) return null;
         const response = await fetch(getApiUrl(`/api/captions/${captionId}/media-url`), {
-            headers: { "X-User-Id": user.id },
+            headers: { ...getAuthHeaders(user.id) },
         });
         if (!response.ok) return null;
         const data = await response.json();
@@ -262,7 +263,7 @@ export default function CaptionsPage({ projectId = "", autoOpenFirst = false }) 
         try {
             const response = await fetch(getApiUrl(`/api/captions/${captionId}`), {
                 method: "DELETE",
-                headers: { "X-User-Id": user.id },
+                headers: { ...getAuthHeaders(user.id) },
             });
             if (!response.ok) {
                 const detail = await response.text();
@@ -333,7 +334,7 @@ export default function CaptionsPage({ projectId = "", autoOpenFirst = false }) 
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "X-User-Id": user.id,
+                    ...getAuthHeaders(user.id),
                 },
                 body: JSON.stringify(payload),
             });

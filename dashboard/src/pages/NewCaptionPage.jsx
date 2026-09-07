@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowLeft, CheckCircle2, Clock3, Loader2 } from "lucide-react";
 import { getApiUrl } from "../config";
+import { getAuthHeaders } from "../lib/apiAuth";
 import { useAuth } from "../state/AuthContext";
 import { useUserCredits } from "../state/UserCreditsContext";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -38,14 +39,14 @@ export default function NewCaptionPage() {
             setProjectJobLoading(true);
             try {
                 const response = await fetch(getApiUrl(`/api/projects/${projectId}/job`), {
-                    headers: { "X-User-Id": user.id },
+                    headers: getAuthHeaders(user.id),
                 });
                 const payload = await response.json().catch(() => ({}));
                 if (cancelled) return;
                 if (!response.ok) {
                     // Fallback for older backend versions where /projects/{id}/job may not exist yet.
                     const projectResp = await fetch(getApiUrl(`/api/projects/${projectId}`), {
-                        headers: { "X-User-Id": user.id },
+                        headers: getAuthHeaders(user.id),
                     });
                     const projectPayload = await projectResp.json().catch(() => ({}));
                     if (cancelled) return;
@@ -141,7 +142,7 @@ export default function NewCaptionPage() {
         const poll = async () => {
             try {
                 const response = await fetch(getApiUrl(`/api/status/${jobId}`), {
-                    headers: user?.id ? { "X-User-Id": user.id } : undefined,
+                    headers: getAuthHeaders(user?.id),
                 });
                 if (!response.ok) {
                     pollFailureCountRef.current += 1;
@@ -215,7 +216,7 @@ export default function NewCaptionPage() {
 
             const response = await fetch(getApiUrl("/api/captions/process"), {
                 method: "POST",
-                headers: { "X-User-Id": user.id },
+                headers: getAuthHeaders(user.id),
                 body: formData,
             });
 

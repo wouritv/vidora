@@ -35,13 +35,18 @@ services:
       dockerfile: render-service/Dockerfile
     container_name: vireel-renderer
     ports:
-      - "4002:3100"
+      # Bound to loopback only: the render-service has no per-user auth model
+      # of its own and is meant to be reachable only by the backend over the
+      # internal Docker network. This port mapping exists for local
+      # debugging only (curl from the host), never for external exposure.
+      - "127.0.0.1:4002:3100"
     volumes:
       - ./output:/output
     environment:
       - REMOTION_BUNDLE_PATH=/app/remotion
       - OUTPUT_DIR=/output
       - PORT=3100
+      - RENDER_SERVICE_API_KEY=${RENDER_SERVICE_API_KEY:?RENDER_SERVICE_API_KEY must be set}
     restart: unless-stopped
     depends_on:
       - backend

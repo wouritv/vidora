@@ -8,6 +8,7 @@ import { renderInBrowser } from '../lib/renderInBrowser';
 import { getConnectedPlatforms } from '../lib/platforms';
 import { inputFilenameFromVideoUrl } from '../lib/clips';
 import { useAuth } from '../state/AuthContext';
+import { getAuthHeaders } from '../lib/apiAuth';
 import { useUserCredits } from '../state/UserCreditsContext';
 import { useTranslation } from "../state/LanguageContext";
 function readConnectedPlatformsFromSettings() {
@@ -185,7 +186,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
 
         fetch(getApiUrl(`/api/clip/${jobId}/${clipIndexForApi}/preview-image/ensure`), {
             headers: {
-                ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                ...getAuthHeaders(user?.id),
             },
             signal: controller.signal,
         })
@@ -277,7 +278,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                        ...getAuthHeaders(user?.id),
                     },
                     body: JSON.stringify({
                         job_id: jobId,
@@ -312,7 +313,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                    ...getAuthHeaders(user?.id),
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -401,7 +402,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
             const persistRes = await fetch(getApiUrl(`/api/reels/${jobId}/${clipIndexForApi}/captions/persist`), {
                 method: 'POST',
                 headers: {
-                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                    ...getAuthHeaders(user?.id),
                 },
                 body: formData,
             });
@@ -490,7 +491,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                    ...getAuthHeaders(user?.id),
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -536,7 +537,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                    ...getAuthHeaders(user?.id),
                 },
             });
             if (!res.ok) {
@@ -603,7 +604,7 @@ export default function ResultCard({ clip, index, jobId, onPlay, onPause, compac
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(user?.id ? { 'X-User-Id': user.id } : {}),
+                    ...getAuthHeaders(user?.id),
                 },
                 body: JSON.stringify(payload)
             });

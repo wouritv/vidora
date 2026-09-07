@@ -6,6 +6,7 @@ import MobileFilterDropdown from "../components/MobileFilterDropdown";
 import { useAuth } from "../state/AuthContext";
 import { useTranslation } from "../state/LanguageContext";
 import { statusClass, statusLabel } from "../lib/status";
+import { getAuthHeaders } from "../lib/apiAuth";
 
 function formatDurationHms(value) {
     const total = Number(value || 0);
@@ -65,7 +66,7 @@ export default function ReelsProjectsPage() {
             if (status) params.set("status", status);
 
             const response = await fetch(getApiUrl(`/api/projects?${params.toString()}`), {
-                headers: { "X-User-Id": user.id },
+                headers: getAuthHeaders(user.id),
             });
             const data = await response.json();
             if (!response.ok) {
@@ -120,7 +121,7 @@ export default function ReelsProjectsPage() {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json",
-                    "X-User-Id": user.id,
+                    ...getAuthHeaders(user.id),
                 },
                 body: JSON.stringify({ name: trimmed }),
             });
@@ -145,7 +146,7 @@ export default function ReelsProjectsPage() {
         try {
             const response = await fetch(getApiUrl(`/api/projects/${project.id}`), {
                 method: "DELETE",
-                headers: { "X-User-Id": user.id },
+                headers: getAuthHeaders(user.id),
             });
             if (!response.ok) {
                 const detail = await response.text();

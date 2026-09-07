@@ -61,6 +61,12 @@ Exemples de familles de variables:
 - Facturation/credits (prix unitaires, majoration)
 - Limites operationnelles (duree max, stockage max, timeouts)
 
+Variables requises au demarrage du backend (l'app refuse de demarrer si elles sont absentes, hors execution des tests) :
+
+- `SUPABASE_JWT_SECRET` : secret JWT du projet Supabase (Project Settings -> API -> JWT Secret), utilise pour verifier les tokens de session envoyes par le frontend (`Authorization: Bearer ...`). C'est la seule source de verite pour l'identite d'un utilisateur cote backend.
+- `ENCRYPTION_KEY` : cle (16 caracteres minimum) utilisee pour chiffrer (AES-256-GCM) les tokens OAuth des reseaux sociaux stockes en base.
+- `RENDER_SERVICE_API_KEY` : cle interne partagee entre le backend et le render-service (Remotion), verifiee sur chaque appel a `/render`. A definir aussi dans l'environnement du service `renderer` (docker-compose).
+
 ## Lancement local
 
 ### Backend (racine)

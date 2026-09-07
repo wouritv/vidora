@@ -33,13 +33,17 @@ services:
     image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-latest}
     container_name: vireel-prod-renderer
     ports:
-      - "5002:3100"
+      # Bound to loopback only: render-service has no per-user auth of its
+      # own and must only be reachable from the backend over the internal
+      # Docker network, never from the public internet.
+      - "127.0.0.1:5002:3100"
     volumes:
       - output-data:/output
     environment:
       - REMOTION_BUNDLE_PATH=/app/remotion
       - OUTPUT_DIR=/output
       - PORT=3100
+      - RENDER_SERVICE_API_KEY=${RENDER_SERVICE_API_KEY:?RENDER_SERVICE_API_KEY must be set}
     restart: unless-stopped
     depends_on:
       - backend

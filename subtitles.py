@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -236,8 +237,19 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16, 
 
     _normalize_subtitle_text_case(srt_path, style.text_case)
 
-    # Path handling for FFmpeg filter syntax
-    safe_srt_path = srt_path.replace('\\', '/').replace(':', '\\:')
+    # Path handling for FFmpeg filter syntax. Also escape single quotes so a
+    # path cannot break out of the quoted subtitles='...' filter argument
+    # (defense in depth; job_id is already validated by the caller, but this
+    # keeps the guarantee local to the function that actually builds the
+    # filtergraph string).
+    safe_srt_path = srt_path.replace('\\', '/').replace(':', '\\:').replace("'", "\\'")
+
+    # Font name is the one style field echoed verbatim into the filtergraph
+    # (colors go through hex_to_ass_color below, which only ever emits a
+    # fixed &HAABBGGRR-format string). Restrict it to a safe character set so
+    # a crafted font_name cannot break out of force_style='...' and inject
+    # additional filtergraph syntax.
+    safe_font_name = re.sub(r"[^A-Za-z0-9 _.\-]", "", style.font_name or "")[:64].strip() or "Verdana"
 
     # Convert colors to ASS format and build style
     primary_colour = hex_to_ass_color(style.font_color, 1.0)
@@ -259,7 +271,7 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16, 
 
     style_string = (
         f"Alignment={ass_alignment},"
-        f"Fontname={style.font_name},"
+        f"Fontname={safe_font_name},"
         f"Fontsize={final_fontsize},"
         f"PrimaryColour={primary_colour},"
         f"OutlineColour={outline_colour},"

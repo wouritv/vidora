@@ -1239,61 +1239,90 @@ async def set_user_data_balance(
 	return rows[0] if rows else payload
 
 
+MAX_CREDIT_DEBT = max(0.0, float(os.environ.get("MAX_CREDIT_DEBT", "0") or "0"))
+
+
 async def deduct_user_credits(
 	user_id: str,
 	credits: float,
 	storage_delta: float = 0.0,
+	max_attempts: int = 5,
 ) -> bool:
 	"""Deduct ``credits`` from the user balance.
 
-	Returns ``False`` if the user does not have sufficient credits.
+	Returns ``False`` if the user does not have sufficient credits/storage
+	headroom, or if the account's debt would exceed MAX_CREDIT_DEBT.
+
+	Security: this uses optimistic concurrency (a conditional UPDATE that
+	only applies if credit/stockage still match what we just read, retried
+	on conflict) so two concurrent operations can never both silently debit
+	against the same stale balance -- one of them detects the conflict and
+	recomputes against the fresh row instead of the update being lost. It
+	also enforces a hard ceiling on ``credit_debt`` instead of allowing it to
+	grow without bound while the account keeps consuming paid processing
+	(see security audit finding C7).
 	"""
 	client = await get_client()
-	existing = await get_user_data(user_id)
-	if not existing:
-		return False
 
-	current_credits = float(existing.get("credit", 0) or 0.0)
-	current_debt = float(existing.get("credit_debt", 0) or 0.0)
-	debit_credits = max(0.0, float(credits or 0.0))
+	for _ in range(max_attempts):
+		existing = await get_user_data(user_id)
+		if not existing:
+			return False
 
-	new_credit = current_credits - debit_credits
-	debt_delta = 0.0
-	if new_credit < 0:
-		debt_delta = abs(new_credit)
-		new_credit = 0.0
+		current_credits = float(existing.get("credit", 0) or 0.0)
+		current_debt = float(existing.get("credit_debt", 0) or 0.0)
+		debit_credits = max(0.0, float(credits or 0.0))
 
-	new_debt = current_debt + debt_delta
-	current_storage = float(existing.get("stockage", 0) or 0.0)
-	new_storage = current_storage + float(storage_delta)
-	storage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
-	overage_limit = (storage_max * STORAGE_OVERAGE_TOLERANCE_PERCENT) / 100.0
-	if new_storage < -overage_limit:
-		return False
+		new_credit = current_credits - debit_credits
+		debt_delta = 0.0
+		if new_credit < 0:
+			debt_delta = abs(new_credit)
+			new_credit = 0.0
 
-	await (
-		client.table(SUPABASE_USER_DATA_TABLE)
-		.update({
-			"credit":     new_credit,
-			"credit_debt": new_debt,
-			"stockage":   new_storage,
-			"updated_at": datetime.now(timezone.utc).isoformat(),
-		})
-		.eq("user_id", user_id)
-		.execute()
-	)
+		new_debt = current_debt + debt_delta
+		if new_debt > MAX_CREDIT_DEBT:
+			return False
 
-	if debt_delta > 0:
-		await insert_user_credit_bank_entry(
-			user_id=user_id,
-			direction="debt_increase",
-			amount=debt_delta,
-			debt_balance_after=new_debt,
-			operation_type="operation",
-			operation_id="",
-			metadata={"requested_credit_debit": debit_credits},
+		current_storage = float(existing.get("stockage", 0) or 0.0)
+		new_storage = current_storage + float(storage_delta)
+		storage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
+		overage_limit = (storage_max * STORAGE_OVERAGE_TOLERANCE_PERCENT) / 100.0
+		if new_storage < -overage_limit:
+			return False
+
+		response = await (
+			client.table(SUPABASE_USER_DATA_TABLE)
+			.update({
+				"credit":     new_credit,
+				"credit_debt": new_debt,
+				"stockage":   new_storage,
+				"updated_at": datetime.now(timezone.utc).isoformat(),
+			})
+			.eq("user_id", user_id)
+			.eq("credit", current_credits)
+			.eq("stockage", current_storage)
+			.execute()
 		)
-	return True
+
+		if not response.data:
+			# Another concurrent request changed the balance between our read
+			# and this write -- retry against the fresh balance rather than
+			# silently dropping this deduction (classic TOCTOU double-spend).
+			continue
+
+		if debt_delta > 0:
+			await insert_user_credit_bank_entry(
+				user_id=user_id,
+				direction="debt_increase",
+				amount=debt_delta,
+				debt_balance_after=new_debt,
+				operation_type="operation",
+				operation_id="",
+				metadata={"requested_credit_debit": debit_credits},
+			)
+		return True
+
+	return False
 
 
 async def insert_user_credit_bank_entry(

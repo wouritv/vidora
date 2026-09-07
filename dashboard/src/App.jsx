@@ -8,6 +8,7 @@ import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import { getApiUrl } from './config';
+import { getAuthHeaders } from './lib/apiAuth';
 import { useLocation, useNavigate } from "react-router-dom";
 import { DASHBOARD_SIDEBAR_ITEMS } from "./lib/dashboard-nav";
 import { useAuth } from "./state/AuthContext";
@@ -293,7 +294,7 @@ const Sidebar = ({ currentTab, onNavigate }) => (
 
 const pollJob = async (jobId, userId = "") => {
   try {
-    const headers = userId ? { "X-User-Id": userId } : undefined;
+    const headers = getAuthHeaders(userId);
     const res = await fetch(getApiUrl(`/api/status/${jobId}`), headers ? { headers } : undefined);
     if (!res.ok) {
       throw new Error(`Status check failed: ${res.status} ${res.statusText}`);
@@ -366,14 +367,14 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       const restoreProjectJob = async () => {
         try {
           const response = await fetch(getApiUrl(`/api/projects/${projectId}/job`), {
-            headers: { 'X-User-Id': user.id },
+            headers: getAuthHeaders(user.id),
           });
           const payload = await response.json().catch(() => ({}));
           if (cancelled) return;
           if (!response.ok) {
             // Fallback for older backend versions where /projects/{id}/job may not exist yet.
             const projectResp = await fetch(getApiUrl(`/api/projects/${projectId}`), {
-              headers: { 'X-User-Id': user.id },
+              headers: getAuthHeaders(user.id),
             });
             const projectPayload = await projectResp.json().catch(() => ({}));
             if (cancelled) return;
@@ -575,7 +576,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
 
     try {
       let body;
-      const headers = { 'X-User-Id': user.id };
+      const headers = getAuthHeaders(user.id);
       if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({ url: data.payload, acknowledged: !!data.acknowledged });
@@ -587,7 +588,7 @@ function App({ activeTab = "reel-generator", embedded = false } = {}) {
       }
       const res = await fetch(getApiUrl('/api/process'), {
         method: 'POST',
-        headers: data.type === 'url' ? headers : { 'X-User-Id': user.id },
+        headers: data.type === 'url' ? headers : getAuthHeaders(user.id),
         body
       });
       if (!res.ok) {
