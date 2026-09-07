@@ -12,8 +12,12 @@ def _import_thumbnail_with_stubs(monkeypatch):
             self.models = types.SimpleNamespace(generate_content=lambda *a, **k: types.SimpleNamespace(text='{"titles": ["A"]}'))
             self.files = types.SimpleNamespace(upload=lambda **k: types.SimpleNamespace(name="file"), get=lambda **k: types.SimpleNamespace(state="ACTIVE"))
 
+    class _Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
     genai_mod.Client = _DummyClient
-    genai_mod.types = types.SimpleNamespace(GenerateContentConfig=object, ImageConfig=object)
+    genai_mod.types = types.SimpleNamespace(GenerateContentConfig=_Config, ImageConfig=_Config)
     google_mod.genai = genai_mod
 
     pil_mod = types.ModuleType("PIL")

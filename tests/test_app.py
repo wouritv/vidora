@@ -207,11 +207,16 @@ def test_run_job_process_exit_schedules_retry(monkeypatch):
     app.jobs[job_id] = {"status": "queued", "logs": [], "result": None}
 
     app.reel_job_manager.start_job = AsyncMock()
+    app.reel_job_manager.update_progress = AsyncMock()
     app._finalize_failed_reel_job = AsyncMock(return_value={"retry": True})
     create_task_mock = types.SimpleNamespace(call_count=0)
 
-    def _fake_create_task(*args, **kwargs):
+    def _fake_create_task(coro):
         create_task_mock.call_count += 1
+        try:
+            coro.close()
+        except Exception:
+            pass
         return None
 
     monkeypatch.setattr(app.asyncio, "create_task", _fake_create_task)
@@ -241,11 +246,16 @@ def test_run_job_metadata_missing_schedules_retry(monkeypatch):
     app.jobs[job_id] = {"status": "queued", "logs": [], "result": None}
 
     app.reel_job_manager.start_job = AsyncMock()
+    app.reel_job_manager.update_progress = AsyncMock()
     app._finalize_failed_reel_job = AsyncMock(return_value={"retry": True})
     create_task_mock = types.SimpleNamespace(call_count=0)
 
-    def _fake_create_task(*args, **kwargs):
+    def _fake_create_task(coro):
         create_task_mock.call_count += 1
+        try:
+            coro.close()
+        except Exception:
+            pass
         return None
 
     monkeypatch.setattr(app.asyncio, "create_task", _fake_create_task)
@@ -280,8 +290,12 @@ def test_run_caption_job_missing_input_fails_and_retries(monkeypatch):
     app.reel_job_manager.fail_job = AsyncMock(return_value={"retry": True})
     create_task_mock = types.SimpleNamespace(call_count=0)
 
-    def _fake_create_task(*args, **kwargs):
+    def _fake_create_task(coro):
         create_task_mock.call_count += 1
+        try:
+            coro.close()
+        except Exception:
+            pass
         return None
 
     monkeypatch.setattr(app.asyncio, "create_task", _fake_create_task)
