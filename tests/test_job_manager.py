@@ -17,6 +17,7 @@ def _import_job_manager_with_supabase_stub(monkeypatch):
     supabase_request_stub.list_job_logs = _noop
     supabase_request_stub.update_job_record = _noop
     supabase_request_stub.deduct_user_credits = _noop
+    supabase_request_stub.refund_user_credits = _noop
     supabase_request_stub.insert_user_data_history = _noop
     supabase_request_stub.get_user_data = _noop
 
@@ -84,6 +85,89 @@ def test_debit_credits_for_job_insufficient_balance_logs_warning(monkeypatch):
     job_manager.update_job_record.assert_not_awaited()
     job_manager.append_job_log.assert_awaited_once()
     assert job_manager.append_job_log.await_args.args[1] == "WARN"
+
+
+def test_debit_credits_for_job_settles_extra_debit_above_reservation(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+
+    job_manager.supabase_deduct_user_credits = AsyncMock(return_value=True)
+    job_manager.supabase_refund_user_credits = AsyncMock(return_value=True)
+    job_manager.supabase_insert_user_data_history = AsyncMock()
+    job_manager.update_job_record = AsyncMock()
+    job_manager.append_job_log = AsyncMock()
+
+    result = asyncio.run(
+        manager.debit_credits_for_job(
+            job_id="job-3",
+            user_id="user-3",
+            credits=5.0,
+            storage_delta=0.0,
+            operation_type="reels",
+            reserved_credits=3.0,
+        )
+    )
+
+    assert result is True
+    # actual (5) exceeds reservation (3): only the 2-credit delta is debited,
+    # never the full actual cost again on top of the reservation.
+    job_manager.supabase_deduct_user_credits.assert_awaited_once_with("user-3", 2, 0.0)
+    job_manager.supabase_refund_user_credits.assert_not_awaited()
+
+
+def test_debit_credits_for_job_refunds_surplus_below_reservation(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+
+    job_manager.supabase_deduct_user_credits = AsyncMock(return_value=True)
+    job_manager.supabase_refund_user_credits = AsyncMock(return_value=True)
+    job_manager.supabase_insert_user_data_history = AsyncMock()
+    job_manager.update_job_record = AsyncMock()
+    job_manager.append_job_log = AsyncMock()
+
+    result = asyncio.run(
+        manager.debit_credits_for_job(
+            job_id="job-4",
+            user_id="user-4",
+            credits=2.0,
+            storage_delta=0.0,
+            operation_type="reels",
+            reserved_credits=5.0,
+        )
+    )
+
+    assert result is True
+    # actual (2) cost less than the reservation (5): the 3-credit surplus is
+    # refunded rather than the full actual cost being debited a second time.
+    job_manager.supabase_refund_user_credits.assert_awaited_once_with("user-4", 3, 0.0)
+    job_manager.supabase_deduct_user_credits.assert_not_awaited()
+
+
+def test_reserve_credits_debits_ceiled_amount(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+
+    job_manager.supabase_deduct_user_credits = AsyncMock(return_value=True)
+
+    result = asyncio.run(manager.reserve_credits("user-5", 4.2))
+
+    assert result is True
+    job_manager.supabase_deduct_user_credits.assert_awaited_once_with("user-5", 5)
+
+
+def test_refund_reservation_refunds_and_logs(monkeypatch):
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+
+    job_manager.supabase_refund_user_credits = AsyncMock(return_value=True)
+    job_manager.supabase_insert_user_data_history = AsyncMock()
+    job_manager.append_job_log = AsyncMock()
+
+    asyncio.run(manager.refund_reservation("job-6", "user-6", 4.0, operation_type="sous_titre"))
+
+    job_manager.supabase_refund_user_credits.assert_awaited_once_with("user-6", 4)
+    job_manager.supabase_insert_user_data_history.assert_awaited_once()
+    job_manager.append_job_log.assert_awaited_once()
 
 
 def test_fail_job_returns_failed_when_attempts_exhausted(monkeypatch):

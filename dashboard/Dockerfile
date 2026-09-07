@@ -13,6 +13,11 @@ RUN npm install
 
 COPY . .
 
+# Security: run the dev server as the non-root `node` user already present
+# in the official node images, rather than root (audit finding H14).
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 5173
 
 CMD ["npm", "run", "dev", "--", "--host"]

@@ -1,5 +1,6 @@
 import os
 import uuid
+import math
 import subprocess
 import threading
 import json
@@ -84,6 +85,7 @@ from supabase_request import (
 	update_souscription_row as supabase_update_souscription_row,
 	list_user_souscriptions as supabase_list_user_souscriptions,
 	update_job_record as supabase_update_job_record,
+	count_active_jobs_for_user as supabase_count_active_jobs_for_user,
   get_latest_job_record_by_project as supabase_get_latest_job_record_by_project,
 	get_transcription_by_job_clip as supabase_get_transcription_by_job_clip,
 	upsert_transcription as supabase_upsert_transcription,
@@ -130,6 +132,12 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+# Security: caps how many non-terminal (created/queued/processing/retry_wait)
+# jobs a single user can have at once, independent of MAX_CONCURRENT_JOBS
+# (which only throttles *execution*, not submission). Without this, one
+# account could flood the queue, local disk, and S3 storage with an
+# unbounded number of simultaneous submissions (see audit finding H7).
+MAX_ACTIVE_JOBS_PER_USER = int(os.environ.get("MAX_ACTIVE_JOBS_PER_USER", "3"))
 QUEUE_WORKER_COUNT = int(os.environ.get("QUEUE_WORKER_COUNT", "1"))
 REEL_JOB_MAX_ATTEMPTS = int(os.environ.get("REEL_JOB_MAX_ATTEMPTS", "2"))
 REEL_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("REEL_JOB_RETRY_DELAY_SECONDS", "15"))
@@ -138,6 +146,18 @@ CAPTION_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("CAPTION_JOB_RETRY_DELAY_SE
 CAPTION_TRANSCRIBE_TIMEOUT_SECONDS = int(os.environ.get("CAPTION_TRANSCRIBE_TIMEOUT_SECONDS", "1800"))
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 REEL_MAX_DURATION_MINUTES = float(os.environ.get("REEL_MAX_DURATION", "180"))
+# Security: hard ceiling on how long the main reel-generation subprocess may
+# run before being killed. Without this, a pathological/adversarial input
+# (a file or filter chain that makes ffmpeg/whisper/detection spin) could
+# hang a worker slot indefinitely, and since MAX_CONCURRENT_JOBS is small,
+# a handful of such jobs can starve the whole queue for every user (see
+# security audit finding H13).
+REEL_JOB_MAX_PROCESSING_SECONDS = int(os.environ.get("REEL_JOB_MAX_PROCESSING_SECONDS", str(4 * 3600)))
+# Hard ceiling for individual ffmpeg/ffprobe subprocess calls elsewhere
+# (thumbnail generation, format probing, single-clip edits) that are
+# expected to be quick relative to the whole job.
+FFPROBE_TIMEOUT_SECONDS = int(os.environ.get("FFPROBE_TIMEOUT_SECONDS", "60"))
+FFMPEG_STEP_TIMEOUT_SECONDS = int(os.environ.get("FFMPEG_STEP_TIMEOUT_SECONDS", str(2 * 3600)))
 REEL_MAX_STORAGE_GB = float(os.environ.get("REEL_MAX_STORAGE", "15"))
 CAPTION_MAX_DURATION_MINUTES = float(os.environ.get("CAPTION_MAX_DURATION", str(REEL_MAX_DURATION_MINUTES)))
 CAPTION_MAX_STORAGE_GB = float(os.environ.get("CAPTION_MAX_STORAGE", str(REEL_MAX_STORAGE_GB)))
@@ -595,6 +615,7 @@ async def _ensure_retention_deadline_on_subscription(
         await supabase_update_souscription_row(
             str(subscription_id),
             {"retention_deadline_at": retention_deadline.isoformat()},
+            user_id=latest_subscription.get("userid"),
         )
 
 
@@ -631,6 +652,7 @@ async def _disable_subscription_account_if_needed(
                 "account_disabled_at": now_utc.isoformat(),
                 "retention_deadline_at": retention_deadline.isoformat(),
             },
+            user_id=latest_subscription.get("userid"),
         )
 
 
@@ -1114,7 +1136,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
     caption_row: Optional[Dict[str, Any]] = None
 
     try:
-        maybe_reel = await supabase_get_reel_by_job_clip(job_id, int(clip_index))
+        maybe_reel = await supabase_get_reel_by_job_clip(job_id, int(clip_index), user_id=user_id)
         if str((maybe_reel or {}).get("reel_user_id") or "").strip() == user_id:
             reel_row = maybe_reel
     except Exception:
@@ -1217,6 +1239,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
                     reel_url=reel_media_url,
                     reel_s3_key=str(reel_row.get("reel_s3_key") or "") or None,
                     reel_thumbnail_url=reel_thumb_key,
+                    user_id=user_id,
                 )
             if not preview_url:
                 preview_url = _reel_thumbnail_url_from_s3_key(reel_thumb_key) or ""
@@ -1236,7 +1259,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
         return preview_url
 
     if reel_row:
-        refreshed = _normalize_reel_row(await supabase_get_reel_by_job_clip(job_id, int(clip_index)) or {})
+        refreshed = _normalize_reel_row(await supabase_get_reel_by_job_clip(job_id, int(clip_index), user_id=user_id) or {})
         fallback_reel_thumb = str(refreshed.get("reel_thumbnail_url") or "")
         if fallback_reel_thumb and not _is_probably_video_url(fallback_reel_thumb):
             return fallback_reel_thumb
@@ -1418,7 +1441,12 @@ async def _finalize_failed_reel_job(
     )
 
     debit_applied = False
-    if not fail_result.get("retry") and user_id and consumption["actual_credit"] > 0:
+    reserved_credits = float((job_data or {}).get("reel_required_credits") or 0.0)
+    # Settle on any terminal (non-retryable) failure whenever there's a
+    # partial charge to bill OR a reservation to refund -- otherwise a job
+    # that fails before any billable progress (actual_credit == 0) would
+    # never release its reservation back to the user.
+    if not fail_result.get("retry") and user_id and (consumption["actual_credit"] > 0 or reserved_credits > 0):
         try:
             debit_applied = await reel_job_manager.debit_credits_for_job(
                 job_id=job_id,
@@ -1426,6 +1454,7 @@ async def _finalize_failed_reel_job(
                 credits=consumption["actual_credit"],
                 storage_delta=0.0,
                 operation_type="generation_reel",
+                reserved_credits=reserved_credits,
             )
         except Exception as billing_error:
             jobs[job_id]["logs"].append(f"Partial billing failed: {billing_error}")
@@ -1448,7 +1477,7 @@ async def _finalize_failed_reel_job(
         project_id = job_data.get("project_id")
         if project_id:
             try:
-                await supabase_update_project_status(project_id, "failed")
+                await supabase_update_project_status(project_id, "failed", user_id=user_id)
                 logger.info(f"Project {project_id} marked as failed")
             except Exception as e:
                 logger.warning(f"Failed to update project status to failed: {str(e)}")
@@ -1649,7 +1678,7 @@ async def _persist_reels_for_job(
     # Update project output count if project exists
     if project_id:
         try:
-            await supabase_increment_project_output_count(project_id)
+            await supabase_increment_project_output_count(project_id, user_id=user_id)
         except Exception as e:
             logger.warning(f"Failed to increment project output count: {str(e)}")
 
@@ -1774,10 +1803,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Enable CORS for frontend
+# Enable CORS for frontend.
+# Security: a wildcard origin combined with allow_credentials=True lets any
+# website make authenticated-as-any-caller cross-origin requests and read
+# the JSON response -- an explicit allow-list is required instead. Defaults
+# to FRONTEND_ORIGIN (already a required, exact-origin env var used for the
+# OAuth postMessage target); additional origins (e.g. a staging domain) can
+# be added via CORS_ALLOWED_ORIGINS (comma-separated).
+_cors_extra_origins = [
+    o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+_cors_allowed_origins = sorted(set([FRONTEND_ORIGIN, *_cors_extra_origins]))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1897,8 +1936,22 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
 
         # Async wait for process with incremental updates
         start_wait = time.time()
+        timed_out = False
         while process.poll() is None:
             if execution_ctx and execution_ctx.get("preempt_requested"):
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+            elif time.time() - start_wait > REEL_JOB_MAX_PROCESSING_SECONDS:
+                # Security/reliability: kill a job that has been running far
+                # longer than any legitimate input should require, instead
+                # of letting it occupy a worker slot indefinitely (see
+                # security audit finding H13).
+                timed_out = True
+                jobs[job_id]['logs'].append(
+                    f"Job exceeded max processing time ({REEL_JOB_MAX_PROCESSING_SECONDS}s); terminating."
+                )
                 try:
                     process.terminate()
                 except Exception:
@@ -2030,8 +2083,12 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 )
                 debit_applied = False
                 logger.info(f"Billing info for job {job_id}: {billing}")
+                job_reserved_credits = float(job_data.get("reel_required_credits") or 0.0)
+                # Settle whenever there's an actual charge/storage change OR an
+                # outstanding reservation to release -- otherwise a job whose
+                # actual cost rounds to 0 would never refund its reservation.
                 if is_supabase_configured() and user_id and (
-                    billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0
+                    billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0 or job_reserved_credits > 0
                 ):
                     try:
                         logger.info(f"Debiting credits for job {job_id}")
@@ -2041,6 +2098,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                             credits=billing["actual_credit"],
                             storage_delta=-billing["actual_storage_gb"],
                             operation_type="generation_reel",
+                            reserved_credits=job_reserved_credits,
                         )
                     except Exception as billing_error:
                         logger.error(f"Billing update failed: {billing_error}")
@@ -2073,7 +2131,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 project_id = job_data.get("project_id") if job_data else None
                 if project_id and is_supabase_configured():
                     try:
-                        await supabase_update_project_status(project_id, "completed")
+                        await supabase_update_project_status(project_id, "completed", user_id=user_id)
                         summary_text = ""
                         if enriched_clips:
                             top_clip = enriched_clips[0] if isinstance(enriched_clips[0], dict) else {}
@@ -2322,6 +2380,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
                     credits=caption_required_credits,
                     storage_delta=-caption_storage_gb,
                     operation_type="sous_titre",
+                    reserved_credits=caption_required_credits,
                 )
                 if not debit_ok:
                     raise RuntimeError("Insufficient credit/storage balance to finalize caption job")
@@ -2347,7 +2406,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
         project_id = job_data.get("project_id")
         if project_id and is_supabase_configured():
             try:
-                await supabase_update_project_status(project_id, "completed")
+                await supabase_update_project_status(project_id, "completed", user_id=user_id)
                 project_summary = _build_short_project_summary(
                     str(normalized_item.get("caption_description") or "")
                     or str(normalized_item.get("caption_title") or "")
@@ -2399,10 +2458,20 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             project_id = job_data.get("project_id")
             if project_id:
                 try:
-                    await supabase_update_project_status(project_id, "failed")
+                    await supabase_update_project_status(project_id, "failed", user_id=user_id)
                     logger.info(f"Project {project_id} marked as failed")
                 except Exception as e:
                     logger.warning(f"Failed to update project status to failed: {str(e)}")
+
+        # Release the reservation made at job creation: nothing was billed
+        # in this failure path, so the full reserved amount is refundable.
+        if not result.get("retry") and user_id:
+            reserved = float(job_data.get("caption_required_credits") or 0.0)
+            if reserved > 0 and is_supabase_configured():
+                try:
+                    await reel_job_manager.refund_reservation(job_id, user_id, reserved, operation_type="sous_titre")
+                except Exception as refund_error:
+                    logger.warning(f"Failed to refund caption reservation: {refund_error}")
 
         if result.get("retry"):
             asyncio.create_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
@@ -2482,7 +2551,7 @@ def _probe_local_video_duration_seconds(video_path: str) -> float:
             "-of", "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
-        out = subprocess.check_output(probe_cmd, stderr=subprocess.STDOUT).decode().strip()
+        out = subprocess.check_output(probe_cmd, stderr=subprocess.STDOUT, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
         duration = float(out or 0)
         if duration > 0:
             return duration
@@ -2507,9 +2576,19 @@ def _probe_remote_video_metadata(url_value: str) -> Dict[str, Any]:
     if not url_value:
         return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
 
+    # Security: url_value is client-supplied. Require it to actually look
+    # like an http(s) URL before ever handing it to yt-dlp -- otherwise a
+    # value starting with "-" could be parsed as a yt-dlp CLI flag (e.g.
+    # --exec) instead of a target URL (argument injection). The "--" below
+    # is a second, independent layer: it tells yt-dlp's own argument parser
+    # that everything after it is a positional argument, never an option,
+    # regardless of what url_value contains.
+    if urlparse(url_value).scheme not in ("http", "https"):
+        return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
+
     try:
-        cmd = ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", url_value]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().strip()
+        cmd = ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", "--", url_value]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
         if not out:
             return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
         payload = json.loads(out.splitlines()[-1])
@@ -2723,6 +2802,27 @@ def _build_billing_details(
     return details
 
 
+async def _enforce_job_concurrency_limit(user_id: str) -> None:
+    """Reject new job submissions once a user already has
+    MAX_ACTIVE_JOBS_PER_USER non-terminal jobs. MAX_CONCURRENT_JOBS only
+    throttles execution (a semaphore around actually running jobs) -- it
+    does nothing to stop one account from enqueueing an unbounded number of
+    jobs, each of which uploads a source file to S3 and occupies a queue
+    slot/local disk/database row before ever being throttled by that
+    semaphore (see security audit finding H7)."""
+    if not is_supabase_configured():
+        return
+    active_count = await supabase_count_active_jobs_for_user(user_id)
+    if active_count >= MAX_ACTIVE_JOBS_PER_USER:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Trop de traitements en cours ({active_count}/{MAX_ACTIVE_JOBS_PER_USER}). "
+                f"Attendez qu'un traitement se termine avant d'en lancer un nouveau."
+            ),
+        )
+
+
 async def _assert_user_has_required_credits(user_id: str, required_credits: float) -> float:
     required = float(required_credits or 0.0)
     if not is_supabase_configured():
@@ -2743,6 +2843,32 @@ async def _assert_user_has_required_credits(user_id: str, required_credits: floa
             detail=(
                 f"Crédits insuffisants pour lancer l'operation. "
                 f"Requis : {effective_minimum} cr, disponible : {available} cr."
+            ),
+        )
+    return required
+
+
+async def _reserve_job_credits(user_id: str, required_credits: float) -> float:
+    """Atomically reserve ``required_credits`` for a queued job (reel/caption
+    generation) instead of merely checking the balance covers it. Two
+    concurrent job submissions can no longer both pass a stale balance
+    check before either is billed: the second submission sees the
+    already-reduced balance from the first reservation (see security audit
+    finding H8). The reservation is settled (extra debit or refund of the
+    difference) against the job's actual cost at completion/failure via
+    JobManager.debit_credits_for_job(reserved_credits=...), or refunded in
+    full via JobManager.refund_reservation if the job never runs.
+    """
+    required = float(required_credits or 0.0)
+    if not is_supabase_configured():
+        return required
+    if not await reel_job_manager.reserve_credits(user_id, required):
+        available = float((await supabase_get_user_data(user_id) or {}).get("credit", 0))
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Crédits insuffisants pour lancer l'operation. "
+                f"Requis : {math.ceil(required)} cr, disponible : {available} cr."
             ),
         )
     return required
@@ -2863,7 +2989,12 @@ def _apply_auto_edit_options_to_filter_data(
 
 
 def _run_ffmpeg_command(cmd: List[str]) -> None:
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=FFMPEG_STEP_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"FFmpeg command timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s") from exc
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="ignore") or "FFmpeg command failed")
 
@@ -2877,7 +3008,9 @@ def _video_has_audio_stream(video_path: str) -> bool:
             "-of", "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8", errors="ignore").strip()
+        out = subprocess.check_output(
+            cmd, stderr=subprocess.STDOUT, timeout=FFPROBE_TIMEOUT_SECONDS
+        ).decode("utf-8", errors="ignore").strip()
         return bool(out)
     except Exception:
         return False
@@ -2954,7 +3087,7 @@ def _detect_silence_cut_ranges(video_path: str, total_duration: float) -> List[t
         "-af", "silencedetect=noise=-35dB:d=0.35",
         "-f", "null", "-",
     ]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
     log_text = result.stderr.decode("utf-8", errors="ignore")
 
     starts = [float(val) for val in re.findall(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", log_text)]
@@ -3326,6 +3459,8 @@ async def process_endpoint(
     if url and DISABLE_YOUTUBE_URL:
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
 
+    await _enforce_job_concurrency_limit(user_id)
+
     # Capture attestation context for legal record (IP + timestamp + UA)
     client_ip = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for")
@@ -3395,7 +3530,7 @@ async def process_endpoint(
             uses_youtube_source=True,
         )
         try:
-            await _assert_user_has_required_credits(user_id, reel_required_credits)
+            await _reserve_job_credits(user_id, reel_required_credits)
         except HTTPException:
             if input_path and os.path.exists(input_path):
                 os.remove(input_path)
@@ -3413,7 +3548,10 @@ async def process_endpoint(
         project_description = _build_short_project_summary(project_name, fallback_title=project_name)
 
         # Save uploaded file with size limit check
-        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
+        # Security: sanitize the client-supplied filename to a safe basename
+        # before joining it into a filesystem path (path traversal guard).
+        safe_upload_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{safe_upload_name}")
 
         # Read file in chunks to check size
         size = 0
@@ -3441,7 +3579,7 @@ async def process_endpoint(
             uses_youtube_source=False,
         )
         try:
-            await _assert_user_has_required_credits(user_id, reel_required_credits)
+            await _reserve_job_credits(user_id, reel_required_credits)
         except HTTPException:
             if os.path.exists(input_path):
                 os.remove(input_path)
@@ -3535,7 +3673,7 @@ async def process_endpoint(
         },
         runtime_data=dict(runtime_payload),
         max_attempts=REEL_JOB_MAX_ATTEMPTS,
-        reserved_quota=1.0,
+        reserved_quota=reel_required_credits,
         priority=job_priority,
         queue_name="reels",
     )
@@ -3961,6 +4099,8 @@ async def process_caption_endpoint(
     if not ack_flag:
         raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
 
+    await _enforce_job_concurrency_limit(user_id)
+
     _validate_video_extension(file.filename if file else "", context_label="sous-titres")
 
     caption_job_id = str(uuid.uuid4())
@@ -3999,7 +4139,7 @@ async def process_caption_endpoint(
         size_bytes=float(size_bytes),
     )
     try:
-        await _assert_user_has_required_credits(user_id, caption_required_credits)
+        await _reserve_job_credits(user_id, caption_required_credits)
     except HTTPException:
         if os.path.exists(input_path):
             os.remove(input_path)
@@ -4068,10 +4208,11 @@ async def process_caption_endpoint(
             "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
             "project_id": project.get("id") if project else None,
             "source_duration_seconds": float(local_duration or 0.0),
+            "caption_required_credits": caption_required_credits,
         },
         runtime_data=dict(runtime_payload),
         max_attempts=CAPTION_JOB_MAX_ATTEMPTS,
-        reserved_quota=1.0,
+        reserved_quota=caption_required_credits,
         priority=job_priority,
         queue_name="captions",
     )
@@ -4228,7 +4369,7 @@ async def persist_captioned_reel(
         except Exception:
             existing_caption_row = None
         try:
-            reel_row = await supabase_get_reel_by_job_clip(job_id, clip_index)
+            reel_row = await supabase_get_reel_by_job_clip(job_id, clip_index, user_id=user_id)
             source_video_url_for_history = (
                 _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
                 or str((reel_row or {}).get("reel_url") or "")
@@ -4418,6 +4559,7 @@ async def persist_captioned_reel(
                     reel_url=persisted_video_url,
                     reel_s3_key=caption_s3_key or None,
                     reel_thumbnail_url=reel_thumbnail_s3_key or None,
+                    user_id=user_id,
                 )
             except Exception as e:
                 print(f"⚠️ Failed to sync reel URL after captions persist: {e}")
@@ -4595,7 +4737,7 @@ async def generate_effects_config(
                     '-of', 'json',
                     safe_input_path
                 ]
-                probe_result = subprocess.check_output(probe_cmd).decode().strip()
+                probe_result = subprocess.check_output(probe_cmd, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
                 probe_data = json.loads(probe_result)
 
                 stream = probe_data.get('streams', [{}])[0]
@@ -4696,7 +4838,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         except Exception:
             pass
         try:
-            reel_row = await supabase_get_reel_by_job_clip(req.job_id, req.clip_index)
+            reel_row = await supabase_get_reel_by_job_clip(req.job_id, req.clip_index, user_id=user_id)
             source_video_url_for_history = (
                 _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
                 or str((reel_row or {}).get("reel_url") or "")
@@ -4811,6 +4953,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
                 clip_index=req.clip_index,
                 reel_url=persisted_subtitle_url,
                 reel_s3_key=subtitle_s3_key or None,
+                user_id=user_id,
             )
         except Exception as e:
             print(f"⚠️ Failed to sync reel URL after subtitle edit: {e}")
@@ -5956,7 +6099,8 @@ async def thumbnail_upload(
     # Save file if uploaded directly
     video_path = None
     if file:
-        video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{file.filename}")
+        safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+        video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
         with open(video_path, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
@@ -6058,7 +6202,8 @@ async def thumbnail_analyze(
             from main import download_youtube_video
             video_path, _ = download_youtube_video(url, UPLOAD_DIR)
         else:
-            video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{file.filename}")
+            safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+            video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
             with open(video_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
@@ -6171,6 +6316,12 @@ async def thumbnail_generate(
     user_id: str = Depends(get_user_id_header),
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
+    # Security: session_id is client-supplied and gets joined into a
+    # filesystem path below -- reject anything that isn't a well-formed
+    # identifier before it ever reaches os.path.join (path traversal guard).
+    if not _JOB_ID_PATTERN.match(session_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
     # Use .env configuration (ignore header for security)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -6187,12 +6338,14 @@ async def thumbnail_generate(
 
     try:
         if face and face.filename:
-            face_path = os.path.join(thumb_upload_dir, f"face_{face.filename}")
+            safe_face_name = _sanitize_input_filename(face.filename) or "face.jpg"
+            face_path = os.path.join(thumb_upload_dir, f"face_{safe_face_name}")
             with open(face_path, "wb") as f:
                 f.write(await face.read())
 
         if background and background.filename:
-            bg_path = os.path.join(thumb_upload_dir, f"bg_{background.filename}")
+            safe_bg_name = _sanitize_input_filename(background.filename) or "background.jpg"
+            bg_path = os.path.join(thumb_upload_dir, f"bg_{safe_bg_name}")
             with open(bg_path, "wb") as f:
                 f.write(await background.read())
 
@@ -8342,6 +8495,20 @@ async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> N
         ) from e
 
 
+def _resolve_and_validate_ips(hostname: str) -> List[str]:
+    """Resolve hostname and reject it if any resolved address is
+    private/loopback/link-local/multicast/reserved. Returns the resolved IPs."""
+    try:
+        resolved_ips = list({info[4][0] for info in socket.getaddrinfo(hostname, None)})
+    except socket.gaierror as e:
+        raise HTTPException(status_code=400, detail="video_url host could not be resolved") from e
+    for ip_str in resolved_ips:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            raise HTTPException(status_code=400, detail="video_url points to a disallowed address")
+    return resolved_ips
+
+
 def _validate_download_url(url: str) -> None:
     """Anti-SSRF minimal avant un GET serveur vers une URL fournie par l'utilisateur."""
     parsed = urlparse(url)
@@ -8350,14 +8517,34 @@ def _validate_download_url(url: str) -> None:
     hostname = parsed.hostname
     if not hostname:
         raise HTTPException(status_code=400, detail="video_url is invalid")
-    try:
-        resolved_ips = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
-    except socket.gaierror as e:
-        raise HTTPException(status_code=400, detail="video_url host could not be resolved") from e
-    for ip_str in resolved_ips:
-        ip = ipaddress.ip_address(ip_str)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
-            raise HTTPException(status_code=400, detail="video_url points to a disallowed address")
+    _resolve_and_validate_ips(hostname)
+
+
+def _pin_url_to_validated_ip(url: str) -> tuple[str, Dict[str, Any]]:
+    """Resolve+validate url's hostname, then rewrite the URL to connect
+    directly to that validated IP, returning the rewritten URL plus httpx
+    request extensions that keep TLS SNI / certificate hostname verification
+    targeting the original hostname.
+
+    Security: this closes the DNS-rebinding TOCTOU where _validate_download_url
+    resolves and checks a hostname, but the actual HTTP client performs its
+    own, independent DNS lookup at connect time -- an attacker controlling
+    DNS for their domain (short TTL) could return a public IP for the check
+    and a private/loopback IP for the real connection. Pinning the exact
+    validated IP for the connection itself eliminates that window.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="video_url is invalid")
+    validated_ips = _resolve_and_validate_ips(hostname)
+    ip = validated_ips[0]
+    netloc_host = f"[{ip}]" if ":" in ip else ip
+    port = parsed.port
+    netloc = f"{netloc_host}:{port}" if port else netloc_host
+    pinned_url = parsed._replace(netloc=netloc).geturl()
+    extensions = {"sni_hostname": hostname} if parsed.scheme == "https" else {}
+    return pinned_url, extensions
 
 
 async def _validated_stream_request(client: "httpx.AsyncClient", method: str, url: str, max_redirects: int = 5, **kwargs):
@@ -8367,11 +8554,16 @@ async def _validated_stream_request(client: "httpx.AsyncClient", method: str, ur
     followed. httpx's built-in follow_redirects=True would otherwise let a
     server bypass SSRF validation entirely by 302-redirecting to an
     internal/loopback/link-local address after the first request passed.
+    Also pins each hop's connection to its validated IP (see
+    _pin_url_to_validated_ip) to close the DNS-rebinding TOCTOU window.
     """
     current_url = url
     for _ in range(max_redirects + 1):
-        _validate_download_url(current_url)
-        request = client.build_request(method, current_url, **kwargs)
+        original_hostname = urlparse(current_url).hostname
+        pinned_url, extensions = _pin_url_to_validated_ip(current_url)
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("Host", original_hostname)
+        request = client.build_request(method, pinned_url, headers=headers, extensions=extensions, **kwargs)
         response = await client.send(request, stream=True)
         if response.is_redirect:
             location = response.headers.get("location")
