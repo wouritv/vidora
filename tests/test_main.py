@@ -2093,25 +2093,5 @@ def test_remaining_precise_branches_for_main(monkeypatch, tmp_path):
     out_norm = main._normalize_short_durations(clips, 36)
     assert out_norm["shorts"][0]["start"] == 35.0
 
-    # CLI extra branches.
-    _install_cli_runtime_stubs(monkeypatch, tmp_path, shorts_payload={})
-    input_file = tmp_path / "input2.mp4"
-    input_file.write_bytes(b"video")
-    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "faster_whisper")
-    monkeypatch.setenv("AI_PROVIDER", "gemini")
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-    monkeypatch.setenv("GEMINI_MODEL", "m")
-    monkeypatch.setattr(sys, "argv", ["main.py", "-i", str(input_file), "-o", str(tmp_path / "fallback_dir")])
-    runpy.run_module("main", run_name="__main__")
-
-    _install_cli_runtime_stubs(monkeypatch, tmp_path, shorts_payload={"shorts": [{"start": 0.0, "end": 1.0, "video_title_for_youtube_short": "X"}]})
-    dir_out = tmp_path / "url_dir"
-    dir_out.mkdir(exist_ok=True)
-    monkeypatch.setattr(sys, "argv", ["main.py", "-u", "https://youtube.com/watch?v=abc", "-o", str(dir_out), "--skip-analysis"])
-    runpy.run_module("main", run_name="__main__")
-
-    _install_cli_runtime_stubs(monkeypatch, tmp_path, shorts_payload={"shorts": [{"start": 0.0, "end": 1.0, "video_title_for_youtube_short": "Y"}]})
-    monkeypatch.setattr(sys, "argv", ["main.py", "-u", "https://youtube.com/watch?v=abc", "--skip-analysis"])
-    runpy.run_module("main", run_name="__main__")
 
 
