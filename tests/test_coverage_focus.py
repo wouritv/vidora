@@ -282,6 +282,123 @@ class TestAppUtilityFunctions:
         result = app._extract_s3_key_from_thumbnail_ref("")
         assert result == ""
 
+    def test_transcription_cache_owner_and_hydration_helpers(self, monkeypatch, tmp_path):
+        """Test cached transcription, owner resolution, and hydration fallback helpers."""
+        app = _import_app_with_stubs(monkeypatch)
+
+        app.jobs.clear()
+        app.jobs["job-owner"] = {"user_id": "memory-user"}
+        assert asyncio.run(app._resolve_job_owner_user_id("job-owner", 0)) == "memory-user"
+
+        app.jobs.clear()
+        monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+        monkeypatch.setattr(app, "supabase_get_reel_by_job_clip", AsyncMock(return_value={"reel_user_id": "reel-user"}))
+        assert asyncio.run(app._resolve_job_owner_user_id("job-owner", 0)) == "reel-user"
+
+        monkeypatch.setattr(app, "supabase_get_reel_by_job_clip", AsyncMock(return_value={}))
+        monkeypatch.setattr(app, "supabase_get_caption_by_job_clip_any", AsyncMock(return_value={"caption_user_id": "caption-user"}))
+        assert asyncio.run(app._resolve_job_owner_user_id("job-owner", 0)) == "caption-user"
+
+        monkeypatch.setattr(app, "is_supabase_configured", lambda: False)
+        assert asyncio.run(app._load_cached_transcription(None, "job-owner", 0)) is None
+
+        monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+        monkeypatch.setattr(
+            app,
+            "supabase_get_transcription_by_job_clip",
+            AsyncMock(return_value={"transcript_payload": {"segments": [{"text": "bonjour"}], "language": "fr"}}),
+        )
+        cached = asyncio.run(app._load_cached_transcription("user-1", "job-owner", 0))
+        assert cached is not None
+        assert cached["transcript_payload"]["segments"]
+
+        upsert_mock = AsyncMock()
+        monkeypatch.setattr(app, "supabase_upsert_transcription", upsert_mock)
+        asyncio.run(
+            app._persist_transcription_cache(
+                user_id="user-1",
+                job_id="job-owner",
+                clip_index=0,
+                source_type="hydration",
+                source_value="source.mp4",
+                transcript={"meta": {"provider": "cached"}, "language": "fr", "segments": [{"text": "bonjour"}]},
+            )
+        )
+        assert upsert_mock.await_count == 1
+        assert upsert_mock.await_args.args[0]["transcript_text"] == "bonjour"
+
+        monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
+        source_path = tmp_path / "output" / "job-hydrate" / "source.mp4"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(b"video")
+        monkeypatch.setattr(app, "_resolve_job_owner_user_id", AsyncMock(return_value="user-1"))
+        monkeypatch.setattr(app, "_load_cached_transcription", AsyncMock(return_value={"transcript_payload": {"segments": [{"end": 2.5}], "language": "fr"}}))
+        monkeypatch.setattr(app, "_persist_metadata_json", lambda *args, **kwargs: None)
+        persist_cache = AsyncMock()
+        monkeypatch.setattr(app, "_persist_transcription_cache", persist_cache)
+
+        metadata_path = asyncio.run(
+            app._hydrate_missing_job_metadata(
+                "job-hydrate",
+                0,
+                input_url="/videos/job-hydrate/source.mp4",
+                user_id="user-1",
+            )
+        )
+        assert metadata_path is not None
+        assert metadata_path.endswith("_fallback_metadata.json")
+        persist_cache.assert_awaited_once()
+
+    def test_probe_video_duration_and_metadata_branches(self, monkeypatch, tmp_path):
+        """Test ffprobe/OpenCV duration branches and yt-dlp metadata parsing."""
+        app = _import_app_with_stubs(monkeypatch)
+
+        video_path = tmp_path / "clip.mp4"
+        video_path.write_bytes(b"video")
+        monkeypatch.setattr(app.os.path, "exists", lambda p: str(p) == str(video_path))
+
+        monkeypatch.setattr(app.subprocess, "check_output", lambda *args, **kwargs: b"12.5\n")
+        assert app._probe_local_video_duration_seconds(str(video_path)) == 12.5
+
+        monkeypatch.setattr(app.subprocess, "check_output", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ffprobe fail")))
+        cv2_mod = types.ModuleType("cv2")
+        cv2_mod.CAP_PROP_FPS = 5
+        cv2_mod.CAP_PROP_FRAME_COUNT = 7
+
+        class _Cap:
+            def __init__(self, path):
+                self.path = path
+
+            def get(self, prop):
+                if prop == cv2_mod.CAP_PROP_FPS:
+                    return 25.0
+                if prop == cv2_mod.CAP_PROP_FRAME_COUNT:
+                    return 250
+                return 0
+
+            def release(self):
+                return None
+
+        cv2_mod.VideoCapture = _Cap
+        monkeypatch.setitem(sys.modules, "cv2", cv2_mod)
+        assert app._probe_local_video_duration_seconds(str(video_path)) == 10.0
+
+        payload = {"duration": 33, "filesize_approx": 1024, "title": " Video title ", "description": " Text "}
+        monkeypatch.setattr(app.subprocess, "check_output", lambda *args, **kwargs: json.dumps(payload).encode("utf-8"))
+        meta = app._probe_remote_video_metadata("https://example.com/video")
+        assert meta["duration_seconds"] == 33.0
+        assert meta["size_bytes"] == 1024.0
+        assert meta["title"] == "Video title"
+        assert meta["description"] == "Text"
+
+        monkeypatch.setattr(app.subprocess, "check_output", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("yt-dlp fail")))
+        assert app._probe_remote_video_metadata("https://example.com/video") == {
+            "duration_seconds": 0.0,
+            "size_bytes": 0.0,
+            "title": "",
+            "description": "",
+        }
+
 
 class TestMainUtilityFunctions:
     """Test utility functions in main.py"""
