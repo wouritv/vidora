@@ -10,11 +10,21 @@ class _FakeResponse:
         self.count = count
 
 
+class _NotFilter:
+    """Helper class to support .not_.is_() chaining pattern"""
+    def __init__(self, query):
+        self.query = query
+
+    def is_(self, *args, **kwargs):
+        return self.query._record("is_", *args, **kwargs)
+
+
 class _FakeQuery:
     def __init__(self, table_name, events, responses):
         self.table_name = table_name
         self.events = events
         self.responses = responses
+        self._not = _NotFilter(self)
 
     def _record(self, method, *args, **kwargs):
         self.events.append((self.table_name, method, args, kwargs))
@@ -25,6 +35,9 @@ class _FakeQuery:
 
     def eq(self, *args, **kwargs):
         return self._record("eq", *args, **kwargs)
+
+    def neq(self, *args, **kwargs):
+        return self._record("neq", *args, **kwargs)
 
     def is_(self, *args, **kwargs):
         return self._record("is_", *args, **kwargs)
@@ -46,6 +59,20 @@ class _FakeQuery:
 
     def insert(self, *args, **kwargs):
         return self._record("insert", *args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return self._record("delete", *args, **kwargs)
+
+    def upsert(self, *args, **kwargs):
+        return self._record("upsert", *args, **kwargs)
+
+    def gte(self, *args, **kwargs):
+        return self._record("gte", *args, **kwargs)
+
+    @property
+    def not_(self):
+        """Return a helper object that supports .is_() chaining"""
+        return self._not
 
     async def execute(self):
         self.events.append((self.table_name, "execute", (), {}))
@@ -630,7 +657,7 @@ def test_insert_souscription_builds_payload_with_dates(monkeypatch):
             payment_status="confirmed",
         )
     )
-    assert result["user_id"] == "u1"
+    assert result["userid"] == "u1"
     assert result["abonnement"] == "plan-pro"
     assert "payment_start_date" in result
     assert "payment_end_date" in result
