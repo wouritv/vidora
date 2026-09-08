@@ -1,11 +1,13 @@
 import importlib
 import asyncio
+import io
 import os
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 
 def _install_supabase_stubs(monkeypatch):
@@ -33,6 +35,40 @@ def _install_supabase_stubs(monkeypatch):
 
 
 def _install_optional_dependency_stubs(monkeypatch):
+    python_multipart_mod = types.ModuleType("python_multipart")
+    python_multipart_mod.__version__ = "0.0.20"
+    monkeypatch.setitem(sys.modules, "python_multipart", python_multipart_mod)
+
+    itsdangerous_mod = types.ModuleType("itsdangerous")
+
+    class _Serializer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def dumps(self, value):
+            return str(value)
+
+        def loads(self, value, max_age=None):
+            return value
+
+    class _SignatureExpired(Exception):
+        pass
+
+    class _BadSignature(Exception):
+        pass
+
+    itsdangerous_mod.URLSafeTimedSerializer = _Serializer
+    itsdangerous_mod.SignatureExpired = _SignatureExpired
+    itsdangerous_mod.BadSignature = _BadSignature
+    monkeypatch.setitem(sys.modules, "itsdangerous", itsdangerous_mod)
+
+    s3_mod = types.ModuleType("s3_uploader")
+    s3_mod.upload_file_to_s3 = lambda *args, **kwargs: True
+    s3_mod.generate_presigned_url = lambda *args, **kwargs: ""
+    s3_mod.delete_s3_object = lambda *args, **kwargs: True
+    s3_mod.get_s3_object_size = lambda *args, **kwargs: 0
+    monkeypatch.setitem(sys.modules, "s3_uploader", s3_mod)
+
     sib_mod = types.ModuleType("sib_api_v3_sdk")
     sib_rest_mod = types.ModuleType("sib_api_v3_sdk.rest")
     sib_rest_mod.ApiException = Exception
@@ -796,5 +832,926 @@ def test_enqueue_output_reads_from_stdout(monkeypatch):
 
     assert "line1" in app.jobs["job-test"]["logs"]
     assert "line2" in app.jobs["job-test"]["logs"]
+
+
+def test_allowed_video_formats_and_validate_extension(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "VIREEL_VIDEO_FORMAT", "mp4, mov , .mkv")
+
+    assert app._allowed_video_formats() == ["mp4", "mov", "mkv"]
+    app._validate_video_extension("demo.mp4")
+    with pytest.raises(app.HTTPException):
+        app._validate_video_extension("demo.txt")
+
+
+def test_validate_video_extension_skips_when_empty_format_config(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "VIREEL_VIDEO_FORMAT", "")
+    app._validate_video_extension("anything.bin")
+
+
+def test_normalize_auto_edit_options_defaults_and_truthy(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    defaults = app._normalize_auto_edit_options(None)
+    enabled = app._normalize_auto_edit_options({"zoom": 1, "contrast": True, "speed": "yes"})
+
+    assert all(value is False for value in defaults.values())
+    assert enabled["zoom"] is True
+    assert enabled["contrast"] is True
+    assert enabled["speed"] is True
+
+
+def test_apply_auto_edit_options_to_effects_config_disables_visual_segments(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    effects = {
+        "segments": [
+            {
+                "startSec": 0,
+                "endSec": 3,
+                "zoom": 1.2,
+                "zoomCenterX": 0.2,
+                "zoomCenterY": 0.8,
+                "brightness": 1.1,
+                "contrast": 1.2,
+                "saturate": 1.3,
+            }
+        ]
+    }
+    opts = {"zoom": False, "brightness": False, "contrast": False, "saturation": False}
+
+    config, applied = app._apply_auto_edit_options_to_effects_config(effects, opts)
+
+    seg = config["segments"][0]
+    assert seg["zoom"] == 1.0
+    assert seg["zoomCenterX"] == 0.5
+    assert seg["zoomCenterY"] == 0.5
+    assert seg["brightness"] == 1.0
+    assert seg["contrast"] == 1.0
+    assert seg["saturate"] == 1.0
+    assert applied == []
+
+
+def test_apply_auto_edit_options_to_effects_config_records_steps(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    config, applied = app._apply_auto_edit_options_to_effects_config(
+        {"segments": []},
+        {
+            "removeBadTakes": True,
+            "removeSilence": True,
+            "cleanAudio": True,
+            "zoom": True,
+            "brightness": True,
+            "saturation": True,
+            "contrast": True,
+            "speed": True,
+        },
+    )
+    assert config["segments"] == []
+    assert "remove_bad_takes:queued" in applied
+    assert "speed:queued" in applied
+    assert "zoom:enabled" in applied
+
+
+def test_apply_auto_edit_options_to_filter_data_removes_disabled_filters(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _VE:
+        @staticmethod
+        def _split_filter_chain(s):
+            return s.split(",")
+
+    monkeypatch.setattr(app, "VideoEditor", _VE)
+    data, applied = app._apply_auto_edit_options_to_filter_data(
+        {
+            "filter_string": "zoompan=z='1.2',hue=s=0,eq=contrast=1.2,unsharp=5:5:1.0"
+        },
+        {"zoom": False, "saturation": False, "brightness": False, "contrast": False},
+    )
+    assert "zoompan=" not in data["filter_string"]
+    assert "hue=" not in data["filter_string"]
+    assert "eq=" not in data["filter_string"]
+    assert "unsharp=" in data["filter_string"]
+    assert applied == []
+
+
+def test_apply_auto_edit_options_to_filter_data_empty_filter(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    data, applied = app._apply_auto_edit_options_to_filter_data({}, {"zoom": True})
+    assert data == {}
+    assert applied == []
+
+
+def test_run_ffmpeg_command_success_and_failure(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _R:
+        def __init__(self, code, stderr=b""):
+            self.returncode = code
+            self.stderr = stderr
+
+    monkeypatch.setattr(app.subprocess, "run", lambda *args, **kwargs: _R(0, b""))
+    app._run_ffmpeg_command(["ffmpeg", "-version"])
+
+    monkeypatch.setattr(app.subprocess, "run", lambda *args, **kwargs: _R(1, b"boom"))
+    with pytest.raises(RuntimeError):
+        app._run_ffmpeg_command(["ffmpeg", "-version"])
+
+
+def test_video_has_audio_stream_true_and_false(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app.subprocess, "check_output", lambda *args, **kwargs: b"audio\n")
+    assert app._video_has_audio_stream("in.mp4") is True
+
+    monkeypatch.setattr(
+        app.subprocess,
+        "check_output",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ffprobe fail")),
+    )
+    assert app._video_has_audio_stream("in.mp4") is False
+
+
+def test_merge_intervals_and_invert_cut_ranges(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    merged = app._merge_intervals([(1, 3), (2, 4), (-1, 0.5), (9, 8)])
+    assert merged == [(0.0, 0.5), (1.0, 4.0)]
+
+    keep = app._invert_cut_ranges(10, [(1, 2), (3, 5), (4.5, 6)])
+    assert keep == [(0.0, 1.0), (2.0, 3.0), (6.0, 10.0)]
+
+
+def test_build_keep_time_expr(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    expr = app._build_keep_time_expr([(0.0, 1.23456), (2.0, 3.0)])
+    assert expr == "between(t,0.0,1.235)+between(t,2.0,3.0)"
+    assert app._build_keep_time_expr([]) == "0"
+
+
+def test_detect_silence_cut_ranges_parses_ffmpeg_output(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _R:
+        def __init__(self, stderr_text):
+            self.stderr = stderr_text.encode("utf-8")
+
+    log = """
+    [silencedetect @ x] silence_start: 1.0
+    [silencedetect @ x] silence_end: 2.0 | silence_duration: 1.0
+    [silencedetect @ x] silence_start: 8.0
+    """
+    monkeypatch.setattr(app.subprocess, "run", lambda *args, **kwargs: _R(log))
+    ranges = app._detect_silence_cut_ranges("video.mp4", total_duration=10.0)
+    assert ranges == [(1.0, 2.0), (8.0, 10.0)]
+
+
+def test_atempo_chain_and_speed_transform(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    assert app._atempo_chain(5.0) == "atempo=2.0"
+    assert app._atempo_chain(0.1) == "atempo=0.5"
+
+    captured = {}
+    monkeypatch.setattr(app, "_run_ffmpeg_command", lambda cmd: captured.setdefault("cmd", cmd))
+    monkeypatch.setattr(app, "_video_has_audio_stream", lambda _: True)
+    app._apply_speed_transform("in.mp4", "out.mp4", 1.1)
+    assert "-filter:a" in captured["cmd"]
+
+    captured.clear()
+    monkeypatch.setattr(app, "_video_has_audio_stream", lambda _: False)
+    app._apply_speed_transform("in.mp4", "out.mp4", 1.1)
+    assert "-an" in captured["cmd"]
+
+
+def test_apply_clean_audio_transform_branches(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    copied = {}
+    monkeypatch.setattr(app, "_video_has_audio_stream", lambda _: False)
+    monkeypatch.setattr(app.shutil, "copy", lambda src, dst: copied.setdefault("copy", (src, dst)))
+    app._apply_clean_audio_transform("in.mp4", "out.mp4")
+    assert copied["copy"] == ("in.mp4", "out.mp4")
+
+    captured = {}
+    monkeypatch.setattr(app, "_video_has_audio_stream", lambda _: True)
+    monkeypatch.setattr(app, "_run_ffmpeg_command", lambda cmd: captured.setdefault("cmd", cmd))
+    app._apply_clean_audio_transform("in.mp4", "out.mp4")
+    assert "-af" in captured["cmd"]
+
+
+def test_bad_take_heuristics_parse_and_sanitize(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    transcript = {
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": "um um yes"},
+            {"start": 2.0, "end": 3.0, "text": "hello hello hello world"},
+            {"start": 3.0, "end": 2.0, "text": "bad"},
+        ]
+    }
+    raw = app._detect_bad_take_candidates_heuristic(transcript)
+    assert len(raw) == 2
+
+    parsed = app._parse_bad_take_candidates_response("```json\n{\"candidates\":[{\"start\":0,\"end\":1}]}\n```")
+    assert parsed == [{"start": 0, "end": 1}]
+    assert app._parse_bad_take_candidates_response("not-json") == []
+
+    sanitized = app._sanitize_bad_take_candidates(
+        [
+            {"start": -1, "end": 1.23456, "reason": "x" * 130, "confidence": 2},
+            {"start": 1.0, "end": 2.0, "reason": "same", "confidence": 0.8},
+            {"start": 1.5, "end": 3.0, "reason": "same", "confidence": 0.9},
+        ],
+        max_end=5.0,
+    )
+    assert sanitized[0]["start"] == 0.0
+    assert len(sanitized[0]["reason"]) <= 120
+    assert sanitized[0]["confidence"] <= 1.0
+    assert sanitized[-1]["end"] == 3.0
+
+
+def test_detect_bad_take_candidates_ai_early_returns(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("AUTO_EDIT_BAD_TAKE_AI", "false")
+    assert app._detect_bad_take_candidates_ai({"segments": [{"start": 0, "end": 1, "text": "x"}]}) == []
+
+    monkeypatch.setenv("AUTO_EDIT_BAD_TAKE_AI", "true")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert app._detect_bad_take_candidates_ai({"segments": [{"start": 0, "end": 1, "text": "x"}]}) == []
+
+
+def test_process_endpoint_requires_source(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+
+    class _Req:
+        headers = {
+            "content-type": "application/json",
+            "user-agent": "pytest",
+        }
+        client = types.SimpleNamespace(host="127.0.0.1")
+
+        async def json(self):
+            return {"acknowledged": True}
+
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.process_endpoint(_Req(), None, None, None, "u1"))
+
+    assert exc.value.status_code == 400
+    assert "Must provide URL or File" in str(exc.value.detail)
+
+
+def test_process_endpoint_requires_ack(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+
+    class _Req:
+        headers = {
+            "content-type": "application/json",
+            "user-agent": "pytest",
+        }
+        client = types.SimpleNamespace(host="127.0.0.1")
+
+        async def json(self):
+            return {"url": "https://cdn.example.com/v.mp4", "acknowledged": False}
+
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.process_endpoint(_Req(), None, None, None, "u1"))
+
+    assert exc.value.status_code == 400
+    assert "must confirm" in str(exc.value.detail).lower()
+
+
+def test_process_endpoint_blocks_youtube_when_disabled(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setattr(app, "DISABLE_YOUTUBE_URL", True)
+
+    class _Req:
+        headers = {
+            "content-type": "application/json",
+            "user-agent": "pytest",
+        }
+        client = types.SimpleNamespace(host="127.0.0.1")
+
+        async def json(self):
+            return {"url": "https://youtube.com/watch?v=abc", "acknowledged": True}
+
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.process_endpoint(_Req(), None, None, None, "u1"))
+
+    assert exc.value.status_code == 403
+
+
+def test_get_status_404_when_unknown_job(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs.clear()
+    app.reel_job_manager.runtime_jobs.clear()
+    app.reel_job_manager.get_job_view = AsyncMock(return_value=None)
+
+    with TestClient(app.app) as client:
+        resp = client.get("/api/status/missing")
+    assert resp.status_code == 404
+
+
+def test_get_status_includes_partial_clips_from_runtime(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs.clear()
+    app.reel_job_manager.runtime_jobs.clear()
+    app.reel_job_manager.runtime_jobs["job-1"] = {
+        "status": "processing",
+        "output_dir": "/tmp/output/job-1",
+        "user_id": "u1",
+    }
+    app.reel_job_manager.get_job_view = AsyncMock(return_value={"status": "processing"})
+    monkeypatch.setattr(app.os.path, "exists", lambda p: str(p) == "/tmp/output/job-1")
+    monkeypatch.setattr(app.os, "listdir", lambda p: ["job-1_clip_1.mp4", "temp_ignore.mp4", "job-1_clip_2.mp4"])
+
+    with TestClient(app.app) as client:
+        resp = client.get("/api/status/job-1")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "partialClips" in payload
+    assert len(payload["partialClips"]) == 2
+    assert payload["partialClips"][0]["index"] == 0
+
+
+def test_edit_endpoint_requires_api_key(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/edit",
+            json={"job_id": "j1", "clip_index": 0},
+            headers={"X-User-Id": "u1"},
+        )
+    assert resp.status_code == 400
+
+
+def test_edit_endpoint_job_not_found_without_input_filename(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    app.jobs.clear()
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/edit",
+            json={"job_id": "missing", "clip_index": 0},
+            headers={"X-User-Id": "u1"},
+        )
+    assert resp.status_code == 404
+
+
+def test_process_captions_endpoint_requires_ack(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/captions/process",
+            files={"file": ("v.mp4", b"abc", "video/mp4")},
+            data={"acknowledged": "false"},
+            headers={"X-User-Id": "u1"},
+        )
+    assert resp.status_code == 400
+
+
+def test_ensure_clip_preview_endpoint_uses_mocked_preview(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app._ensure_preview_image_for_clip = AsyncMock(return_value="https://cdn.example/p.jpg")
+
+    with TestClient(app.app) as client:
+        resp = client.get("/api/clip/job-1/0/preview-image/ensure", headers={"X-User-Id": "u1"})
+    assert resp.status_code == 200
+    assert resp.json()["ensured"] is True
+
+
+def test_run_job_wrapper_routes_caption_and_releases(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    job_id = "caption-job-1"
+    app.jobs.clear()
+    app.reel_job_manager.runtime_jobs.clear()
+    app.reel_job_manager.runtime_jobs[job_id] = {"job_kind": "caption", "priority": 2}
+
+    run_caption = AsyncMock()
+    run_reel = AsyncMock()
+    monkeypatch.setattr(app, "run_caption_job", run_caption)
+    monkeypatch.setattr(app, "run_job", run_reel)
+
+    released = {"count": 0}
+    monkeypatch.setattr(app, "concurrency_semaphore", types.SimpleNamespace(release=lambda: released.__setitem__("count", released["count"] + 1)))
+    monkeypatch.setattr(app, "job_queue", types.SimpleNamespace(task_done=lambda: None))
+
+    asyncio.run(app.run_job_wrapper(job_id, 2))
+
+    run_caption.assert_awaited_once()
+    run_reel.assert_not_awaited()
+    assert released["count"] == 1
+    assert job_id not in app.running_reel_jobs
+
+
+def test_run_job_wrapper_routes_reel(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    job_id = "reel-job-1"
+    app.jobs.clear()
+    app.reel_job_manager.runtime_jobs.clear()
+    app.reel_job_manager.runtime_jobs[job_id] = {"job_kind": "reel", "priority": 2}
+
+    run_caption = AsyncMock()
+    run_reel = AsyncMock()
+    monkeypatch.setattr(app, "run_caption_job", run_caption)
+    monkeypatch.setattr(app, "run_job", run_reel)
+    monkeypatch.setattr(app, "concurrency_semaphore", types.SimpleNamespace(release=lambda: None))
+    monkeypatch.setattr(app, "job_queue", types.SimpleNamespace(task_done=lambda: None))
+
+    asyncio.run(app.run_job_wrapper(job_id, 2))
+    run_reel.assert_awaited_once()
+    run_caption.assert_not_awaited()
+
+
+def test_process_queue_dispatches_one_job_then_cancel(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs.clear()
+    app.reel_job_manager.runtime_jobs.clear()
+    app.reel_job_manager.runtime_jobs["job-q1"] = {"priority": 3}
+
+    class _Queue:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self):
+            self.calls += 1
+            if self.calls == 1:
+                return (-3, 1, "job-q1")
+            raise asyncio.CancelledError()
+
+    queue = _Queue()
+    monkeypatch.setattr(app, "job_queue", queue)
+    acquire_mock = AsyncMock()
+    monkeypatch.setattr(app, "concurrency_semaphore", types.SimpleNamespace(acquire=acquire_mock, release=lambda: None))
+
+    scheduled = {"count": 0}
+
+    def _fake_create_task(coro):
+        scheduled["count"] += 1
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return None
+
+    monkeypatch.setattr(app.asyncio, "create_task", _fake_create_task)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(app.process_queue("w1"))
+
+    acquire_mock.assert_awaited_once()
+    assert scheduled["count"] == 1
+
+
+def test_enforce_subscription_retention_policy_branches(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+
+    # active
+    monkeypatch.setattr(app, "get_user_abonnement", AsyncMock(return_value={"id": "sub1"}))
+    result = asyncio.run(app._enforce_subscription_retention_policy("u1"))
+    assert result["state"] == "active"
+
+    # no subscription
+    monkeypatch.setattr(app, "get_user_abonnement", AsyncMock(return_value=None))
+    monkeypatch.setattr(app, "supabase_get_latest_user_paid_subscription", AsyncMock(return_value=None))
+    result = asyncio.run(app._enforce_subscription_retention_policy("u1"))
+    assert result["state"] == "no_subscription"
+
+
+def test_enforce_subscription_retention_policy_retention_and_disabled(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    real_datetime = __import__("datetime").datetime
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+    monkeypatch.setattr(app, "get_user_abonnement", AsyncMock(return_value=None))
+    monkeypatch.setattr(app, "supabase_get_latest_user_paid_subscription", AsyncMock(return_value={"id": "sub2", "payment_end_date": "x"}))
+    monkeypatch.setattr(app, "_parse_iso_datetime", lambda _: real_datetime(2026, 1, 1, tzinfo=app.timezone.utc))
+    monkeypatch.setattr(app, "STORAGE_RETENTION_PERIODE_DAYS", 10)
+    monkeypatch.setattr(app, "_ensure_retention_deadline_on_subscription", AsyncMock())
+    zero_mock = AsyncMock()
+    disable_mock = AsyncMock()
+    monkeypatch.setattr(app, "_zero_balances_on_subscription_expiration", zero_mock)
+    monkeypatch.setattr(app, "_disable_subscription_account_if_needed", disable_mock)
+
+    class _DTInWindow:
+        @staticmethod
+        def now(tz=None):
+            return real_datetime(2026, 1, 5, tzinfo=app.timezone.utc)
+
+    monkeypatch.setattr(app, "datetime", _DTInWindow)
+    result = asyncio.run(app._enforce_subscription_retention_policy("u1"))
+    assert result["state"] == "retention_window"
+
+    class _DTPastWindow:
+        @staticmethod
+        def now(tz=None):
+            return real_datetime(2026, 2, 1, tzinfo=app.timezone.utc)
+
+    monkeypatch.setattr(app, "datetime", _DTPastWindow)
+    result = asyncio.run(app._enforce_subscription_retention_policy("u1"))
+    assert result["state"] == "disabled"
+    zero_mock.assert_awaited_once()
+    disable_mock.assert_awaited_once()
+
+
+def test_process_endpoint_json_url_enqueues_job(monkeypatch, tmp_path):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setattr(app, "DISABLE_YOUTUBE_URL", False)
+    monkeypatch.setattr(app.uuid, "uuid4", lambda: "job-json-1")
+    monkeypatch.setattr(app, "_probe_remote_video_metadata", lambda *_: {
+        "duration_seconds": 42.0,
+        "size_bytes": 2048,
+        "title": "Titre test",
+        "description": "desc",
+    })
+    monkeypatch.setattr(app, "_validate_reel_source_constraints", lambda **kwargs: None)
+    monkeypatch.setattr(app, "_estimate_reel_required_credits", lambda **kwargs: 1.25)
+    monkeypatch.setattr(app, "_resolve_user_job_priority", AsyncMock(return_value=3))
+    assert_credits = AsyncMock()
+    monkeypatch.setattr(app, "_assert_user_has_required_credits", assert_credits)
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: False)
+    app.reel_job_manager.create_job = AsyncMock()
+    app.reel_job_manager.enqueue_job = AsyncMock()
+    enqueue_job = AsyncMock()
+    monkeypatch.setattr(app, "enqueue_reel_job", enqueue_job)
+
+    class _Pipeline:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def queued(self):
+            return None
+
+    monkeypatch.setattr(app, "ReelProcessingPipeline", _Pipeline)
+
+    class _Req:
+        headers = {
+            "content-type": "application/json",
+            "user-agent": "pytest",
+        }
+        client = types.SimpleNamespace(host="127.0.0.1")
+
+        async def json(self):
+            return {"url": "https://cdn.example.com/reel.mp4", "acknowledged": True}
+
+    payload = asyncio.run(
+        app.process_endpoint(
+            request=_Req(),
+            file=None,
+            url=None,
+            acknowledged=None,
+            user_id="u1",
+        )
+    )
+
+    assert payload["job_id"] == "job-json-1"
+    assert payload["status"] == "queued"
+    assert "job-json-1" in app.jobs
+    assert "-u" in app.jobs["job-json-1"]["cmd"]
+    assert_credits.assert_awaited_once()
+    app.reel_job_manager.create_job.assert_awaited_once()
+    app.reel_job_manager.enqueue_job.assert_awaited_once_with("job-json-1")
+    enqueue_job.assert_awaited_once_with("job-json-1", priority=3)
+
+
+def test_process_endpoint_upload_rejects_oversized_file(monkeypatch, tmp_path):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setattr(app, "UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setattr(app, "REEL_MAX_STORAGE_GB", 1e-9)
+    monkeypatch.setattr(app, "_resolve_user_job_priority", AsyncMock(return_value=1))
+    os.makedirs(app.UPLOAD_DIR, exist_ok=True)
+
+    class _Req:
+        headers = {"user-agent": "pytest"}
+        client = types.SimpleNamespace(host="127.0.0.1")
+
+    class _Upload:
+        def __init__(self, content: bytes):
+            self.filename = "big.mp4"
+            self.content_type = "video/mp4"
+            self._content = content
+            self._done = False
+
+        async def read(self, _chunk_size: int):
+            if self._done:
+                return b""
+            self._done = True
+            return self._content
+
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(
+            app.process_endpoint(
+                request=_Req(),
+                file=_Upload(b"0123456789"),
+                url=None,
+                acknowledged="true",
+                user_id="u1",
+            )
+        )
+
+    assert exc.value.status_code == 413
+    assert "Maximum autorise" in str(exc.value.detail)
+
+
+def test_render_proxy_endpoints_forward_requests(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "RENDER_SERVICE_URL", "http://render.test")
+
+    httpx_mod = types.ModuleType("httpx")
+
+    class _Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            return types.SimpleNamespace(json=lambda: {"ok": True, "url": url, "body": json})
+
+        async def get(self, url):
+            return types.SimpleNamespace(json=lambda: {"ok": True, "url": url})
+
+    httpx_mod.AsyncClient = _Client
+    monkeypatch.setitem(sys.modules, "httpx", httpx_mod)
+
+    with TestClient(app.app) as client:
+        post_resp = client.post("/api/render", json={"composition": "Main"})
+        get_resp = client.get("/api/render/r-123")
+
+    assert post_resp.status_code == 200
+    assert post_resp.json()["url"] == "http://render.test/render"
+    assert post_resp.json()["body"]["composition"] == "Main"
+    assert get_resp.status_code == 200
+    assert get_resp.json()["url"] == "http://render.test/render/r-123"
+
+
+def test_generate_effects_config_with_input_filename_success(monkeypatch, tmp_path):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
+    input_dir = tmp_path / "output" / "j-effects"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    input_file = input_dir / "clip.mp4"
+    input_file.write_bytes(b"video")
+    monkeypatch.setattr(app.os.path, "getsize", lambda _p: 4096)
+    monkeypatch.setattr(app, "_probe_local_video_duration_seconds", lambda _p: 8.0)
+    monkeypatch.setattr(app, "_estimate_reel_required_credits", lambda **_kwargs: 0.8)
+    assert_credits = AsyncMock()
+    monkeypatch.setattr(app, "_assert_user_has_required_credits", assert_credits)
+    monkeypatch.setattr(
+        app.subprocess,
+        "check_output",
+        lambda _cmd: b'{"streams":[{"width":1080,"height":1920,"r_frame_rate":"30/1","duration":8}],"format":{"duration":8}}',
+    )
+    monkeypatch.setattr(app.shutil, "copy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(app.os, "remove", lambda _p: None)
+    monkeypatch.setattr(
+        app,
+        "_apply_auto_edit_options_to_effects_config",
+        lambda effects, _opts: (effects, ["normalized"]),
+    )
+
+    class _Editor:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def upload_video(self, _path):
+            return "uploaded-ref"
+
+        def get_effects_config(self, *_args, **_kwargs):
+            return {"layers": [{"type": "zoom", "start": 0, "end": 60}]}
+
+    monkeypatch.setattr(app, "VideoEditor", _Editor)
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/effects/generate",
+            json={"job_id": "j-effects", "clip_index": 0, "input_filename": "clip.mp4"},
+            headers={"X-User-Id": "u1"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["effects"]["layers"][0]["type"] == "zoom"
+    assert payload["applied_steps"] == ["normalized"]
+    assert_credits.assert_awaited_once()
+
+
+def test_add_subtitles_dubbed_video_uses_transcription(monkeypatch, tmp_path):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: False)
+    monkeypatch.setattr(app.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(app, "_append_style_version_to_metadata", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(app, "_persist_metadata_json", lambda *_args, **_kwargs: None)
+    assert_credits = AsyncMock()
+    monkeypatch.setattr(app, "_assert_user_has_required_credits", assert_credits)
+
+    meta = {
+        "transcript": {"segments": [{"text": "hello"}]},
+        "shorts": [{"start": 0.0, "end": 4.0, "video_url": "/videos/job-sub/translated_clip.mp4"}],
+    }
+    monkeypatch.setattr(app, "_get_or_build_job_metadata", AsyncMock(return_value=("/tmp/meta.json", meta)))
+
+    calls = {"transcribed": 0}
+
+    def _fake_transcribe(_input, _srt, max_words_per_line=4):
+        calls["transcribed"] += 1
+        return True
+
+    monkeypatch.setattr(app, "generate_srt_from_video", _fake_transcribe)
+    monkeypatch.setattr(
+        app,
+        "generate_srt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("generate_srt should not run for dubbed files")),
+    )
+    monkeypatch.setattr(app, "burn_subtitles", lambda *_args, **_kwargs: True)
+
+    class _StyleOptions:
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(app, "SubtitleStyleOptions", _StyleOptions)
+    app.jobs["job-sub"] = {"result": {"clips": [{"video_url": "/videos/job-sub/translated_clip.mp4"}]}}
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/subtitle",
+            json={
+                "job_id": "job-sub",
+                "clip_index": 0,
+                "input_filename": "translated_clip.mp4",
+                "words_per_line": 6,
+            },
+            headers={"X-User-Id": "u1"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert payload["version"] == 4
+    assert calls["transcribed"] == 1
+    assert_credits.assert_awaited_once()
+
+
+def test_persist_captioned_reel_happy_path_with_s3_supabase_and_style(monkeypatch, tmp_path):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+    monkeypatch.setattr(app, "_probe_local_video_duration_seconds", lambda _p: 12.0)
+    monkeypatch.setattr(app, "_estimate_caption_cost_breakdown", lambda **_kwargs: {"total_usd": 0.1})
+    monkeypatch.setattr(app, "_estimate_caption_required_credits", lambda **_kwargs: 0.5)
+    monkeypatch.setattr(app, "_bytes_to_gb", lambda _b: 0.001)
+    monkeypatch.setattr(app, "_caption_media_url_from_s3_key", lambda key: f"https://cdn.caption/{key}" if key else "")
+    monkeypatch.setattr(app, "_reel_media_url_from_s3_key", lambda key: f"https://cdn.reel/{key}" if key else "")
+    monkeypatch.setattr(app, "_reel_thumbnail_url_from_s3_key", lambda key: f"https://cdn.thumb/{key}" if key else "")
+    monkeypatch.setattr(app, "_build_billing_details", lambda *_args, **_kwargs: {"ok": True})
+
+    metadata = {
+        "shorts": [{"video_url": "/videos/job-1/original.mp4", "start": 0.0, "end": 2.0}],
+        "style_history": {},
+    }
+    monkeypatch.setattr(app, "_get_or_build_job_metadata", AsyncMock(return_value=("/tmp/meta.json", metadata)))
+    monkeypatch.setattr(app, "_persist_metadata_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(app, "_append_style_version_to_metadata", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(app, "_assert_user_has_required_credits", AsyncMock())
+
+    thumb_path = tmp_path / "thumb.jpg"
+    thumb_path.write_bytes(b"thumb")
+    monkeypatch.setattr(app, "_generate_reel_thumbnail_from_video", lambda *_args, **_kwargs: str(thumb_path))
+    monkeypatch.setattr(app.os, "remove", lambda _p: None)
+
+    upload_calls = []
+
+    def _upload(path, bucket, key):
+        upload_calls.append((path, bucket, key))
+        return True
+
+    monkeypatch.setattr(app, "upload_file_to_s3", _upload)
+    monkeypatch.setattr(app, "supabase_get_caption_by_job_clip", AsyncMock(return_value={"id": "cap-1", "caption_s3_key": "captions/u1/job-1/prev.mp4"}))
+    monkeypatch.setattr(app, "supabase_get_reel_by_job_clip", AsyncMock(return_value={"reel_s3_key": "reels/u1/job-1/prev.mp4"}))
+    app.supabase_update_caption = AsyncMock()
+    app.supabase_update_reel_media_by_job_clip = AsyncMock()
+    app.supabase_deduct_user_credits = AsyncMock(return_value=True)
+    app.supabase_insert_user_data_history = AsyncMock()
+    app.supabase_insert_style_edit_version = AsyncMock()
+
+    class _Upload:
+        def __init__(self):
+            self.filename = "render.mov"
+            self.content_type = "video/quicktime"
+            self.file = io.BytesIO(b"video-bytes")
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    app.jobs["job-1"] = {"result": {"clips": [{"video_url": "/videos/job-1/original.mp4"}]}}
+    upload = _Upload()
+
+    result = asyncio.run(
+        app.persist_captioned_reel(
+            job_id="job-1",
+            clip_index=0,
+            file=upload,
+            subtitle_config='{"style": {"font_name": "Inter"}}',
+            remotion_layers='{"layers": [{"type": "caption"}]}',
+            user_id="u1",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["persisted"] is True
+    assert result["new_video_url"].startswith("https://cdn.caption/captions/u1/job-1/")
+    assert result["preview_image_url"].startswith("https://cdn.caption/captions/u1/job-1/thumbnail_")
+    assert upload.closed is True
+    assert len(upload_calls) >= 3
+    app.supabase_update_caption.assert_awaited_once()
+    app.supabase_update_reel_media_by_job_clip.assert_awaited_once()
+    app.supabase_deduct_user_credits.assert_awaited_once()
+    app.supabase_insert_user_data_history.assert_awaited_once()
+    app.supabase_insert_style_edit_version.assert_awaited_once()
+
+
+def test_persist_captioned_reel_falls_back_to_local_urls_when_s3_upload_fails(monkeypatch, tmp_path):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: False)
+    monkeypatch.setattr(app, "_probe_local_video_duration_seconds", lambda _p: 6.0)
+    monkeypatch.setattr(app, "_estimate_caption_cost_breakdown", lambda **_kwargs: {})
+    monkeypatch.setattr(app, "_estimate_caption_required_credits", lambda **_kwargs: 0.0)
+    monkeypatch.setattr(app, "_bytes_to_gb", lambda _b: 0.0)
+    monkeypatch.setattr(app, "_assert_user_has_required_credits", AsyncMock())
+
+    metadata = {"shorts": [{"video_url": "/videos/job-2/base.mp4", "start": 0.0, "end": 1.0}]}
+    monkeypatch.setattr(app, "_get_or_build_job_metadata", AsyncMock(return_value=("/tmp/meta.json", metadata)))
+    monkeypatch.setattr(app, "_persist_metadata_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(app, "_generate_reel_thumbnail_from_video", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(app, "upload_file_to_s3", lambda *_args, **_kwargs: False)
+
+    class _Upload:
+        def __init__(self):
+            self.filename = "render.webm"
+            self.content_type = "video/webm"
+            self.file = io.BytesIO(b"video")
+
+        async def close(self):
+            return None
+
+    result = asyncio.run(
+        app.persist_captioned_reel(
+            job_id="job-2",
+            clip_index=0,
+            file=_Upload(),
+            subtitle_config="{bad-json",
+            remotion_layers="{bad-json",
+            user_id="u2",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["new_video_url"].startswith("/videos/job-2/captioned_0_")
+    assert result["preview_image_url"] == result["new_video_url"]
+
+
+def test_persist_captioned_reel_rejects_non_video_content_type(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _Upload:
+        filename = "render.txt"
+        content_type = "text/plain"
+        file = io.BytesIO(b"x")
+
+        async def close(self):
+            return None
+
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(
+            app.persist_captioned_reel(
+                job_id="job-3",
+                clip_index=0,
+                file=_Upload(),
+                subtitle_config=None,
+                remotion_layers=None,
+                user_id="u3",
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert "Invalid rendered video content type" in str(exc.value.detail)
 
 

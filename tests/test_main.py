@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 import types
 
@@ -389,5 +390,313 @@ def test_mount_resolution_edge_cases(monkeypatch):
     # crop_width is computed based on zoom level and video dimensions
     assert cameraman.crop_width > 0
     assert cameraman.crop_height > 0
+
+
+def test_update_tracked_faces_matches_and_appends(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setattr(main, "IOU_MATCH_THRESHOLD", 0.2)
+    tracked = [{"box": [0, 0, 10, 10], "seen": 1}]
+    candidates = [{"box": [1, 1, 10, 10]}, {"box": [100, 100, 10, 10]}]
+    main._update_tracked_faces(tracked, candidates)
+    assert tracked[0]["seen"] == 2
+    assert len(tracked) == 2
+
+
+def test_analyze_scenes_strategy_short_scene_and_n_samples_zero(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+
+    class _Cap:
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 30.0
+
+        def release(self):
+            return None
+
+    class _T:
+        def __init__(self, frame_num):
+            self.frame_num = frame_num
+
+    scenes = [(_T(0), _T(5)), (_T(10), _T(80))]
+    monkeypatch.setattr(main.cv2, "VideoCapture", lambda _: _Cap(), raising=False)
+    monkeypatch.setattr(main, "tqdm", lambda it, desc=None: it)
+    monkeypatch.setattr(main, "count_distinct_faces_in_scene", lambda *args, **kwargs: (1, 0, [], []))
+    out_strats, out_boxes = main.analyze_scenes_strategy("video.mp4", scenes)
+    assert out_strats == ["TRACK", "GENERAL"]
+    assert out_boxes == [[], []]
+
+
+def test_analyze_scenes_strategy_when_capture_fails(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+
+    class _Cap:
+        def isOpened(self):
+            return False
+
+    monkeypatch.setattr(main.cv2, "VideoCapture", lambda _: _Cap(), raising=False)
+    out_strats, out_boxes = main.analyze_scenes_strategy("video.mp4", [(1, 2), (3, 4)])
+    assert out_strats == ["TRACK", "TRACK"]
+    assert out_boxes == [[], []]
+
+
+def test_compute_separator_thickness_bounds_and_even(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setattr(main, "SEPARATOR_THICKNESS_RATIO", 0.003)
+    monkeypatch.setattr(main, "SEPARATOR_MIN_PX", 2)
+    monkeypatch.setattr(main, "SEPARATOR_MAX_PX", 12)
+    value = main._compute_separator_thickness(1001)
+    assert 2 <= value <= 12
+    assert value % 2 == 0
+
+
+def test_resolve_cookiefile_from_env_path_and_inline(monkeypatch, tmp_path):
+    main = _import_main_with_stubs(monkeypatch)
+
+    cookies_file = tmp_path / "cookies.txt"
+    cookies_file.write_text("# Netscape HTTP Cookie File\nexample.com\tTRUE\t/\tFALSE\t0\tname\tvalue\n")
+    monkeypatch.setenv("YOUTUBE_COOKIES", str(cookies_file))
+    assert main._resolve_cookiefile_from_env() == str(cookies_file)
+
+    monkeypatch.setenv("YOUTUBE_COOKIES", "example.com\\tTRUE\\t/\\tFALSE\\t0\\tname\\tvalue")
+    monkeypatch.setattr(main, "_looks_like_netscape_cookies", lambda text: True)
+    monkeypatch.setattr(main.os.path, "getsize", lambda p: 10)
+    written = {}
+
+    class _F:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def write(self, data):
+            written["data"] = data
+
+    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: _F())
+    assert main._resolve_cookiefile_from_env() == "/app/cookies.txt"
+    assert "Netscape HTTP Cookie File" in written["data"]
+
+
+def test_build_ytdlp_opts_proxy_cookie_modes(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("YOUTUBE_PROXY", "http://user:pass@proxy:8080")
+    opts = main._build_ytdlp_opts(True, "/tmp/c.txt", "abc123")
+    assert opts["cookiefile"] == "/tmp/c.txt"
+    assert "__sessid.abc123" in opts["proxy"]
+    assert opts["extractor_args"]["youtube"]["player_client"] == ["mweb", "web"]
+
+    opts2 = main._build_ytdlp_opts(False, None, None)
+    assert opts2["cookiefile"] is None
+    assert opts2["extractor_args"]["youtube"]["player_client"] == ["android", "ios"]
+
+
+def test_make_job_cookies_copy(monkeypatch, tmp_path):
+    main = _import_main_with_stubs(monkeypatch)
+    src = tmp_path / "master.txt"
+    src.write_text("cookie")
+    monkeypatch.setenv("YOUTUBE_COOKIES", str(src))
+    copied = main._make_job_cookies_copy()
+    assert copied is not None
+    assert os.path.exists(copied)
+    os.remove(copied)
+
+
+def test_extract_info_with_fallback(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+
+    calls = {"n": 0}
+
+    class _YDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("first fail")
+            return {"title": "ok"}
+
+    monkeypatch.setattr(main.yt_dlp, "YoutubeDL", _YDL, raising=False)
+    info, opts = main._extract_info_with_fallback("https://y.t", None, "sess")
+    assert info["title"] == "ok"
+    assert "extractor_args" in opts
+
+
+def test_locate_downloaded_file_prefers_exact_then_fallback(monkeypatch, tmp_path):
+    main = _import_main_with_stubs(monkeypatch)
+    out_dir = str(tmp_path)
+    exact = tmp_path / "video.mp4"
+    exact.write_text("x")
+    assert main._locate_downloaded_file(out_dir, "video").endswith("video.mp4")
+
+    exact.unlink()
+    (tmp_path / "video.abc.mp4").write_text("x")
+    assert main._locate_downloaded_file(out_dir, "video").endswith("video.abc.mp4")
+
+
+def test_cleanup_existing_outputs_handles_missing_files(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    removed = []
+    monkeypatch.setattr(main.os.path, "exists", lambda p: True)
+
+    def _remove(path):
+        removed.append(path)
+        if path == "b":
+            raise FileNotFoundError()
+
+    monkeypatch.setattr(main.os, "remove", _remove)
+    main._cleanup_existing_outputs("a", "b", None)
+    assert removed == ["a", "b"]
+
+
+def test_compute_output_dimensions_and_scene_helpers(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    w, h = main._compute_output_dimensions(1081)
+    assert h == 1081
+    assert w % 2 == 0
+
+    class _T:
+        def __init__(self, frame_num):
+            self.frame_num = frame_num
+
+    boundaries = main._build_scene_boundaries([(_T(0), _T(10)), (_T(10), _T(20))])
+    assert boundaries == [(0, 10), (10, 20)]
+    assert main._advance_scene_index(15, 0, boundaries) == 1
+
+
+def test_transcribe_video_assembly_retries_then_success(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "assemblyai")
+    monkeypatch.setenv("ASSEMBLY_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("ASSEMBLY_RETRY_DELAY_SECONDS", "0")
+    calls = {"n": 0}
+
+    def _asm(_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("temporary")
+        return {"text": "ok", "segments": []}
+
+    monkeypatch.setattr(main, "_transcribe_with_assemblyai", _asm)
+    result = main.transcribe_video("in.mp4")
+    assert result["text"] == "ok"
+    assert calls["n"] == 2
+
+
+def test_transcribe_video_assembly_failure_raises(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "assemblyai")
+    monkeypatch.setenv("ASSEMBLY_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("ASSEMBLY_RETRY_DELAY_SECONDS", "0")
+    monkeypatch.setattr(main, "_transcribe_with_assemblyai", lambda _: (_ for _ in ()).throw(RuntimeError("down")))
+    with pytest.raises(RuntimeError):
+        main.transcribe_video("in.mp4")
+
+
+def test_transcribe_video_hybrid_fallback(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "hybrid")
+    monkeypatch.setenv("TRANSCRIBER_FALLBACK", "faster_whisper")
+    monkeypatch.setenv("ASSEMBLY_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("ASSEMBLY_RETRY_DELAY_SECONDS", "0")
+    monkeypatch.setattr(main, "_transcribe_with_assemblyai", lambda _: (_ for _ in ()).throw(RuntimeError("quota")))
+    monkeypatch.setattr(main, "_transcribe_with_faster_whisper", lambda _: {"text": "fallback", "segments": []})
+    result = main.transcribe_video("in.mp4")
+    assert result["text"] == "fallback"
+
+
+def test_get_viral_clips_provider_routing(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setattr(main, "_normalize_short_durations", lambda data, duration: {**data, "norm": duration})
+    monkeypatch.setattr(main, "_get_viral_clips_with_gemini", lambda *_: {"shorts": [{"start": 0, "end": 10}]})
+    monkeypatch.setattr(main, "_get_viral_clips_with_openai", lambda *_: {"shorts": [{"start": 5, "end": 20}]})
+
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    g = main.get_viral_clips({"text": "x"}, 60)
+    assert g["norm"] == 60
+
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    o = main.get_viral_clips({"text": "x"}, 60)
+    assert o["norm"] == 60
+
+
+def test_get_viral_clips_hybrid_fallback_and_both_fail(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("AI_PROVIDER", "hybrid")
+    monkeypatch.setattr(main, "_normalize_short_durations", lambda data, duration: data)
+    monkeypatch.setattr(main, "_is_quota_or_rate_limit_error", lambda exc: True)
+
+    monkeypatch.setattr(main, "_get_viral_clips_with_openai", lambda *_: (_ for _ in ()).throw(RuntimeError("429")))
+    monkeypatch.setattr(main, "_get_viral_clips_with_gemini", lambda *_: {"shorts": []})
+    ok = main.get_viral_clips({"text": "x"}, 30)
+    assert "shorts" in ok
+
+    monkeypatch.setattr(main, "_get_viral_clips_with_gemini", lambda *_: (_ for _ in ()).throw(RuntimeError("down")))
+    with pytest.raises(RuntimeError):
+        main.get_viral_clips({"text": "x"}, 30)
+
+
+def test_process_video_to_vertical_success_and_fail(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+
+    class _T:
+        def __init__(self, frame_num):
+            self.frame_num = frame_num
+
+    monkeypatch.setattr(main, "_prepare_temp_paths", lambda out: ("tmpv.mp4", "tmpa.aac"))
+    monkeypatch.setattr(main, "_cleanup_existing_outputs", lambda *args: None)
+    monkeypatch.setattr(main, "detect_scenes", lambda _: ([(_T(0), _T(100))], 30.0))
+    monkeypatch.setattr(main, "get_video_resolution", lambda _: (1920, 1080))
+    monkeypatch.setattr(main, "analyze_scenes_strategy", lambda *_: (["TRACK"], [[]]))
+    monkeypatch.setattr(main, "refine_multi_speaker_scenes", lambda *_: ["TRACK"])
+    monkeypatch.setattr(main, "_build_scene_boundaries", lambda scenes: [(0, 100)])
+    monkeypatch.setattr(main, "_extract_audio_track", lambda *_: None)
+    monkeypatch.setattr(main, "_merge_video_and_audio", lambda *_: True)
+    monkeypatch.setattr(main, "_process_frames_to_temp_video", lambda *args, **kwargs: (0, ""))
+    assert main.process_video_to_vertical("in.mp4", "out.mp4") is True
+
+    monkeypatch.setattr(main, "_process_frames_to_temp_video", lambda *args, **kwargs: (1, "ffmpeg error"))
+    assert main.process_video_to_vertical("in.mp4", "out.mp4") is False
+
+
+def test_download_youtube_video_success_and_cleanup(monkeypatch, tmp_path):
+    main = _import_main_with_stubs(monkeypatch)
+    cookie_file = tmp_path / "job_cookie.txt"
+    cookie_file.write_text("x")
+
+    monkeypatch.setattr(main, "_make_job_cookies_copy", lambda: str(cookie_file))
+    monkeypatch.setattr(main, "_extract_info_with_fallback", lambda *args, **kwargs: ({"title": "My Video"}, {}))
+    monkeypatch.setattr(main, "_run_download", lambda *args, **kwargs: "/tmp/out.mp4")
+    monkeypatch.setattr(main, "sanitize_filename", lambda name: "My_Video")
+    monkeypatch.setattr(main, "yt_dlp", types.SimpleNamespace(version=types.SimpleNamespace(__version__="1.0")))
+
+    removed = []
+    monkeypatch.setattr(main.os.path, "exists", lambda p: str(p) == str(cookie_file))
+    monkeypatch.setattr(main.os, "remove", lambda p: removed.append(p))
+
+    file_path, title = main.download_youtube_video("https://youtube.com/watch?v=abc", output_dir="/tmp")
+    assert file_path == "/tmp/out.mp4"
+    assert title == "My_Video"
+    assert str(cookie_file) in removed
+
+
+def test_download_youtube_video_prints_failure_and_raises(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setattr(main, "_make_job_cookies_copy", lambda: None)
+    monkeypatch.setattr(main, "_extract_info_with_fallback", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("blocked")))
+    printer = {"called": 0}
+    monkeypatch.setattr(main, "_print_download_failure", lambda exc: printer.__setitem__("called", printer["called"] + 1))
+    monkeypatch.setattr(main, "yt_dlp", types.SimpleNamespace(version=types.SimpleNamespace(__version__="1.0")))
+    with pytest.raises(RuntimeError):
+        main.download_youtube_video("https://youtube.com/watch?v=abc", output_dir="/tmp")
+    assert printer["called"] == 1
 
 

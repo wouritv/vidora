@@ -1,9 +1,19 @@
 import os
 from dotenv import load_dotenv
 load_dotenv()
-import boto3
-from botocore.exceptions import ClientError
 import logging
+
+try:
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+except ImportError:  # pragma: no cover - optional dependency in minimal test env
+    boto3 = None
+
+    class ClientError(Exception):
+        pass
+
+    Config = None
 
 # Configure silent logging for boto3 and botocore
 logging.getLogger('boto3').setLevel(logging.CRITICAL)
@@ -17,19 +27,13 @@ def upload_file_to_s3(file_path, bucket_name, s3_key):
     """
     Upload a file to an S3 bucket silently.
     """
-    access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-    secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-    region = os.environ.get('AWS_REGION', 'eu-west-3')
-
-    if not access_key or not secret_key:
+    if not file_path or not bucket_name or not s3_key:
         return False
 
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name=region
-    )
+    s3_client = get_s3_client()
+    if not s3_client:
+        return False
+
     try:
         # Extra arguments for public read if needed, but the user didn't specify.
         # Given the bucket name, it might be for a web app.
@@ -40,8 +44,6 @@ def upload_file_to_s3(file_path, bucket_name, s3_key):
     except Exception:
         return False
 
-
-from botocore.config import Config
 import json
 import time as time_module
 
@@ -58,16 +60,18 @@ def get_s3_client():
     secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
     region = os.environ.get('AWS_REGION', 'eu-west-3')
 
-    if not access_key or not secret_key:
+    if boto3 is None or not access_key or not secret_key:
         return None
 
-    return boto3.client(
-        's3',
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name=region,
-        config=Config(signature_version='s3v4')
-    )
+    client_kwargs = {
+        'service_name': 's3',
+        'aws_access_key_id': access_key,
+        'aws_secret_access_key': secret_key,
+        'region_name': region,
+    }
+    if Config is not None:
+        client_kwargs['config'] = Config(signature_version='s3v4')
+    return boto3.client(**client_kwargs)
 
 def generate_presigned_url(bucket_name, object_key, expiration=3600):
     """Generate a presigned URL to share an S3 object."""

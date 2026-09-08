@@ -1,5 +1,6 @@
 import os
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import s3_uploader
 
@@ -50,15 +51,49 @@ def test_upload_file_to_s3_returns_false_without_credentials(monkeypatch):
 
 
 def test_upload_file_to_s3_returns_true_on_success(monkeypatch):
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "y")
     monkeypatch.setattr(
-        s3_uploader.boto3,
-        "client",
-        lambda *args, **kwargs: SimpleNamespace(upload_file=lambda *a, **k: None),
+        s3_uploader,
+        "get_s3_client",
+        lambda: SimpleNamespace(upload_file=lambda *a, **k: None),
     )
 
     assert s3_uploader.upload_file_to_s3("/tmp/a.mp4", "bucket", "key") is True
+
+
+def test_upload_file_to_s3_returns_false_for_invalid_inputs(monkeypatch):
+    monkeypatch.setattr(s3_uploader, "get_s3_client", lambda: object())
+    assert s3_uploader.upload_file_to_s3("", "bucket", "key") is False
+    assert s3_uploader.upload_file_to_s3("/tmp/a.mp4", "", "key") is False
+    assert s3_uploader.upload_file_to_s3("/tmp/a.mp4", "bucket", "") is False
+
+
+def test_upload_file_to_s3_returns_false_on_exceptions(monkeypatch):
+    class _ClientErr:
+        def upload_file(self, *_args, **_kwargs):
+            raise s3_uploader.ClientError({"Error": {"Code": "500", "Message": "boom"}}, "upload_file")
+
+    class _AnyErr:
+        def upload_file(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(s3_uploader, "get_s3_client", lambda: _ClientErr())
+    assert s3_uploader.upload_file_to_s3("/tmp/a.mp4", "bucket", "key") is False
+
+    monkeypatch.setattr(s3_uploader, "get_s3_client", lambda: _AnyErr())
+    assert s3_uploader.upload_file_to_s3("/tmp/a.mp4", "bucket", "key") is False
+
+
+def test_generate_presigned_url_returns_none_when_clienterror(monkeypatch):
+    class _Client:
+        def generate_presigned_url(self, *_args, **_kwargs):
+            raise s3_uploader.ClientError({"Error": {"Code": "403", "Message": "nope"}}, "generate_presigned_url")
+
+    logger = MagicMock()
+    monkeypatch.setattr(s3_uploader, "logger", logger)
+    monkeypatch.setattr(s3_uploader, "get_s3_client", lambda: _Client())
+
+    assert s3_uploader.generate_presigned_url("bucket", "path/video.mp4") is None
+    logger.error.assert_called_once()
 
 
 def test_delete_s3_object_validates_inputs_and_handles_success(monkeypatch):
