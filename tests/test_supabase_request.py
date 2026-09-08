@@ -69,6 +69,9 @@ class _FakeQuery:
     def gte(self, *args, **kwargs):
         return self._record("gte", *args, **kwargs)
 
+    def in_(self, *args, **kwargs):
+        return self._record("in_", *args, **kwargs)
+
     @property
     def not_(self):
         """Return a helper object that supports .is_() chaining"""
@@ -993,6 +996,300 @@ def test_update_job_record_and_get_job_record_paths(monkeypatch):
     row_scoped = asyncio.run(supabase_request.get_job_record("job-1", user_id="u1"))
     assert row_any == {"id": "job-1", "user_id": "u1"}
     assert row_scoped == {"id": "job-1", "user_id": "u1"}
+
+
+def test_get_latest_job_record_by_project_match_and_none(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_JOBS_TABLE: [
+                _FakeResponse(data=[
+                    {"id": "j0", "job_data": {"project_id": "p-x"}},
+                    {"id": "j1", "job_data": {"project_id": "p-1"}},
+                ]),
+                _FakeResponse(data=[{"id": "j2", "job_data": {"project_id": "other"}}]),
+            ]
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    found = asyncio.run(supabase_request.get_latest_job_record_by_project("p-1", "u1"))
+    not_found = asyncio.run(supabase_request.get_latest_job_record_by_project("p-missing", "u1"))
+
+    assert found == {"id": "j1", "job_data": {"project_id": "p-1"}}
+    assert not_found is None
+
+
+def test_append_and_list_job_logs_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_JOB_LOGS_TABLE: [
+                _FakeResponse(data=[]),
+                _FakeResponse(data=[{"id": "l1", "level": "WARN"}], count=1),
+            ]
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    asyncio.run(supabase_request.append_job_log("job-1", "warn", "hello", {"step": 1}))
+    rows = asyncio.run(supabase_request.list_job_logs("job-1", limit=9999))
+
+    assert rows == [{"id": "l1", "level": "WARN"}]
+    insert_payload = _event_args(fake_client.events, supabase_request.SUPABASE_JOB_LOGS_TABLE, "insert")[0]
+    assert insert_payload["level"] == "WARN"
+    assert insert_payload["metadata"] == {"step": 1}
+    assert _event_args(fake_client.events, supabase_request.SUPABASE_JOB_LOGS_TABLE, "limit") == (1000,)
+
+
+def test_list_recoverable_jobs_default_status_and_limit(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_JOBS_TABLE: [_FakeResponse(data=[{"id": "j-recover"}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    rows = asyncio.run(supabase_request.list_recoverable_jobs("reels", limit=0))
+    assert rows == [{"id": "j-recover"}]
+    assert _event_args(fake_client.events, supabase_request.SUPABASE_JOBS_TABLE, "in_") == (
+        "status", ["queued", "processing", "retry_wait"]
+    )
+    assert _event_args(fake_client.events, supabase_request.SUPABASE_JOBS_TABLE, "limit") == (1,)
+
+
+def test_upsert_user_data_credits_existing_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_USER_DATA_TABLE: [_FakeResponse(data=[{"user_id": "u1", "credit": 13.0}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    async def _existing(_uid):
+        return {
+            "user_id": "u1",
+            "credit": 10,
+            "credit_debt": 5,
+            "stockage": 2.0,
+            "credit_max": 10,
+            "stockage_max": 2.0,
+        }
+
+    bank_entry = types.SimpleNamespace(calls=[])
+
+    async def _bank(**kwargs):
+        bank_entry.calls.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(supabase_request, "get_user_data", _existing)
+    monkeypatch.setattr(supabase_request, "insert_user_credit_bank_entry", _bank)
+
+    result = asyncio.run(
+        supabase_request.upsert_user_data_credits(
+            "u1",
+            credit_delta=8,
+            storage_delta=1.0,
+            update_credit_max=True,
+            update_stockage_max=True,
+            operation_type="subscription",
+            operation_id="sub-1",
+        )
+    )
+
+    assert result["user_id"] == "u1"
+    assert bank_entry.calls and bank_entry.calls[0]["direction"] == "debt_payment"
+
+
+def test_upsert_user_data_credits_caps_credit_max_when_needed(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_USER_DATA_TABLE: [_FakeResponse(data=[{"user_id": "u2", "credit": 7.0}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    async def _existing(_uid):
+        return {
+            "user_id": "u2",
+            "credit": 5,
+            "credit_debt": 0,
+            "stockage": 1.0,
+            "credit_max": 3,
+            "stockage_max": 1.0,
+        }
+
+    monkeypatch.setattr(supabase_request, "get_user_data", _existing)
+    monkeypatch.setattr(supabase_request, "insert_user_credit_bank_entry", lambda **_kwargs: None)
+
+    asyncio.run(
+        supabase_request.upsert_user_data_credits(
+            "u2",
+            credit_delta=2,
+            storage_delta=0.0,
+            update_credit_max=False,
+            update_stockage_max=False,
+        )
+    )
+    payload = _event_args(fake_client.events, supabase_request.SUPABASE_USER_DATA_TABLE, "update")[0]
+    assert payload["credit"] == 7.0
+    assert payload["credit_max"] == 7.0
+
+
+def test_upsert_user_data_credits_create_user_path(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_USER_DATA_TABLE: [_FakeResponse(data=[])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    async def _missing(_uid):
+        return None
+
+    monkeypatch.setattr(supabase_request, "get_user_data", _missing)
+    created = asyncio.run(supabase_request.upsert_user_data_credits("u3", 2.2, storage_delta=1.5))
+    assert created["user_id"] == "u3"
+    assert created["credit"] == 3
+    assert created["stockage"] == 1.5
+
+
+def test_set_user_data_balance_existing_and_insert_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_USER_DATA_TABLE: [
+                _FakeResponse(data=[{"user_id": "u1", "credit": 7.0}]),
+                _FakeResponse(data=[]),
+            ]
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    async def _existing(_uid):
+        return {
+            "user_id": "u1",
+            "credit": 1,
+            "credit_debt": 3,
+            "stockage": 2.0,
+            "credit_max": 2,
+            "stockage_max": 2.0,
+        }
+
+    bank_calls = []
+
+    async def _bank(**kwargs):
+        bank_calls.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(supabase_request, "get_user_data", _existing)
+    monkeypatch.setattr(supabase_request, "insert_user_credit_bank_entry", _bank)
+    updated = asyncio.run(supabase_request.set_user_data_balance("u1", credit=10, storage=3.0))
+    assert updated["user_id"] == "u1"
+    assert bank_calls and bank_calls[0]["direction"] == "debt_payment"
+
+    async def _missing(_uid):
+        return None
+
+    monkeypatch.setattr(supabase_request, "get_user_data", _missing)
+    inserted = asyncio.run(supabase_request.set_user_data_balance("u9", credit=4, storage=1.0))
+    assert inserted["user_id"] == "u9"
+    assert inserted["credit"] == 4
+
+
+def test_deduct_user_credits_debt_and_storage_overage_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_USER_DATA_TABLE: [_FakeResponse(data=[{"user_id": "u1"}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    async def _existing_for_debt(_uid):
+        return {
+            "user_id": "u1",
+            "credit": 2,
+            "credit_debt": 1,
+            "stockage": 0.0,
+            "stockage_max": 10.0,
+        }
+
+    bank_calls = []
+
+    async def _bank(**kwargs):
+        bank_calls.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(supabase_request, "get_user_data", _existing_for_debt)
+    monkeypatch.setattr(supabase_request, "insert_user_credit_bank_entry", _bank)
+    assert asyncio.run(supabase_request.deduct_user_credits("u1", credits=5, storage_delta=0.0)) is True
+    assert bank_calls and bank_calls[0]["direction"] == "debt_increase"
+
+    async def _existing_overage(_uid):
+        return {
+            "user_id": "u1",
+            "credit": 100,
+            "credit_debt": 0,
+            "stockage": 0.0,
+            "stockage_max": 10.0,
+        }
+
+    monkeypatch.setattr(supabase_request, "get_user_data", _existing_overage)
+    assert asyncio.run(supabase_request.deduct_user_credits("u1", credits=1, storage_delta=-100.0)) is False
+
+
+def test_insert_credit_bank_entry_and_user_history(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_USER_CREDIT_BANK_TABLE: [_FakeResponse(data=[])],
+            supabase_request.SUPABASE_USER_DATA_HISTORY_TABLE: [_FakeResponse(data=[])],
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    entry = asyncio.run(
+        supabase_request.insert_user_credit_bank_entry(
+            user_id="u1",
+            direction="  DEBT_PAYMENT  ",
+            amount=-5,
+            debt_balance_after=-1,
+            operation_type="subscription",
+            operation_id="op-1",
+            metadata={"x": 1},
+        )
+    )
+    history = asyncio.run(
+        supabase_request.insert_user_data_history(
+            user_id="u1",
+            credit=2.2,
+            storage=0.5,
+            operation="output",
+            operation_type="captions",
+            operation_id="h-1",
+        )
+    )
+
+    assert entry["direction"] == "debt_payment"
+    assert entry["amount"] == 0.0
+    assert entry["debt_balance_after"] == 0.0
+    assert history["credit"] == 3
+    assert history["operation_id"] == "h-1"
+
+
+def test_get_user_data_history_query_and_pagination(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_USER_DATA_HISTORY_TABLE: [_FakeResponse(data=[{"id": "h1"}], count=4)]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    rows, total = asyncio.run(supabase_request.get_user_data_history("u1", page=0, page_size=999))
+    assert rows == [{"id": "h1"}]
+    assert total == 4
+    assert _event_args(fake_client.events, supabase_request.SUPABASE_USER_DATA_HISTORY_TABLE, "range") == (0, 99)
+
+
+def test_get_user_data_history_returns_empty_for_missing_user_id(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    rows, total = asyncio.run(supabase_request.get_user_data_history(""))
+    assert rows == []
+    assert total == 0
 
 
 
