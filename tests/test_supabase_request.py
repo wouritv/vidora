@@ -156,7 +156,7 @@ def test_list_reels_builds_expected_query_and_escapes_search(monkeypatch):
     assert total == 7
     assert _event_args(fake_client.events, supabase_request.SUPABASE_REELS_TABLE, "range") == (0, 99)
     assert _event_args(fake_client.events, supabase_request.SUPABASE_REELS_TABLE, "or_") == (
-        "reel_title.ilike.*myquery*,reel_description.ilike.*myquery*",
+        'reel_title.ilike."*myquery*",reel_description.ilike."*myquery*"',
     )
 
 
@@ -178,7 +178,24 @@ def test_list_captions_uses_caption_columns_and_filters(monkeypatch):
     )
     assert _event_args(fake_client.events, supabase_request.SUPABASE_CAPTIONS_TABLE, "range") == (20, 39)
     assert _event_args(fake_client.events, supabase_request.SUPABASE_CAPTIONS_TABLE, "or_") == (
-        "caption_title.ilike.*caption*,caption_description.ilike.*caption*",
+        'caption_title.ilike."*caption*",caption_description.ilike."*caption*"',
+    )
+
+
+def test_build_ilike_or_filter_escapes_postgrest_metacharacters(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+
+    # Security regression test (audit finding P2-7): a raw comma/paren in the
+    # search term used to let it break out of the ilike value and inject
+    # extra filter clauses into the PostgREST `or=(...)` string. Wrapping the
+    # value in double quotes (escaping embedded backslashes/quotes) keeps
+    # those characters literal instead of structural.
+    injected = 'x",other_column.eq.secret'
+    result = supabase_request._build_ilike_or_filter(injected, ["title", "description"])
+
+    assert result == (
+        'title.ilike."*x\\",other_column.eq.secret*",'
+        'description.ilike."*x\\",other_column.eq.secret*"'
     )
 
 

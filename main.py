@@ -544,33 +544,44 @@ def _extract_audio_rms(video_path, target_fps):
 
     Retourne un np.array, ou None si pas d'audio exploitable.
     """
-    wav_path = "/tmp/_scene_audio_tmp.wav"
+    # Security/correctness: use a unique path per call rather than a fixed
+    # shared /tmp filename -- concurrent jobs calling this at the same time
+    # would otherwise race on the same file (one job's ffmpeg write
+    # clobbering another job's still-unread WAV) (audit finding P2-8).
+    fd, wav_path = tempfile.mkstemp(prefix="_scene_audio_", suffix=".wav")
+    os.close(fd)
     try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", video_path,
-                "-vn", "-ac", "1", "-ar", "16000",
-                "-f", "wav", wav_path,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-            timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return None
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-ac", "1", "-ar", "16000",
+                    "-f", "wav", wav_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            return None
 
-    try:
-        with wave.open(wav_path, "rb") as wf:
-            sr = wf.getframerate()
-            n_samples = wf.getnframes()
-            raw = wf.readframes(n_samples)
-            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-    except Exception:
-        return None
+        try:
+            with wave.open(wav_path, "rb") as wf:
+                sr = wf.getframerate()
+                n_samples = wf.getnframes()
+                raw = wf.readframes(n_samples)
+                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+        except Exception:
+            return None
 
-    if samples.size == 0:
-        return None
+        if samples.size == 0:
+            return None
+    finally:
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
 
     samples_per_video_frame = max(1, int(sr / target_fps))
     rms_per_frame = []

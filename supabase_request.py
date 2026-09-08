@@ -38,6 +38,22 @@ def is_supabase_configured() -> bool:
 	return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 
 
+def _build_ilike_or_filter(query: str, columns: List[str]) -> str:
+	"""Build a safe PostgREST `or=(...)` filter string for a free-text search.
+
+	Security: `query` is untrusted user input. PostgREST's `or` filter syntax
+	treats `,`, `(` and `)` as structural separators, so embedding a raw
+	search term directly (as `column.ilike.*<term>*`) let an attacker append
+	extra filter clauses (e.g. `foo,other_column.eq.secret`) or break out of
+	the grouping (audit finding P2-7). Per PostgREST's own escaping rules,
+	wrapping the value in double quotes makes those characters literal; only
+	backslashes and double quotes inside the value then need escaping.
+	"""
+	stripped = query.replace("*", "")
+	escaped = stripped.replace("\\", "\\\\").replace('"', '\\"')
+	return ",".join(f'{column}.ilike."*{escaped}*"' for column in columns)
+
+
 # --------------------------------------------------------------------------
 # Client singleton (à réutiliser plutôt que d'en recréer un à chaque appel)
 # --------------------------------------------------------------------------
@@ -101,8 +117,7 @@ async def list_reels(
 		q = q.eq("reel_status", status)
 
 	if query:
-		escaped = query.replace("*", "")
-		q = q.or_(f"reel_title.ilike.*{escaped}*,reel_description.ilike.*{escaped}*")
+		q = q.or_(_build_ilike_or_filter(query, ["reel_title", "reel_description"]))
 
 	response = await q.execute()
 	return response.data, response.count or 0
@@ -285,8 +300,7 @@ async def list_projects(
 		q = q.eq("status", status)
 
 	if query:
-		escaped = query.replace("*", "")
-		q = q.or_(f"name.ilike.*{escaped}*,description.ilike.*{escaped}*")
+		q = q.or_(_build_ilike_or_filter(query, ["name", "description"]))
 
 	response = await q.execute()
 	return response.data or [], response.count or 0
@@ -529,8 +543,7 @@ async def list_captions(
 		q = q.eq("caption_status", status)
 
 	if query:
-		escaped = query.replace("*", "")
-		q = q.or_(f"caption_title.ilike.*{escaped}*,caption_description.ilike.*{escaped}*")
+		q = q.or_(_build_ilike_or_filter(query, ["caption_title", "caption_description"]))
 
 	response = await q.execute()
 	return response.data or [], response.count or 0
