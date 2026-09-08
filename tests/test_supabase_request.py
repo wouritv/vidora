@@ -669,6 +669,16 @@ def test_get_souscription_by_reference_returns_none_for_empty(monkeypatch):
     assert result is None
 
 
+def test_get_souscription_by_reference_returns_none_when_not_found(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_SOUSCRIPTION_TABLE: [_FakeResponse(data=[])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    assert asyncio.run(supabase_request.get_souscription_by_reference("missing-ref")) is None
+
+
 def test_get_user_abonnement_returns_none_when_not_found(monkeypatch):
     supabase_request = _import_supabase_request_with_stubs(monkeypatch)
     fake_client = _FakeClient(
@@ -749,6 +759,241 @@ def test_deduct_user_credits_returns_false_when_no_user_data(monkeypatch):
 
     result = asyncio.run(supabase_request.deduct_user_credits("u1", 10.0))
     assert result is False
+
+
+def test_get_client_raises_when_not_configured(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    monkeypatch.setattr(supabase_request, "SUPABASE_URL", "")
+    monkeypatch.setattr(supabase_request, "SUPABASE_SERVICE_ROLE_KEY", "")
+    monkeypatch.setattr(supabase_request, "_client", None)
+
+    try:
+        asyncio.run(supabase_request.get_client())
+        assert False, "Expected SupabaseNotConfiguredError"
+    except supabase_request.SupabaseNotConfiguredError:
+        pass
+
+
+def test_insert_reels_returns_data_on_success(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_REELS_TABLE: [_FakeResponse(data=[{"id": "r-ok"}])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    result = asyncio.run(supabase_request.insert_reels([{"reel_user_id": "u1"}]))
+    assert result == [{"id": "r-ok"}]
+
+
+def test_get_reel_returns_first_row_when_found(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_REELS_TABLE: [_FakeResponse(data=[{"id": "reel-1"}])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    assert asyncio.run(supabase_request.get_reel("reel-1", "u1")) == {"id": "reel-1"}
+
+
+def test_get_reel_by_job_clip_returns_first_row_when_found(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_REELS_TABLE: [_FakeResponse(data=[{"id": "reel-job"}])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    assert asyncio.run(supabase_request.get_reel_by_job_clip("job-1", 0)) == {"id": "reel-job"}
+
+
+def test_update_reel_media_by_job_clip_returns_none_when_update_empty(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_REELS_TABLE: [_FakeResponse(data=[])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    result = asyncio.run(
+        supabase_request.update_reel_media_by_job_clip("job-2", 1, "https://cdn.example/reel.mp4")
+    )
+    assert result is None
+
+
+def test_update_project_returns_none_for_empty_project_id(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    result = asyncio.run(supabase_request.update_project("", "u1", {"name": "x"}))
+    assert result is None
+
+
+def test_get_captions_by_project_returns_empty_for_empty_project_id(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    assert asyncio.run(supabase_request.get_captions_by_project("")) == []
+
+
+def test_increment_project_output_count_returns_none_for_empty_project_id(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    assert asyncio.run(supabase_request.increment_project_output_count("")) is None
+
+
+def test_insert_captions_returns_rows_when_successful(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_CAPTIONS_TABLE: [_FakeResponse(data=[{"id": "cap-ok"}])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    rows = asyncio.run(supabase_request.insert_captions([{"caption_user_id": "u1"}]))
+    assert rows == [{"id": "cap-ok"}]
+
+
+def test_get_caption_returns_first_row_when_found(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_CAPTIONS_TABLE: [_FakeResponse(data=[{"id": "cap-1"}])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    assert asyncio.run(supabase_request.get_caption("cap-1", "u1")) == {"id": "cap-1"}
+
+
+def test_get_caption_by_job_clip_returns_none_when_not_found(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_CAPTIONS_TABLE: [_FakeResponse(data=[])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    assert asyncio.run(supabase_request.get_caption_by_job_clip("job-miss", 2, "u1")) is None
+
+
+def test_update_caption_success_and_empty_id_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    assert asyncio.run(supabase_request.update_caption("", "u1", {"caption_title": "x"})) is None
+
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_CAPTIONS_TABLE: [
+                _FakeResponse(data=[]),
+                _FakeResponse(data=[{"id": "cap-2", "caption_title": "Updated"}]),
+            ]
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+    row = asyncio.run(supabase_request.update_caption("cap-2", "u1", {"caption_title": "Updated"}))
+    assert row == {"id": "cap-2", "caption_title": "Updated"}
+
+
+def test_get_transcription_by_job_clip_returns_first_row(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient({supabase_request.SUPABASE_TRANSCRIPTIONS_TABLE: [_FakeResponse(data=[{"id": "tr-1"}])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    assert asyncio.run(supabase_request.get_transcription_by_job_clip("job-1", 0, "u1")) == {"id": "tr-1"}
+
+
+def test_update_transcription_translations_cache_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    assert asyncio.run(
+        supabase_request.update_transcription_translations_cache("", 0, "u1", {"fr": "x"})
+    ) is None
+
+    fake_client = _FakeClient({supabase_request.SUPABASE_TRANSCRIPTIONS_TABLE: [_FakeResponse(data=[])]})
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    async def _fake_get_transcription(job_id, clip_index, user_id):
+        return {"job_id": job_id, "clip_index": clip_index, "user_id": user_id, "translations_cache": {"fr": "ok"}}
+
+    monkeypatch.setattr(supabase_request, "get_transcription_by_job_clip", _fake_get_transcription)
+    row = asyncio.run(
+        supabase_request.update_transcription_translations_cache(
+            "job-1", 2, "u1", {"fr": "ok"}, billing_details={"cost": 1}
+        )
+    )
+    assert row["translations_cache"]["fr"] == "ok"
+
+
+def test_style_edit_version_queries_success_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_STYLE_EDIT_VERSIONS_TABLE: [
+                _FakeResponse(data=[{"id": "v1"}]),
+                _FakeResponse(data=[{"id": "v1"}, {"id": "v2"}]),
+                _FakeResponse(data=[{"id": "v1"}, {"id": "v2"}]),
+            ]
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    inserted = asyncio.run(supabase_request.insert_style_edit_version({"job_id": "j1", "clip_index": 0, "user_id": "u1"}))
+    listed = asyncio.run(supabase_request.list_style_edit_versions("j1", 0, "u1"))
+    deleted_count = asyncio.run(supabase_request.delete_style_edit_versions("j1", 0, "u1"))
+
+    assert inserted == {"id": "v1"}
+    assert listed == [{"id": "v1"}, {"id": "v2"}]
+    assert deleted_count == 2
+
+
+def test_subscription_read_paths_return_rows(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_ABONNEMENTS_TABLE: [_FakeResponse(data=[{"id": "ab1"}])],
+            supabase_request.SUPABASE_SOUSCRIPTION_TABLE: [
+                _FakeResponse(data=[{"id": "sub-ref"}]),
+                _FakeResponse(data=[{"id": "sub-active", "abonnement": "ab1"}]),
+                _FakeResponse(data=[{"id": "sub-latest"}]),
+                _FakeResponse(data=[{"id": "sub-paid"}]),
+                _FakeResponse(data=[{"id": "sub-1"}, {"id": "sub-2"}]),
+                _FakeResponse(data=[]),
+                _FakeResponse(data=[{"id": "sub-updated"}]),
+            ],
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    assert asyncio.run(supabase_request.get_abonnement("ab1")) == {"id": "ab1"}
+
+    async def _fake_get_abonnement(_ab_id):
+        return {"id": "ab1", "priorite": "3"}
+
+    monkeypatch.setattr(supabase_request, "get_abonnement", _fake_get_abonnement)
+    assert asyncio.run(supabase_request.get_souscription_by_reference("ref-1")) == {"id": "sub-ref"}
+
+    active = asyncio.run(supabase_request.get_user_abonnement("u1"))
+    assert active["id"] == "sub-active"
+    assert active["priorite"] == 3
+
+    assert asyncio.run(supabase_request.get_latest_user_souscription("u1")) == {"id": "sub-latest"}
+    assert asyncio.run(supabase_request.get_latest_user_paid_subscription("u1")) == {"id": "sub-paid"}
+    assert asyncio.run(supabase_request.list_user_souscriptions("u1", limit=999)) == [{"id": "sub-1"}, {"id": "sub-2"}]
+    assert asyncio.run(supabase_request.update_souscription_row("sub-1", {"payment_status": "cancelled"})) == {"id": "sub-updated"}
+
+
+def test_get_user_abonnement_falls_back_to_priority_one_on_error(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_SOUSCRIPTION_TABLE: [_FakeResponse(data=[{"id": "sub-e", "abonnement": "ab-x"}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    async def _boom(_ab_id):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(supabase_request, "get_abonnement", _boom)
+    row = asyncio.run(supabase_request.get_user_abonnement("u1"))
+    assert row["priorite"] == 1
+
+
+def test_update_job_record_and_get_job_record_paths(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    assert asyncio.run(supabase_request.update_job_record("", {"status": "x"})) is None
+
+    fake_client = _FakeClient(
+        {
+            supabase_request.SUPABASE_JOBS_TABLE: [
+                _FakeResponse(data=[]),
+                _FakeResponse(data=[{"id": "job-1", "status": "done"}]),
+                _FakeResponse(data=[{"id": "job-1", "user_id": "u1"}]),
+                _FakeResponse(data=[{"id": "job-1", "user_id": "u1"}]),
+            ]
+        }
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    updated = asyncio.run(supabase_request.update_job_record("job-1", {"status": "done"}))
+    assert updated == {"id": "job-1", "status": "done"}
+
+    row_any = asyncio.run(supabase_request.get_job_record("job-1"))
+    row_scoped = asyncio.run(supabase_request.get_job_record("job-1", user_id="u1"))
+    assert row_any == {"id": "job-1", "user_id": "u1"}
+    assert row_scoped == {"id": "job-1", "user_id": "u1"}
+
 
 
 
