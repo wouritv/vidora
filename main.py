@@ -1117,7 +1117,10 @@ def _cleanup_existing_outputs(*paths):
             continue
         try:
             if os.path.exists(path):
-                os.remove(path)
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
         except FileNotFoundError:
             continue
 
