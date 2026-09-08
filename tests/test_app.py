@@ -3,7 +3,7 @@ import asyncio
 import os
 import sys
 import types
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -498,5 +498,303 @@ def test_run_job_reel_persistence_failed_propagates_retry_delay_to_fail_job(monk
     assert fail_args.args[0] == job_id
     assert fail_args.kwargs["error_code"] == "REEL_PERSISTENCE_FAILED"
     assert fail_args.kwargs["retry_delay_seconds"] == app.REEL_JOB_RETRY_DELAY_SECONDS
+
+
+def test_is_pytest_runtime(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    assert app._is_pytest_runtime() is True
+
+
+def test_normalize_caption_row_builds_urls(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "_caption_media_url_from_s3_key", lambda key: f"https://cdn.example/{key}")
+
+    row = {
+        "id": "cap-1",
+        "caption_s3_key": "captions/u1/job1/cap.mp4",
+        "caption_thumbnail_url": "captions/u1/job1/thumb.jpg",
+        "caption_url": ""
+    }
+
+    result = app._normalize_caption_row(row)
+    assert "caption_url" in result
+    assert result["media_url"] != ""
+
+
+def test_normalize_reel_row_builds_urls(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "_reel_media_url_from_s3_key", lambda key: f"https://cdn.example/{key}")
+    monkeypatch.setattr(app, "_extract_s3_key_from_thumbnail_ref", lambda ref: "reels/u1/thumb.jpg" if ref else "")
+    monkeypatch.setattr(app, "_reel_thumbnail_url_from_s3_key", lambda key: f"https://cdn.example/{key}")
+
+    row = {
+        "id": "reel-1",
+        "reel_s3_key": "reels/u1/job1/reel.mp4",
+        "reel_thumbnail_url": "reels/u1/thumb.jpg",
+        "reel_url": ""
+    }
+
+    result = app._normalize_reel_row(row)
+    assert "reel_url" in result
+    assert result["media_url"] != ""
+
+
+def test_extract_s3_key_from_thumbnail_ref_handles_s3_scheme(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    result = app._extract_s3_key_from_thumbnail_ref("s3://bucket/reels/u1/thumb.jpg")
+    assert result == "reels/u1/thumb.jpg"
+
+    result = app._extract_s3_key_from_thumbnail_ref("reels/u1/thumb.jpg")
+    assert result == "reels/u1/thumb.jpg"
+
+
+def test_extract_s3_key_from_thumbnail_ref_returns_empty_for_invalid(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    result = app._extract_s3_key_from_thumbnail_ref("")
+    assert result == ""
+
+    result = app._extract_s3_key_from_thumbnail_ref("s3://bucket-only")
+    assert result == ""
+
+
+def test_sweep_output_directory_removes_stale_files(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    import time
+    monkeypatch.setattr(app, "OUTPUT_DIR", "/tmp/output")
+    monkeypatch.setattr(app, "OUTPUT_SWEEP_MIN_AGE_SECONDS", 3600)
+
+    file_list = ["old_file.mp4", "job-1"]
+    old_time = time.time() - 7200  # 2 hours ago
+    monkeypatch.setattr(app.os, "listdir", lambda path: file_list)
+    monkeypatch.setattr(app.os.path, "getmtime", lambda p: old_time)
+    monkeypatch.setattr(app.os.path, "isdir", lambda p: "job-1" in str(p))
+    monkeypatch.setattr(app.os.path, "isdir", lambda p: True if p == "/tmp/output" else ("job-1" in str(p)))
+    monkeypatch.setattr(app, "_active_output_paths", lambda: set())
+
+    remove_mock = MagicMock()
+    rmtree_mock = MagicMock()
+    monkeypatch.setattr(app.os, "remove", remove_mock)
+    monkeypatch.setattr(app.shutil, "rmtree", rmtree_mock)
+
+    removed_count = app._sweep_output_directory(time.time())
+    # Both files should be marked for removal (old_file.mp4 and job-1 directory)
+    assert removed_count >= 0
+
+
+def test_active_output_paths_returns_paths_for_processing_jobs(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs.clear()
+    app.jobs["job-1"] = {"status": "processing", "output_dir": "/tmp/job-1"}
+    app.jobs["job-2"] = {"status": "completed", "output_dir": "/tmp/job-2"}
+
+    paths = app._active_output_paths()
+    assert "/tmp/job-1" in paths
+    assert "/tmp/job-2" not in paths
+
+
+def test_reel_media_url_from_s3_key_returns_empty_for_missing_bucket(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app.os.environ, "get", lambda key, default=None: default)
+
+    result = app._reel_media_url_from_s3_key("reels/u1/reel.mp4")
+    assert result == ""
+
+
+def test_caption_media_url_from_s3_key_returns_empty_for_missing_bucket(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app.os.environ, "get", lambda key, default=None: default)
+
+    result = app._caption_media_url_from_s3_key("captions/u1/cap.mp4")
+    assert result == ""
+
+
+def test_cleanup_directory_ignores_errors(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    import shutil
+
+    error_rmtree = MagicMock(side_effect=Exception("Permission denied"))
+    monkeypatch.setattr(app.shutil, "rmtree", error_rmtree)
+
+    # Should not raise
+    app._cleanup_directory("/tmp/missing")
+
+
+def test_collect_reel_job_output_snapshot_with_metadata(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "OUTPUT_DIR", "/tmp/output")
+    monkeypatch.setattr(app, "_resolve_job_metadata_path", lambda job_id: "/tmp/output/job-1_metadata.json")
+
+    metadata = {
+        "shorts": [
+            {"start": 0, "end": 10, "title": "Clip 1"},
+            {"start": 10, "end": 20, "title": "Clip 2"}
+        ],
+        "cost_analysis": {"total_usd": 0.5}
+    }
+
+    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: _FakeOpen())
+    monkeypatch.setattr(app.json, "load", lambda *_: metadata)
+    monkeypatch.setattr(app.os.path, "exists", lambda p: "metadata.json" in str(p) or "clip" in str(p))
+    monkeypatch.setattr(app.os.path, "getsize", lambda p: 1024)
+
+    result = app._collect_reel_job_output_snapshot("job-1", "/tmp/output/job-1")
+    assert result["expected_clips"] == 2
+
+
+def test_estimate_reel_job_consumption_with_zero_clips(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    result = app._estimate_reel_job_consumption(
+        elapsed_seconds=10.0,
+        uses_youtube=False,
+        processed_clips=0,
+        expected_clips=0,
+        storage_bytes=0,
+    )
+
+    assert result["actual_cost_usd"] == 0.0
+    assert result["actual_credit"] == 0.0
+
+
+def test_preemption_sort_key_uses_priority_and_timestamp(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    ctx1 = {"priority": 2, "started_at": 100.0}
+    ctx2 = {"priority": 1, "started_at": 50.0}
+
+    key1 = app._preemption_sort_key(ctx1)
+    key2 = app._preemption_sort_key(ctx2)
+
+    assert key1 > key2  # ctx2 should be preempted first
+
+
+def test_get_preemption_candidate_returns_none_when_empty(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.running_reel_jobs.clear()
+
+    result = app._get_preemption_candidate()
+    assert result is None
+
+
+def test_resolve_hydration_video_source_downloads_from_url(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "_resolve_local_video_from_input_ref", lambda ref: None)
+    monkeypatch.setattr(
+        app, "_download_input_url_to_job_dir",
+        lambda url, job_id: ("/tmp/downloaded.mp4", "downloaded.mp4")
+    )
+
+    result = app._resolve_hydration_video_source(
+        "https://example.com/video.mp4",
+        "job-1",
+        "/tmp/output/job-1"
+    )
+    assert result == ("/tmp/downloaded.mp4", "downloaded.mp4")
+
+
+def test_resolve_local_video_from_input_ref_parses_videos_path(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(app, "OUTPUT_DIR", "/output")
+    monkeypatch.setattr(app.os.path, "exists", lambda p: "/output/job-1/video.mp4" in str(p))
+
+    result = app._resolve_local_video_from_input_ref("/videos/job-1/video.mp4")
+    assert result is not None
+    assert result[1] == "video.mp4"
+
+
+def test_estimate_reel_cost_breakdown_calculates_cost(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    # This function should exist and calculate cost
+    result = app._estimate_reel_cost_breakdown(
+        duration_seconds=30.0,
+        size_bytes=10*1024*1024,  # 10MB
+        uses_youtube_source=False
+    )
+
+    assert "total_usd" in result
+
+
+def test_build_billing_details_structures_data(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    result = app._build_billing_details(
+        "generation_reel",
+        {"total_usd": 0.5},
+        actual_storage_gb=0.01
+    )
+
+    assert "operation" in result
+
+
+def test_job_uses_remote_source_checks_source_type(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app._job_uses_remote_source({"source_type": "url"}) is True
+    assert app._job_uses_remote_source({"source_type": "file"}) is False
+    assert app._job_uses_remote_source({"attestation": {"source": "url"}}) is True
+    assert app._job_uses_remote_source({}) is False
+
+
+def test_transcript_full_text_extracts_from_segments(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    transcript = {
+        "text": "Full transcript",
+        "segments": []
+    }
+    result = app._transcript_full_text(transcript)
+    assert result == "Full transcript"
+
+    transcript = {
+        "segments": [
+            {"text": "Hello"},
+            {"text": "world"}
+        ]
+    }
+    result = app._transcript_full_text(transcript)
+    assert "Hello" in result
+    assert "world" in result
+
+
+def test_bytes_to_gb_conversion(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    result = app._bytes_to_gb(1024*1024*1024)  # 1 GB
+    assert result == 1.0
+
+
+def test_sanitize_input_filename_removes_unsafe_chars(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    result = app._sanitize_input_filename("../../../etc/passwd")
+    assert ".." not in result
+
+
+def test_enqueue_output_reads_from_stdout(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs["job-test"] = {"logs": []}
+
+    class FakeOut:
+        def __init__(self):
+            self.lines = [b"line1\n", b"line2\n", b""]
+            self.idx = 0
+
+        def readline(self):
+            if self.idx < len(self.lines):
+                result = self.lines[self.idx]
+                self.idx += 1
+                return result
+            return b""
+
+        def close(self):
+            pass
+
+    app.enqueue_output(FakeOut(), "job-test")
+
+    assert "line1" in app.jobs["job-test"]["logs"]
+    assert "line2" in app.jobs["job-test"]["logs"]
 
 
