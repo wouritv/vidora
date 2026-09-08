@@ -117,6 +117,24 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+
+def _generic_error(
+    log_message: str,
+    exc: Exception,
+    status_code: int = 500,
+    detail: str = "Une erreur interne est survenue. Veuillez reessayer.",
+) -> HTTPException:
+    """Log the full exception server-side (with traceback) and return an
+    HTTPException carrying only a generic, non-identifying message for the
+    client. Raw exception text can leak internal file paths, library stack
+    fragments, or upstream API error bodies to any caller (audit finding:
+    information disclosure via error messages) -- callers should always
+    `raise _generic_error(...) from exc` instead of `detail=str(exc)`.
+    """
+    logger.exception("%s: %s", log_message, exc)
+    return HTTPException(status_code=status_code, detail=detail)
+
+
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 BREVO_FROM_EMAIL = os.getenv("BREVO_FROM_EMAIL", "noreply@vireel.co")
 BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID = os.getenv("BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID")
@@ -2848,6 +2866,36 @@ async def _assert_user_has_required_credits(user_id: str, required_credits: floa
     return required
 
 
+async def _assert_user_has_storage_headroom(user_id: str) -> None:
+    """Reject new uploads once the user's aggregate storage quota is already
+    exhausted (audit finding P2-10).
+
+    Storage consumption is only ever settled against ``stockage``/
+    ``stockage_max`` at job completion (see deduct_user_credits'
+    storage_delta), once the actual output size is known. Nothing upstream
+    of that stopped an account already over its storage quota from starting
+    yet more jobs -- only the credit balance gated new work. This mirrors
+    the same overage tolerance used at settlement time so an account isn't
+    blocked here by a stricter rule than the one that will actually charge it.
+    """
+    if not is_supabase_configured():
+        return
+    user_data = await supabase_get_user_data(user_id)
+    if not user_data:
+        return
+    current_storage = float(user_data.get("stockage", 0) or 0.0)
+    storage_max = float(user_data.get("stockage_max", max(current_storage, 0.0)) or 0.0)
+    overage_limit = (storage_max * STORAGE_OVERAGE_TOLERANCE_PERCENT) / 100.0
+    if current_storage < -overage_limit:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                "Quota de stockage depasse. Liberez de l'espace ou mettez a "
+                "niveau votre abonnement avant de lancer un nouveau traitement."
+            ),
+        )
+
+
 async def _reserve_job_credits(user_id: str, required_credits: float) -> float:
     """Atomically reserve ``required_credits`` for a queued job (reel/caption
     generation) instead of merely checking the balance covers it. Two
@@ -3460,6 +3508,7 @@ async def process_endpoint(
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
 
     await _enforce_job_concurrency_limit(user_id)
+    await _assert_user_has_storage_headroom(user_id)
 
     # Capture attestation context for legal record (IP + timestamp + UA)
     client_ip = request.client.host if request.client else "unknown"
@@ -3898,7 +3947,10 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Could not download input URL: {e}")
+        raise _generic_error(
+            "Failed to download input URL", e, status_code=404,
+            detail="Impossible de telecharger l'URL fournie.",
+        ) from e
 
     return local_path, filename
 
@@ -4083,8 +4135,7 @@ async def edit_clip(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Edit Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Edit Error", e)
 
 @app.post("/api/captions/process")
 async def process_caption_endpoint(
@@ -4100,6 +4151,7 @@ async def process_caption_endpoint(
         raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
 
     await _enforce_job_concurrency_limit(user_id)
+    await _assert_user_has_storage_headroom(user_id)
 
     _validate_video_extension(file.filename if file else "", context_label="sous-titres")
 
@@ -4642,7 +4694,10 @@ async def proxy_render(request: Request, user_id: str = Depends(get_user_id_head
             )
             return resp.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Render service unavailable: {e}")
+        raise _generic_error(
+            "Render service unavailable (proxy_render)", e, status_code=502,
+            detail="Le service de rendu est indisponible.",
+        )
 
 @app.get("/api/render/{render_id}")
 async def proxy_render_status(render_id: str, user_id: str = Depends(get_user_id_header)):
@@ -4655,7 +4710,10 @@ async def proxy_render_status(render_id: str, user_id: str = Depends(get_user_id
             )
             return resp.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Render service unavailable: {e}")
+        raise _generic_error(
+            "Render service unavailable (proxy_render_status)", e, status_code=502,
+            detail="Le service de rendu est indisponible.",
+        )
 
 
 class EffectsGenerateRequest(BaseModel):
@@ -4793,8 +4851,7 @@ async def generate_effects_config(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Effects Generation Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Effects Generation Error", e)
 
 
 @app.post("/api/subtitle")
@@ -4933,9 +4990,10 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_burn)
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"❌ Subtitle Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Subtitle Error", e)
 
     local_subtitle_url = f"/videos/{req.job_id}/{output_filename}"
     persisted_subtitle_url = local_subtitle_url
@@ -5224,8 +5282,7 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
         await loop.run_in_executor(None, run_hook)
 
     except Exception as e:
-        print(f"❌ Hook Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Hook Error", e)
 
     # Update Persistence (Same logic as subtitles)
     # Update InMemory Jobs
@@ -5836,8 +5893,7 @@ async def translate_clip(req: TranslateRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Translation(subtitles-only) Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Translation(subtitles-only) Error", e)
 
     # Update in-memory job result if the job is still alive in memory.
     if job and req.clip_index < len(job.get("result", {}).get("clips", [])):
@@ -6236,8 +6292,7 @@ async def thumbnail_analyze(
         }
 
     except Exception as e:
-        print(f"❌ Thumbnail Analyze Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Analyze Error", e)
 
 
 class ThumbnailTitlesRequest(BaseModel):
@@ -6299,8 +6354,7 @@ async def thumbnail_titles(
         return {"titles": new_titles}
 
     except Exception as e:
-        print(f"❌ Thumbnail Titles Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Titles Error", e)
 
 
 @app.post("/api/thumbnail/generate")
@@ -6377,8 +6431,7 @@ async def thumbnail_generate(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Thumbnail Generate Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Generate Error", e)
 
 
 class ThumbnailDescribeRequest(BaseModel):
@@ -6419,8 +6472,7 @@ async def thumbnail_describe(
         return {"description": result.get("description", "")}
 
     except Exception as e:
-        print(f"❌ Thumbnail Describe Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Describe Error", e)
 
 
 @app.post("/api/thumbnail/publish")
