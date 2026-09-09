@@ -7757,6 +7757,95 @@ async def delete_caption(caption_id: str, user_id: Annotated[str, Depends(get_us
     return {"deleted": True}
 
 
+async def _schedule_share_publish_job(
+    user_id: str, platform_name: str, source_type: str, source_id: str, publish_priority: int,
+    scheduled_for, timezone: Optional[str], final_title: str, final_description: str, media_url: str,
+) -> Dict[str, Any]:
+    publish_job_id = await _insert_publish_job(
+        user_id=user_id,
+        platform=platform_name,
+        external_id="scheduled",
+        status="queued",
+        priority=publish_priority,
+        scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
+        timezone=timezone or "UTC",
+        payload={
+            "source_type": source_type,
+            "source_id": source_id,
+            "title": final_title,
+            "description": final_description,
+            "media_url": media_url,
+        },
+    )
+    return {
+        "success": True,
+        "scheduled": True,
+        "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
+        "publish_job_id": publish_job_id,
+    }
+
+
+async def _debit_publish_credits_after_share(user_id: str, operation_id: str, results: Dict[str, Any]) -> None:
+    if not is_supabase_configured():
+        return
+    platform_count_done = sum(1 for v in results.values() if v.get("success"))
+    if platform_count_done <= 0:
+        return
+    pub_done_cost = calculate_credits_for_operation(
+        estimate_publication_cost_usd(platform_count=platform_count_done, video_size_gb=0.5)
+    )
+    pub_done_credits = pub_done_cost["final_credits"]
+    await supabase_deduct_user_credits(user_id, pub_done_credits)
+    await supabase_insert_user_data_history(
+        user_id=user_id,
+        credit=pub_done_credits,
+        storage=0.0,
+        operation="output",
+        operation_type="publication",
+        operation_id=operation_id,
+    )
+
+
+async def _publish_caption_now(user_id: str, platform_name: str, publish_priority: int, final_title: str, final_description: str, media_url: str) -> Dict[str, Any]:
+    publish_job_id = await _insert_publish_job(
+        user_id=user_id,
+        platform=platform_name,
+        external_id="n/a",
+        status="queued",
+        priority=publish_priority,
+    )
+    try:
+        await _update_publish_job_status(publish_job_id, "processing")
+        account = await _get_social_account(user_id, platform_name)
+        if not account:
+            raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
+
+        publish_payload = PublishRequest(
+            user_id=user_id,
+            title=final_title,
+            description=final_description,
+            text=final_description,
+            caption=final_description,
+            video_url=media_url,
+        )
+        platform_result = await publish_post(account, publish_payload)
+        external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
+        await _update_publish_job_status(publish_job_id, "done", external_id=external_id)
+        return {
+            "success": True,
+            "result": platform_result,
+            "publish_job_id": publish_job_id,
+        }
+    except Exception as exc:
+        err_msg = str(exc)
+        await _update_publish_job_status(publish_job_id, "failed", error_message=err_msg)
+        return {
+            "success": False,
+            "error": err_msg,
+            "publish_job_id": publish_job_id,
+        }
+
+
 @app.post("/api/captions/{caption_id}/share", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
@@ -7783,85 +7872,18 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: Ann
     overall_success = True
     for platform_name in selected_platforms:
         if is_scheduled:
-            publish_job_id = await _insert_publish_job(
-                user_id=user_id,
-                platform=platform_name,
-                external_id="scheduled",
-                status="queued",
-                priority=publish_priority,
-                scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
-                timezone=payload.timezone or "UTC",
-                payload={
-                    "source_type": "caption",
-                    "source_id": caption_id,
-                    "title": final_title,
-                    "description": final_description,
-                    "media_url": media_url,
-                },
+            results[platform_name] = await _schedule_share_publish_job(
+                user_id, platform_name, "caption", caption_id, publish_priority, scheduled_for, payload.timezone, final_title, final_description, media_url,
             )
-            results[platform_name] = {
-                "success": True,
-                "scheduled": True,
-                "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
-                "publish_job_id": publish_job_id,
-            }
             continue
 
-        publish_job_id = await _insert_publish_job(
-            user_id=user_id,
-            platform=platform_name,
-            external_id="n/a",
-            status="queued",
-            priority=publish_priority,
-        )
-        try:
-            await _update_publish_job_status(publish_job_id, "processing")
-            account = await _get_social_account(user_id, platform_name)
-            if not account:
-                raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
-
-            publish_payload = PublishRequest(
-                user_id=user_id,
-                title=final_title,
-                description=final_description,
-                text=final_description,
-                caption=final_description,
-                video_url=media_url,
-            )
-            platform_result = await publish_post(account, publish_payload)
-            external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-            await _update_publish_job_status(publish_job_id, "done", external_id=external_id)
-            results[platform_name] = {
-                "success": True,
-                "result": platform_result,
-                "publish_job_id": publish_job_id,
-            }
-        except Exception as exc:
+        result = await _publish_caption_now(user_id, platform_name, publish_priority, final_title, final_description, media_url)
+        results[platform_name] = result
+        if not result["success"]:
             overall_success = False
-            err_msg = str(exc)
-            await _update_publish_job_status(publish_job_id, "failed", error_message=err_msg)
-            results[platform_name] = {
-                "success": False,
-                "error": err_msg,
-                "publish_job_id": publish_job_id,
-            }
 
-    if is_supabase_configured() and not is_scheduled:
-        platform_count_done = sum(1 for v in results.values() if v.get("success"))
-        if platform_count_done > 0:
-            _pub_done_cost = calculate_credits_for_operation(
-                estimate_publication_cost_usd(platform_count=platform_count_done, video_size_gb=0.5)
-            )
-            _pub_done_credits = _pub_done_cost["final_credits"]
-            await supabase_deduct_user_credits(user_id, _pub_done_credits)
-            await supabase_insert_user_data_history(
-                user_id=user_id,
-                credit=_pub_done_credits,
-                storage=0.0,
-                operation="output",
-                operation_type="publication",
-                operation_id=caption_id,
-            )
+    if not is_scheduled:
+        await _debit_publish_credits_after_share(user_id, caption_id, results)
 
     return {
         "success": overall_success,
@@ -8173,6 +8195,36 @@ async def delete_reel(reel_id: str, user_id: Annotated[str, Depends(get_user_id_
     return {"deleted": True}
 
 
+async def _publish_reel_now(user_id: str, platform_name: str, publish_priority: int, final_title: str, final_description: str, media_url: str) -> Dict[str, Any]:
+    try:
+        account = await _get_social_account(user_id, platform_name)
+        if not account:
+            raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
+
+        publish_payload = PublishRequest(
+            user_id=user_id,
+            title=final_title,
+            description=final_description,
+            text=final_description,
+            caption=final_description,
+            video_url=media_url,
+        )
+        platform_result = await publish_post(account, publish_payload)
+        external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
+        await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
+        return {
+            "success": True,
+            "result": platform_result,
+        }
+    except Exception as exc:
+        err_msg = str(exc)
+        await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg, priority=publish_priority)
+        return {
+            "success": False,
+            "error": err_msg,
+        }
+
+
 @app.post("/api/reels/{reel_id}/share", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
@@ -8199,76 +8251,19 @@ async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: Annotated
     overall_success = True
     for platform_name in selected_platforms:
         if is_scheduled:
-            publish_job_id = await _insert_publish_job(
-                user_id=user_id,
-                platform=platform_name,
-                external_id="scheduled",
-                status="queued",
-                priority=publish_priority,
-                scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
-                timezone=payload.timezone or "UTC",
-                payload={
-                    "source_type": "reel",
-                    "source_id": reel_id,
-                    "title": final_title,
-                    "description": final_description,
-                    "media_url": media_url,
-                },
+            results[platform_name] = await _schedule_share_publish_job(
+                user_id, platform_name, "reel", reel_id, publish_priority, scheduled_for, payload.timezone, final_title, final_description, media_url,
             )
-            results[platform_name] = {
-                "success": True,
-                "scheduled": True,
-                "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
-                "publish_job_id": publish_job_id,
-            }
             continue
 
-        try:
-            account = await _get_social_account(user_id, platform_name)
-            if not account:
-                raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
-
-            publish_payload = PublishRequest(
-                user_id=user_id,
-                title=final_title,
-                description=final_description,
-                text=final_description,
-                caption=final_description,
-                video_url=media_url,
-            )
-            platform_result = await publish_post(account, publish_payload)
-            external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
-            results[platform_name] = {
-                "success": True,
-                "result": platform_result,
-            }
-        except Exception as exc:
+        result = await _publish_reel_now(user_id, platform_name, publish_priority, final_title, final_description, media_url)
+        results[platform_name] = result
+        if not result["success"]:
             overall_success = False
-            err_msg = str(exc)
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg, priority=publish_priority)
-            results[platform_name] = {
-                "success": False,
-                "error": err_msg,
-            }
 
     # Debit credits after publications (best-effort)
-    if is_supabase_configured() and not is_scheduled:
-        platform_count_done = sum(1 for v in results.values() if v.get("success"))
-        if platform_count_done > 0:
-            _pub_done_cost = calculate_credits_for_operation(
-                estimate_publication_cost_usd(platform_count=platform_count_done, video_size_gb=0.5)
-            )
-            _pub_done_credits = _pub_done_cost["final_credits"]
-            await supabase_deduct_user_credits(user_id, _pub_done_credits)
-            await supabase_insert_user_data_history(
-                user_id=user_id,
-                credit=_pub_done_credits,
-                storage=0.0,
-                operation="output",
-                operation_type="publication",
-                operation_id=reel_id,
-            )
+    if not is_scheduled:
+        await _debit_publish_credits_after_share(user_id, reel_id, results)
 
     return {
         "success": overall_success,
