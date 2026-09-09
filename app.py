@@ -6818,6 +6818,46 @@ async def thumbnail_upload(
     return {"session_id": session_id}
 
 
+async def _resolve_existing_thumbnail_session(session_id: str):
+    session = thumbnail_sessions[session_id]
+
+    # Wait for background Whisper to complete
+    transcript_event = session.get("transcript_event")
+    if transcript_event:
+        print("⏳ [Thumbnail] Waiting for background Whisper to finish...")
+        await transcript_event.wait()
+
+    if session.get("transcript_error"):
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {session['transcript_error']}")
+
+    video_path = session["video_path"]
+    if not video_path or not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Video file not found in session")
+
+    pre_transcript = session["transcript"] if session.get("transcript_ready") else None
+    return video_path, pre_transcript
+
+
+async def _create_thumbnail_session_from_input(url: Optional[str], file: Optional[UploadFile]):
+    # No pre-existing session — need file or URL
+    if not url and not file:
+        raise HTTPException(status_code=400, detail="Must provide URL, File, or session_id")
+
+    session_id = str(uuid.uuid4())
+
+    if url:
+        from main import download_youtube_video
+        video_path, _ = download_youtube_video(url, UPLOAD_DIR)
+    else:
+        safe_thumb_name = _sanitize_input_filename(file.filename) or _DEFAULT_UPLOAD_FILENAME
+        video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
+        async with aiofiles.open(video_path, "wb") as buffer:
+            content = await file.read()
+            await buffer.write(content)
+
+    return session_id, video_path
+
+
 @app.post("/api/thumbnail/analyze", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_analyze(
     request: Request,
@@ -6837,39 +6877,9 @@ async def thumbnail_analyze(
 
     # Check for pre-existing session with background Whisper
     if session_id and session_id in thumbnail_sessions:
-        session = thumbnail_sessions[session_id]
-
-        # Wait for background Whisper to complete
-        transcript_event = session.get("transcript_event")
-        if transcript_event:
-            print("⏳ [Thumbnail] Waiting for background Whisper to finish...")
-            await transcript_event.wait()
-
-        if session.get("transcript_error"):
-            raise HTTPException(status_code=500, detail=f"Transcription failed: {session['transcript_error']}")
-
-        video_path = session["video_path"]
-        if not video_path or not os.path.exists(video_path):
-            raise HTTPException(status_code=404, detail="Video file not found in session")
-
-        if session.get("transcript_ready"):
-            pre_transcript = session["transcript"]
+        video_path, pre_transcript = await _resolve_existing_thumbnail_session(session_id)
     else:
-        # No pre-existing session — need file or URL
-        if not url and not file:
-            raise HTTPException(status_code=400, detail="Must provide URL, File, or session_id")
-
-        session_id = str(uuid.uuid4())
-
-        if url:
-            from main import download_youtube_video
-            video_path, _ = download_youtube_video(url, UPLOAD_DIR)
-        else:
-            safe_thumb_name = _sanitize_input_filename(file.filename) or _DEFAULT_UPLOAD_FILENAME
-            video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
-            async with aiofiles.open(video_path, "wb") as buffer:
-                content = await file.read()
-                await buffer.write(content)
+        session_id, video_path = await _create_thumbnail_session_from_input(url, file)
 
     try:
         # Run analysis in thread pool (skips Whisper if pre_transcript is available)
