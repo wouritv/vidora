@@ -5406,57 +5406,37 @@ async def generate_effects_config(
         raise _generic_error("Effects Generation Error", e)
 
 
-@app.post("/api/subtitle", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
-async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
-    await _require_job_ownership(req.job_id, user_id)
-    subtitle_required_credits = 0.0
-    await _assert_user_has_required_credits(user_id, subtitle_required_credits)
-
-    # Reload job data from disk just in case metadata was updated.
-    # The in-memory job may be gone on the Reels page; metadata on disk is enough.
-    job = jobs.get(req.job_id)
-
-    # We need to access metadata.json to get the transcript
-    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
-    if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
-
-    transcript = data.get('transcript')
-    if not transcript:
-        raise HTTPException(status_code=400, detail="Transcript not found in metadata. Please process a new video.")
-
-    clips = data.get('shorts', [])
-    if req.clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
-
-    clip_data = clips[req.clip_index]
+async def _resolve_subtitle_source_video_history(job_id: str, clip_index: int, user_id: str, clip_data: Dict[str, Any]) -> str:
     source_video_url_before_edit = str(clip_data.get("video_url") or "")
     source_video_url_for_history = source_video_url_before_edit
     if not clip_data.get("original_video_url"):
         clip_data["original_video_url"] = source_video_url_before_edit
 
-    if is_supabase_configured():
-        try:
-            caption_row = await supabase_get_caption_by_job_clip(req.job_id, req.clip_index, user_id)
-            source_video_url_for_history = (
-                _caption_media_url_from_s3_key((caption_row or {}).get("caption_s3_key") or "")
-                or str((caption_row or {}).get("caption_url") or "")
-                or source_video_url_for_history
-            )
-        except Exception:
-            pass
-        try:
-            reel_row = await supabase_get_reel_by_job_clip(req.job_id, req.clip_index, user_id=user_id)
-            source_video_url_for_history = (
-                _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
-                or str((reel_row or {}).get("reel_url") or "")
-                or source_video_url_for_history
-            )
-        except Exception:
-            pass
+    if not is_supabase_configured():
+        return source_video_url_for_history
 
-    # Video Path
+    try:
+        caption_row = await supabase_get_caption_by_job_clip(job_id, clip_index, user_id)
+        source_video_url_for_history = (
+            _caption_media_url_from_s3_key((caption_row or {}).get("caption_s3_key") or "")
+            or str((caption_row or {}).get("caption_url") or "")
+            or source_video_url_for_history
+        )
+    except Exception:
+        pass
+    try:
+        reel_row = await supabase_get_reel_by_job_clip(job_id, clip_index, user_id=user_id)
+        source_video_url_for_history = (
+            _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
+            or str((reel_row or {}).get("reel_url") or "")
+            or source_video_url_for_history
+        )
+    except Exception:
+        pass
+    return source_video_url_for_history
+
+
+def _resolve_add_subtitles_input_path(req: SubtitleRequest, output_dir: str, clip_data: Dict[str, Any], metadata_path: str):
     if req.input_filename:
         filename = _sanitize_input_filename(req.input_filename)
         if not filename:
@@ -5465,8 +5445,8 @@ async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(ge
         # Fallback to standard naming
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, '')
-             filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
+            base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, '')
+            filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     input_path = os.path.join(output_dir, filename)
     if not os.path.exists(input_path) and req.input_url:
@@ -5477,117 +5457,104 @@ async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(ge
         # Just fail if not found.
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
-    # Define outputs
-    srt_filename = f"subs_{req.clip_index}_{int(time.time())}.srt"
-    srt_path = os.path.join(output_dir, srt_filename)
+    return input_path, filename
 
-    # Output video
-    # We create a new file "subtitled_..."
-    output_filename = f"subtitled_{filename}"
-    output_path = os.path.join(output_dir, output_filename)
 
-    try:
-        # 1. Generate SRT
-        # Check if this is a dubbed video - if so, transcribe it fresh
-        is_dubbed = filename.startswith("translated_")
+async def _generate_subtitle_srt(input_path: str, filename: str, transcript: Dict[str, Any], clip_data: Dict[str, Any], srt_path: str, words_per_line: int) -> bool:
+    # Check if this is a dubbed video - if so, transcribe it fresh
+    is_dubbed = filename.startswith("translated_")
+    if is_dubbed:
+        print("🎙️ Dubbed video detected, transcribing audio for subtitles...")
 
-        words_per_line = max(2, min(8, int(req.words_per_line or 4)))
-
-        if is_dubbed:
-            print("🎙️ Dubbed video detected, transcribing audio for subtitles...")
-            def run_transcribe_srt():
-                return generate_srt_from_video(input_path, srt_path, max_words_per_line=words_per_line)
-
-            loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(None, run_transcribe_srt)
-        else:
-            success = generate_srt(
-                transcript,
-                clip_data['start'],
-                clip_data['end'],
-                srt_path,
-                max_words_per_line=words_per_line,
-            )
-
-        if not success:
-             raise HTTPException(status_code=400, detail="No words found for this clip range.")
-
-        # 2. Burn Subtitles
-        # Run in thread pool
-        def run_burn():
-             style_options = SubtitleStyleOptions(
-                 font_name=req.font_name,
-                 font_color=req.font_color,
-                 border_color=req.border_color,
-                 border_width=req.border_width,
-                 bg_color=req.bg_color,
-                 bg_opacity=req.bg_opacity,
-                 text_shadow_color=req.text_shadow_color,
-                 shadow_blur=req.shadow_blur,
-                 shadow_offset_x=req.shadow_offset_x,
-                 shadow_offset_y=req.shadow_offset_y,
-                 bold=req.bold,
-                 italic=req.italic,
-                 text_case=req.text_case,
-             )
-             burn_subtitles(
-                 input_path,
-                 srt_path,
-                 output_path,
-                 alignment=req.position,
-                 fontsize=req.font_size,
-                 style_options=style_options,
-             )
+        def run_transcribe_srt():
+            return generate_srt_from_video(input_path, srt_path, max_words_per_line=words_per_line)
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, run_burn)
+        return await loop.run_in_executor(None, run_transcribe_srt)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise _generic_error("Subtitle Error", e)
+    return generate_srt(
+        transcript,
+        clip_data['start'],
+        clip_data['end'],
+        srt_path,
+        max_words_per_line=words_per_line,
+    )
 
-    local_subtitle_url = f"/videos/{req.job_id}/{output_filename}"
+
+def _burn_subtitles_for_request(req: SubtitleRequest, input_path: str, srt_path: str, output_path: str) -> None:
+    style_options = SubtitleStyleOptions(
+        font_name=req.font_name,
+        font_color=req.font_color,
+        border_color=req.border_color,
+        border_width=req.border_width,
+        bg_color=req.bg_color,
+        bg_opacity=req.bg_opacity,
+        text_shadow_color=req.text_shadow_color,
+        shadow_blur=req.shadow_blur,
+        shadow_offset_x=req.shadow_offset_x,
+        shadow_offset_y=req.shadow_offset_y,
+        bold=req.bold,
+        italic=req.italic,
+        text_case=req.text_case,
+    )
+    burn_subtitles(
+        input_path,
+        srt_path,
+        output_path,
+        alignment=req.position,
+        fontsize=req.font_size,
+        style_options=style_options,
+    )
+
+
+def _upload_subtitled_video(output_path: str, user_id: str, job_id: str, output_filename: str, local_subtitle_url: str):
     persisted_subtitle_url = local_subtitle_url
     subtitle_s3_key = ""
     bucket = os.environ.get("AWS_S3_BUCKET", "")
     if bucket and os.path.exists(output_path):
-        subtitle_s3_key = f"captions/{user_id}/{req.job_id}/{output_filename}"
+        subtitle_s3_key = f"captions/{user_id}/{job_id}/{output_filename}"
         if upload_file_to_s3(output_path, bucket, subtitle_s3_key):
             persisted_subtitle_url = _caption_media_url_from_s3_key(subtitle_s3_key) or local_subtitle_url
+    return persisted_subtitle_url, subtitle_s3_key
 
-    if is_supabase_configured() and persisted_subtitle_url:
-        try:
-            await supabase_update_reel_media_by_job_clip(
-                job_id=req.job_id,
-                clip_index=req.clip_index,
-                reel_url=persisted_subtitle_url,
-                reel_s3_key=subtitle_s3_key or None,
-                user_id=user_id,
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to sync reel URL after subtitle edit: {e}")
 
-    # 3. Update Result and Metadata
+async def _sync_reel_after_subtitle_edit(job_id: str, clip_index: int, user_id: str, persisted_subtitle_url: str, subtitle_s3_key: str) -> None:
+    if not (is_supabase_configured() and persisted_subtitle_url):
+        return
+    try:
+        await supabase_update_reel_media_by_job_clip(
+            job_id=job_id,
+            clip_index=clip_index,
+            reel_url=persisted_subtitle_url,
+            reel_s3_key=subtitle_s3_key or None,
+            user_id=user_id,
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to sync reel URL after subtitle edit: {e}")
+
+
+def _update_clip_after_subtitle_edit(job: Optional[Dict[str, Any]], clip_index: int, clips: List[Any], data: Dict[str, Any], metadata_path: str, persisted_subtitle_url: str) -> None:
     # Update InMemory Jobs (only if the job is still alive in memory)
-    if job and req.clip_index < len(job.get('result', {}).get('clips', [])):
-         job['result']['clips'][req.clip_index]['video_url'] = persisted_subtitle_url
+    if job and clip_index < len(job.get('result', {}).get('clips', [])):
+        job['result']['clips'][clip_index]['video_url'] = persisted_subtitle_url
 
     # Update Metadata on Disk (Persistence)
     try:
-        if req.clip_index < len(clips):
-            clips[req.clip_index]['video_url'] = persisted_subtitle_url
+        if clip_index < len(clips):
+            clips[clip_index]['video_url'] = persisted_subtitle_url
             # Update the main data structure
             data['shorts'] = clips
 
             # Write back
             _persist_metadata_json(metadata_path, data)
-            print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
+            print(f"✅ Metadata updated with subtitled video for clip {clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
         # Non-critical, but good for persistence
 
-    style_config = {
+
+def _build_subtitle_style_config(req: SubtitleRequest) -> Dict[str, Any]:
+    return {
         "position": req.position,
         "position_x": req.position_x,
         "position_y": req.position_y,
@@ -5610,14 +5577,11 @@ async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(ge
         "animation": req.animation,
     }
 
-    version_number = _append_style_version_to_metadata(
-        data,
-        req.clip_index,
-        source_video_url_for_history,
-        persisted_subtitle_url,
-        style_config,
-    )
-    _persist_metadata_json(metadata_path, data)
+
+async def _debit_subtitle_credits_and_persist_version(
+    user_id: str, req: SubtitleRequest, subtitle_required_credits: float, version_number: int,
+    source_video_url_for_history: str, persisted_subtitle_url: str, style_config: Dict[str, Any],
+) -> None:
     subtitle_style_billing_details = _build_billing_details(
         "sous_titre",
         None,
@@ -5654,6 +5618,81 @@ async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(ge
             )
         except Exception as e:
             print(f"⚠️ Failed to persist style edit version: {e}")
+
+
+@app.post("/api/subtitle", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
+async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
+    await _require_job_ownership(req.job_id, user_id)
+    subtitle_required_credits = 0.0
+    await _assert_user_has_required_credits(user_id, subtitle_required_credits)
+
+    # Reload job data from disk just in case metadata was updated.
+    # The in-memory job may be gone on the Reels page; metadata on disk is enough.
+    job = jobs.get(req.job_id)
+
+    # We need to access metadata.json to get the transcript
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
+    if not metadata_path or not data:
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
+
+    transcript = data.get('transcript')
+    if not transcript:
+        raise HTTPException(status_code=400, detail="Transcript not found in metadata. Please process a new video.")
+
+    clips = data.get('shorts', [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
+
+    clip_data = clips[req.clip_index]
+    source_video_url_for_history = await _resolve_subtitle_source_video_history(req.job_id, req.clip_index, user_id, clip_data)
+
+    input_path, filename = _resolve_add_subtitles_input_path(req, output_dir, clip_data, metadata_path)
+
+    # Define outputs
+    srt_filename = f"subs_{req.clip_index}_{int(time.time())}.srt"
+    srt_path = os.path.join(output_dir, srt_filename)
+
+    # Output video
+    # We create a new file "subtitled_..."
+    output_filename = f"subtitled_{filename}"
+    output_path = os.path.join(output_dir, output_filename)
+
+    try:
+        words_per_line = max(2, min(8, int(req.words_per_line or 4)))
+        success = await _generate_subtitle_srt(input_path, filename, transcript, clip_data, srt_path, words_per_line)
+        if not success:
+            raise HTTPException(status_code=400, detail="No words found for this clip range.")
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _burn_subtitles_for_request, req, input_path, srt_path, output_path)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _generic_error("Subtitle Error", e)
+
+    local_subtitle_url = f"/videos/{req.job_id}/{output_filename}"
+    persisted_subtitle_url, subtitle_s3_key = _upload_subtitled_video(output_path, user_id, req.job_id, output_filename, local_subtitle_url)
+
+    await _sync_reel_after_subtitle_edit(req.job_id, req.clip_index, user_id, persisted_subtitle_url, subtitle_s3_key)
+
+    _update_clip_after_subtitle_edit(job, req.clip_index, clips, data, metadata_path, persisted_subtitle_url)
+
+    style_config = _build_subtitle_style_config(req)
+
+    version_number = _append_style_version_to_metadata(
+        data,
+        req.clip_index,
+        source_video_url_for_history,
+        persisted_subtitle_url,
+        style_config,
+    )
+    _persist_metadata_json(metadata_path, data)
+
+    await _debit_subtitle_credits_and_persist_version(
+        user_id, req, subtitle_required_credits, version_number, source_video_url_for_history, persisted_subtitle_url, style_config,
+    )
 
     return {
         "success": True,
