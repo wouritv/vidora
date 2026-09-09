@@ -106,12 +106,86 @@ def _import_app_with_stubs(monkeypatch):
     pytest.importorskip("fastapi")
     monkeypatch.setenv("SECRET_KEY", "unit-test-secret")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "unit-test-supabase-jwt-secret")
     _install_supabase_stubs(monkeypatch)
     _install_optional_dependency_stubs(monkeypatch)
 
     if "app" in sys.modules:
         return importlib.reload(sys.modules["app"])
     return importlib.import_module("app")
+
+
+def test_verify_supabase_jwt_accepts_valid_hs256_token(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    import jwt as pyjwt
+
+    token = pyjwt.encode(
+        {"sub": "user-hs256", "aud": "authenticated", "exp": 9999999999},
+        "unit-test-supabase-jwt-secret",
+        algorithm="HS256",
+    )
+
+    assert app._verify_supabase_jwt(token) == "user-hs256"
+
+
+def test_verify_supabase_jwt_rejects_bad_hs256_signature(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    import jwt as pyjwt
+
+    token = pyjwt.encode(
+        {"sub": "user-hs256", "aud": "authenticated", "exp": 9999999999},
+        "wrong-secret",
+        algorithm="HS256",
+    )
+
+    with pytest.raises(app.HTTPException) as exc_info:
+        app._verify_supabase_jwt(token)
+    assert exc_info.value.status_code == 401
+
+
+def test_verify_supabase_jwt_accepts_valid_es256_token_via_jwks(monkeypatch):
+    # Security regression test: newer Supabase projects sign sessions with an
+    # asymmetric ES256 key (verified via the project's JWKS endpoint) instead
+    # of the legacy HS256 shared secret. Before this fix, _verify_supabase_jwt
+    # only understood HS256, so every request against such a project failed
+    # with "Invalid or expired session token" regardless of the secret's
+    # value. This exercises the ES256/JWKS branch with a real EC keypair,
+    # stubbing out only the network call to Supabase's JWKS endpoint.
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    app = _import_app_with_stubs(monkeypatch)
+    import jwt as pyjwt
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    token = pyjwt.encode(
+        {"sub": "user-es256", "aud": "authenticated", "exp": 9999999999},
+        private_key,
+        algorithm="ES256",
+        headers={"kid": "test-key-1"},
+    )
+
+    class _FakeSigningKey:
+        def __init__(self, key):
+            self.key = key
+
+    class _FakeJwksClient:
+        def get_signing_key_from_jwt(self, tok):
+            return _FakeSigningKey(private_key.public_key())
+
+    monkeypatch.setattr(app, "_get_supabase_jwks_client", lambda: _FakeJwksClient())
+
+    assert app._verify_supabase_jwt(token) == "user-es256"
+
+
+def test_verify_supabase_jwt_rejects_alg_none_downgrade(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    import jwt as pyjwt
+
+    token = pyjwt.encode({"sub": "user-x", "aud": "authenticated"}, key=None, algorithm="none")
+
+    with pytest.raises(app.HTTPException) as exc_info:
+        app._verify_supabase_jwt(token)
+    assert exc_info.value.status_code == 401
 
 
 def test_parse_iso_datetime_accepts_zulu_and_invalid(monkeypatch):

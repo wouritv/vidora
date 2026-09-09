@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./AuthContext";
 import { getApiUrl } from "../config";
+import { getAuthHeaders } from "../lib/apiAuth";
 
 const UserCreditsContext = createContext(null);
 
@@ -23,7 +24,7 @@ export function UserCreditsProvider({ children }) {
         setError("");
         try {
             const res = await fetch(getApiUrl("/api/user/credits"), {
-                headers: { "X-User-Id": user.id },
+                headers: getAuthHeaders(user.id),
             });
             if (!res.ok) {
                 const text = await res.text();

@@ -6,6 +6,22 @@
   <link rel="icon" type="image/png" href="/icone.png" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
+  <!--
+    Security: Content-Security-Policy (audit finding P2-3), scoped to what
+    this SPA actually needs:
+    - script-src has no remote origins and no 'unsafe-inline'/'unsafe-eval';
+      'wasm-unsafe-eval' is required by Remotion's in-browser web renderer.
+    - connect-src covers same-origin API calls (the backend is reverse-proxied
+      under this origin in production) plus Supabase (REST + Realtime). If
+      VITE_API_URL is ever configured to point at a different origin, add
+      that origin here too.
+    - img-src/media-src allow any https origin because reel/caption media
+      URLs are returned dynamically by the backend (S3/CDN) and are not a
+      fixed, known-ahead-of-time domain.
+    - frame-src allows YouTube only, for the embedded preview player.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' blob: https://*.supabase.co wss://*.supabase.co; worker-src 'self' blob:; frame-src https://www.youtube.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self';" />
+
   <!-- Primary SEO Meta Tags -->
   <title>Vireel – Créez des Reels avec l’IA</title>
     <meta name="description" content="Transformez vos vidéos en Reels, sous-titres et highlights grâce à l’IA. Automatisez le montage et créez du contenu prêt à publier avec Vireel." />

@@ -9,6 +9,11 @@ services:
       - /app/__pycache__
       - ./output:/app/output
     restart: unless-stopped
+    # Security: cap resource usage so a single abusive/misbehaving job
+    # (ffmpeg, whisper, YOLO) can't exhaust host memory/CPU and starve the
+    # other services on the same VPS (audit finding H14).
+    mem_limit: ${BACKEND_MEM_LIMIT:-4g}
+    cpus: ${BACKEND_CPU_LIMIT:-4}
 
   frontend:
     build:
@@ -28,6 +33,8 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    mem_limit: ${FRONTEND_MEM_LIMIT:-1g}
+    cpus: ${FRONTEND_CPU_LIMIT:-1}
 
   renderer:
     build:
@@ -35,13 +42,20 @@ services:
       dockerfile: render-service/Dockerfile
     container_name: vireel-renderer
     ports:
-      - "4002:3100"
+      # Bound to loopback only: the render-service has no per-user auth model
+      # of its own and is meant to be reachable only by the backend over the
+      # internal Docker network. This port mapping exists for local
+      # debugging only (curl from the host), never for external exposure.
+      - "127.0.0.1:4002:3100"
     volumes:
       - ./output:/output
     environment:
       - REMOTION_BUNDLE_PATH=/app/remotion
       - OUTPUT_DIR=/output
       - PORT=3100
+      - RENDER_SERVICE_API_KEY=${RENDER_SERVICE_API_KEY:?RENDER_SERVICE_API_KEY must be set}
     restart: unless-stopped
     depends_on:
       - backend
+    mem_limit: ${RENDERER_MEM_LIMIT:-4g}
+    cpus: ${RENDERER_CPU_LIMIT:-4}

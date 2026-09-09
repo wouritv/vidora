@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { X, Loader2, Calendar, Clock, CheckCircle, AlertCircle, Video, Instagram, Youtube, ChevronLeft, ChevronRight, Globe, ExternalLink } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { DAYS, MONTHS, TIMEZONES, getDayLabel, formatDate, detectTimezone } from '../lib/formatting';
+import { getAuthHeaders } from '../lib/apiAuth';
 
 export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, userId }) {
     const [time, setTime] = useState('12:00');
@@ -74,7 +75,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, userI
             try {
                 const res = await fetch(getApiUrl('/api/social/post'), {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders(userId) },
                     body: JSON.stringify(payload)
                 });
 

@@ -8,6 +8,7 @@ import { useTheme } from '../state/ThemeContext';
 import { useUserCredits } from '../state/UserCreditsContext';
 import ServiceUsage from "../components/ServiceUsage.jsx";
 import { getApiUrl } from '../config';
+import { getAuthHeaders } from '../lib/apiAuth';
 import { useTranslation } from '../state/LanguageContext';
 
 const SOCIAL_NETWORKS = [
@@ -133,7 +134,9 @@ export default function SettingsPage() {
     if (!user?.id) return;
     try {
       setSocialError('');
-      const response = await fetch(getApiUrl(`/api/social/accounts?user_id=${encodeURIComponent(user.id)}`));
+      const response = await fetch(getApiUrl(`/api/social/accounts?user_id=${encodeURIComponent(user.id)}`), {
+        headers: getAuthHeaders(user.id),
+      });
       if (!response.ok) {
         const detail = await response.text();
         throw new Error(detail || t("settings.socialError","Impossible de charger les comptes sociaux."));
@@ -169,7 +172,7 @@ export default function SettingsPage() {
     try {
       const res = await fetch(
         getApiUrl(`/api/user/history?page=${page}&page_size=${HISTORY_PAGE_SIZE}`),
-        { headers: { 'X-User-Id': user.id } }
+        { headers: getAuthHeaders(user.id) }
       );
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
@@ -196,7 +199,7 @@ export default function SettingsPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': user.id,
+          ...getAuthHeaders(user.id),
           ...(user?.email ? { 'X-User-Email': user.email } : {}),
         },
         body: JSON.stringify({ amount_usd: buyAmount }),
@@ -221,8 +224,8 @@ export default function SettingsPage() {
     setSubError('');
     try {
       const [currentRes, historyRes, plansRes] = await Promise.all([
-        fetch(getApiUrl('/api/souscription'), { headers: { 'X-User-Id': user.id } }),
-        fetch(getApiUrl('/api/souscription/history'), { headers: { 'X-User-Id': user.id } }),
+        fetch(getApiUrl('/api/souscription'), { headers: getAuthHeaders(user.id) }),
+        fetch(getApiUrl('/api/souscription/history'), { headers: getAuthHeaders(user.id) }),
         fetch(getApiUrl('/api/abonnements')),
       ]);
 
@@ -269,7 +272,7 @@ export default function SettingsPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': user.id,
+          ...getAuthHeaders(user.id),
           ...(user?.email ? { 'X-User-Email': user.email } : {}),
         },
         body: body ? JSON.stringify(body) : JSON.stringify({}),
@@ -342,7 +345,7 @@ export default function SettingsPage() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-User-Id': user.id,
+        ...getAuthHeaders(user.id),
       },
       body: JSON.stringify({
         selection_token: selectionToken,
@@ -432,6 +435,7 @@ export default function SettingsPage() {
     try {
       const response = await fetch(getApiUrl(`/api/social/accounts/${platform}?user_id=${encodeURIComponent(user.id)}`), {
         method: 'DELETE',
+        headers: getAuthHeaders(user.id),
       });
       if (!response.ok) {
         const detail = await response.text();

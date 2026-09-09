@@ -5,6 +5,10 @@ import json
 EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
 EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
 EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
+# Security: hard ceilings on ffmpeg/ffprobe subprocess calls so a
+# pathological input can't hang a worker indefinitely (audit finding H13).
+FFPROBE_TIMEOUT_SECONDS = int(os.environ.get("FFPROBE_TIMEOUT_SECONDS", "60"))
+FFMPEG_STEP_TIMEOUT_SECONDS = int(os.environ.get("FFMPEG_STEP_TIMEOUT_SECONDS", str(2 * 3600)))
 import re
 import subprocess
 import time
@@ -329,7 +333,7 @@ class VideoEditor:
         
         if not filter_data or "filter_string" not in filter_data:
             print("⚠️ No filter string found. Copying original.")
-            subprocess.run(['ffmpeg', '-y', '-i', input_path, '-c', 'copy', output_path])
+            subprocess.run(['ffmpeg', '-y', '-i', input_path, '-c', 'copy', output_path], timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
             return
 
         filter_string = filter_data["filter_string"]
@@ -337,7 +341,9 @@ class VideoEditor:
         # Get input dimensions so we can enforce geometry (avoid broken aspect ratios).
         try:
             probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', input_path]
-            res_out = subprocess.check_output(probe_cmd, env={**os.environ, "LANG": "C.UTF-8"}).decode().strip()
+            res_out = subprocess.check_output(
+                probe_cmd, env={**os.environ, "LANG": "C.UTF-8"}, timeout=FFPROBE_TIMEOUT_SECONDS
+            ).decode().strip()
             w, h = map(int, res_out.split('x'))
         except Exception as e:
             print(f"⚠️ Could not probe resolution: {e}")
@@ -396,7 +402,13 @@ class VideoEditor:
                 else:
                     cmd_bytes.append(arg)
             
-            result = subprocess.run(cmd_bytes, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = subprocess.run(
+                cmd_bytes, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            print(f"❌ FFmpeg timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s")
+            raise e
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg failed: {e}")
             try:

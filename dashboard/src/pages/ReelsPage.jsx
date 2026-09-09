@@ -10,6 +10,7 @@ import MobileFilterDropdown from "../components/MobileFilterDropdown";
 import { getConnectedPlatforms } from "../lib/platforms";
 import { toResultCardClip } from "../lib/clips";
 import { statusLabel, statusClass } from "../lib/status";
+import { getAuthHeaders } from "../lib/apiAuth";
 import { useTranslation } from "../state/LanguageContext";
 
 export default function ReelsPage({ projectId = "" }) {
@@ -93,7 +94,7 @@ export default function ReelsPage({ projectId = "" }) {
                 if (projectId) {
                     response = await fetch(getApiUrl(`/api/projects/${projectId}/reels`), {
                         headers: {
-                            "X-User-Id": user.id,
+                            ...getAuthHeaders(user.id),
                         },
                     });
                 } else {
@@ -105,7 +106,7 @@ export default function ReelsPage({ projectId = "" }) {
                     if (status) params.set("status", status);
                     response = await fetch(getApiUrl(`/api/reels?${params.toString()}`), {
                         headers: {
-                            "X-User-Id": user.id,
+                            ...getAuthHeaders(user.id),
                         },
                     });
                 }
@@ -149,7 +150,7 @@ export default function ReelsPage({ projectId = "" }) {
             try {
                 const response = await fetch(getApiUrl(`/api/projects/${projectId}`), {
                     headers: {
-                        "X-User-Id": user.id,
+                        ...getAuthHeaders(user.id),
                     },
                 });
                 const data = await response.json();
@@ -176,7 +177,7 @@ export default function ReelsPage({ projectId = "" }) {
             let response;
             if (projectId) {
                 response = await fetch(getApiUrl(`/api/projects/${projectId}/reels`), {
-                    headers: { "X-User-Id": user.id },
+                    headers: { ...getAuthHeaders(user.id) },
                 });
             } else {
                 const params = new URLSearchParams({
@@ -186,7 +187,7 @@ export default function ReelsPage({ projectId = "" }) {
                 if (query) params.set("q", query);
                 if (status) params.set("status", status);
                 response = await fetch(getApiUrl(`/api/reels?${params.toString()}`), {
-                    headers: { "X-User-Id": user.id },
+                    headers: { ...getAuthHeaders(user.id) },
                 });
             }
             const data = await response.json();
@@ -215,7 +216,7 @@ export default function ReelsPage({ projectId = "" }) {
 
     const fetchFreshMediaUrl = async (reelId) => {
         const response = await fetch(getApiUrl(`/api/reels/${reelId}/media-url`), {
-            headers: { "X-User-Id": user.id },
+            headers: { ...getAuthHeaders(user.id) },
         });
         if (!response.ok) return null;
         const data = await response.json();
@@ -231,7 +232,7 @@ export default function ReelsPage({ projectId = "" }) {
             const response = await fetch(getApiUrl(`/api/reels/${reelId}`), {
                 method: "DELETE",
                 headers: {
-                    "X-User-Id": user.id,
+                    ...getAuthHeaders(user.id),
                 },
             });
             if (!response.ok) {
@@ -321,7 +322,7 @@ export default function ReelsPage({ projectId = "" }) {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "X-User-Id": user.id,
+                    ...getAuthHeaders(user.id),
                 },
                 body: JSON.stringify(payload),
             });

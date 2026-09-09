@@ -33,6 +33,10 @@ warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf'
 # Load environment variables
 load_dotenv()
 
+# Security: hard ceilings on ffmpeg/ffprobe subprocess calls so a
+# pathological input can't hang a worker indefinitely (audit finding H13).
+FFMPEG_STEP_TIMEOUT_SECONDS = int(os.environ.get("FFMPEG_STEP_TIMEOUT_SECONDS", str(2 * 3600)))
+
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
 MIN_CLIP_DURATION_SECONDS = 30
@@ -540,32 +544,44 @@ def _extract_audio_rms(video_path, target_fps):
 
     Retourne un np.array, ou None si pas d'audio exploitable.
     """
-    wav_path = "/tmp/_scene_audio_tmp.wav"
+    # Security/correctness: use a unique path per call rather than a fixed
+    # shared /tmp filename -- concurrent jobs calling this at the same time
+    # would otherwise race on the same file (one job's ffmpeg write
+    # clobbering another job's still-unread WAV) (audit finding P2-8).
+    fd, wav_path = tempfile.mkstemp(prefix="_scene_audio_", suffix=".wav")
+    os.close(fd)
     try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", video_path,
-                "-vn", "-ac", "1", "-ar", "16000",
-                "-f", "wav", wav_path,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-ac", "1", "-ar", "16000",
+                    "-f", "wav", wav_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            return None
 
-    try:
-        with wave.open(wav_path, "rb") as wf:
-            sr = wf.getframerate()
-            n_samples = wf.getnframes()
-            raw = wf.readframes(n_samples)
-            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-    except Exception:
-        return None
+        try:
+            with wave.open(wav_path, "rb") as wf:
+                sr = wf.getframerate()
+                n_samples = wf.getnframes()
+                raw = wf.readframes(n_samples)
+                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+        except Exception:
+            return None
 
-    if samples.size == 0:
-        return None
+        if samples.size == 0:
+            return None
+    finally:
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
 
     samples_per_video_frame = max(1, int(sr / target_fps))
     rms_per_frame = []
@@ -1283,7 +1299,14 @@ def _process_frames_to_temp_video(
 
     ffmpeg_process.stdin.close()
     stderr_output = ffmpeg_process.stderr.read().decode()
-    ffmpeg_process.wait()
+    try:
+        ffmpeg_process.wait(timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Note: the outer job watchdog (REEL_JOB_MAX_PROCESSING_SECONDS in
+        # app.py) also bounds this whole pipeline's total runtime; this is
+        # a local safety net for the final flush specifically hanging.
+        ffmpeg_process.kill()
+        ffmpeg_process.wait()
     cap.release()
     return ffmpeg_process.returncode, stderr_output
 
@@ -1291,9 +1314,12 @@ def _process_frames_to_temp_video(
 def _extract_audio_track(input_video, temp_audio_output):
     audio_extract_command = ['ffmpeg', '-y', '-i', input_video, '-vn', '-acodec', 'copy', temp_audio_output]
     try:
-        subprocess.run(audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        subprocess.run(
+            audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+        )
         return True
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print("\n   ❌ Audio extraction failed (maybe no audio?). Proceeding without audio.")
         return False
 
@@ -1308,9 +1334,15 @@ def _merge_video_and_audio(temp_video_output, temp_audio_output, final_output_vi
         merge_command = ['ffmpeg', '-y', '-i', temp_video_output, '-c:v', 'copy', final_output_video]
 
     try:
-        subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        subprocess.run(
+            merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+        )
         print(f"   ✅ Clip saved to {final_output_video}")
         return True
+    except subprocess.TimeoutExpired:
+        print(f"\n   ❌ Final merge timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s.")
+        return False
     except subprocess.CalledProcessError as exc:
         print("\n   ❌ Final merge failed.")
         print("   Stderr:", exc.stderr.decode())
@@ -2020,7 +2052,10 @@ if __name__ == '__main__':
                     '-c:a', 'aac', '-b:a', EXPORT_AUDIO_BITRATE,
                     clip_temp_path
                 ]
-                subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                subprocess.run(
+                    cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+                )
 
                 # Process vertical
                 success = process_video_to_vertical(clip_temp_path, clip_final_path)

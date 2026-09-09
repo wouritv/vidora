@@ -1,5 +1,6 @@
 import os
 import uuid
+import math
 import subprocess
 import threading
 import json
@@ -21,7 +22,7 @@ from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote, urlencode
-from urllib.request import Request as UrlRequest, urlopen
+from urllib.request import Request as UrlRequest, urlopen, HTTPRedirectHandler, build_opener
 from starlette.background import BackgroundTask
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from pydantic import BaseModel
+import jwt as pyjwt
+from jwt import PyJWTError
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
 try:
     import stripe
 except ImportError:  # pragma: no cover - optional at import time
@@ -79,6 +85,7 @@ from supabase_request import (
 	update_souscription_row as supabase_update_souscription_row,
 	list_user_souscriptions as supabase_list_user_souscriptions,
 	update_job_record as supabase_update_job_record,
+	count_active_jobs_for_user as supabase_count_active_jobs_for_user,
   get_latest_job_record_by_project as supabase_get_latest_job_record_by_project,
 	get_transcription_by_job_clip as supabase_get_transcription_by_job_clip,
 	upsert_transcription as supabase_upsert_transcription,
@@ -110,6 +117,24 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+
+def _generic_error(
+    log_message: str,
+    exc: Exception,
+    status_code: int = 500,
+    detail: str = "Une erreur interne est survenue. Veuillez reessayer.",
+) -> HTTPException:
+    """Log the full exception server-side (with traceback) and return an
+    HTTPException carrying only a generic, non-identifying message for the
+    client. Raw exception text can leak internal file paths, library stack
+    fragments, or upstream API error bodies to any caller (audit finding:
+    information disclosure via error messages) -- callers should always
+    `raise _generic_error(...) from exc` instead of `detail=str(exc)`.
+    """
+    logger.exception("%s: %s", log_message, exc)
+    return HTTPException(status_code=status_code, detail=detail)
+
+
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 BREVO_FROM_EMAIL = os.getenv("BREVO_FROM_EMAIL", "noreply@vireel.co")
 BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID = os.getenv("BREVO_PAYMENT_CONFIRMATION_TEMPLATE_ID")
@@ -125,6 +150,12 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+# Security: caps how many non-terminal (created/queued/processing/retry_wait)
+# jobs a single user can have at once, independent of MAX_CONCURRENT_JOBS
+# (which only throttles *execution*, not submission). Without this, one
+# account could flood the queue, local disk, and S3 storage with an
+# unbounded number of simultaneous submissions (see audit finding H7).
+MAX_ACTIVE_JOBS_PER_USER = int(os.environ.get("MAX_ACTIVE_JOBS_PER_USER", "3"))
 QUEUE_WORKER_COUNT = int(os.environ.get("QUEUE_WORKER_COUNT", "1"))
 REEL_JOB_MAX_ATTEMPTS = int(os.environ.get("REEL_JOB_MAX_ATTEMPTS", "2"))
 REEL_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("REEL_JOB_RETRY_DELAY_SECONDS", "15"))
@@ -133,6 +164,18 @@ CAPTION_JOB_RETRY_DELAY_SECONDS = int(os.environ.get("CAPTION_JOB_RETRY_DELAY_SE
 CAPTION_TRANSCRIBE_TIMEOUT_SECONDS = int(os.environ.get("CAPTION_TRANSCRIBE_TIMEOUT_SECONDS", "1800"))
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 REEL_MAX_DURATION_MINUTES = float(os.environ.get("REEL_MAX_DURATION", "180"))
+# Security: hard ceiling on how long the main reel-generation subprocess may
+# run before being killed. Without this, a pathological/adversarial input
+# (a file or filter chain that makes ffmpeg/whisper/detection spin) could
+# hang a worker slot indefinitely, and since MAX_CONCURRENT_JOBS is small,
+# a handful of such jobs can starve the whole queue for every user (see
+# security audit finding H13).
+REEL_JOB_MAX_PROCESSING_SECONDS = int(os.environ.get("REEL_JOB_MAX_PROCESSING_SECONDS", str(4 * 3600)))
+# Hard ceiling for individual ffmpeg/ffprobe subprocess calls elsewhere
+# (thumbnail generation, format probing, single-clip edits) that are
+# expected to be quick relative to the whole job.
+FFPROBE_TIMEOUT_SECONDS = int(os.environ.get("FFPROBE_TIMEOUT_SECONDS", "60"))
+FFMPEG_STEP_TIMEOUT_SECONDS = int(os.environ.get("FFMPEG_STEP_TIMEOUT_SECONDS", str(2 * 3600)))
 REEL_MAX_STORAGE_GB = float(os.environ.get("REEL_MAX_STORAGE", "15"))
 CAPTION_MAX_DURATION_MINUTES = float(os.environ.get("CAPTION_MAX_DURATION", str(REEL_MAX_DURATION_MINUTES)))
 CAPTION_MAX_STORAGE_GB = float(os.environ.get("CAPTION_MAX_STORAGE", str(REEL_MAX_STORAGE_GB)))
@@ -230,6 +273,38 @@ if not SECRET_KEY:
 
 _oauth_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
+# Supabase issues JWTs for authenticated sessions signed either with a legacy
+# shared secret (HS256) or, for newer projects, with an asymmetric signing
+# key (ES256) verified via the project's public JWKS endpoint. Which one
+# applies is a per-project setting (Project Settings -> API -> JWT Settings),
+# so both are supported here based on the `alg` in the token's own header --
+# see _verify_supabase_jwt. SUPABASE_JWT_SECRET is distinct from
+# SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY and only used for HS256.
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+SUPABASE_URL_FOR_JWKS = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+if not SUPABASE_JWT_SECRET and not SUPABASE_URL_FOR_JWKS:
+    raise RuntimeError(
+        "Ni SUPABASE_JWT_SECRET ni SUPABASE_URL ne sont definis -- l'un des deux "
+        "est requis pour verifier les tokens de session Supabase (sans cela, "
+        "aucune requete ne peut etre authentifiee de maniere fiable)."
+    )
+
+_supabase_jwks_client: Optional["pyjwt.PyJWKClient"] = None
+
+
+def _get_supabase_jwks_client() -> "pyjwt.PyJWKClient":
+    global _supabase_jwks_client
+    if _supabase_jwks_client is None:
+        if not SUPABASE_URL_FOR_JWKS:
+            raise RuntimeError(
+                "SUPABASE_URL manquant dans l'environnement -- requis pour verifier "
+                "les tokens de session signes en ES256 via le JWKS du projet Supabase."
+            )
+        _supabase_jwks_client = pyjwt.PyJWKClient(
+            f"{SUPABASE_URL_FOR_JWKS}/auth/v1/.well-known/jwks.json"
+        )
+    return _supabase_jwks_client
+
 router = APIRouter()
 
 
@@ -249,6 +324,19 @@ if not FRONTEND_ORIGIN:
         )
 
 _PAGE_SELECTION_TTL_SECONDS = 600  # 10 minutes pour que l'utilisateur choisisse une page
+
+_ENCRYPTION_KEY_RAW = os.environ.get("ENCRYPTION_KEY", "")
+if not _ENCRYPTION_KEY_RAW or len(_ENCRYPTION_KEY_RAW) < 16:
+    if _is_pytest_runtime():
+        _ENCRYPTION_KEY_RAW = _ENCRYPTION_KEY_RAW or "unit-test-encryption-key-not-for-prod"
+        logger.warning("ENCRYPTION_KEY missing/too short; using test fallback")
+    else:
+        raise RuntimeError(
+            "ENCRYPTION_KEY manquant ou trop court (16 caracteres minimum) -- "
+            "requis pour chiffrer les tokens OAuth (YouTube/TikTok/...) stockes "
+            "en base. L'application refuse de demarrer plutot que de stocker "
+            "des tokens en clair ou faiblement proteges."
+        )
 
 _oauth_state_secret = os.environ.get("OAUTH_STATE_SECRET")
 if not _oauth_state_secret:
@@ -357,11 +445,90 @@ def _estimate_transcript_duration_seconds(transcript: Dict[str, Any]) -> float:
     return max(max_end, meta_seconds)
 
 
-def get_user_id_header(request: Request) -> str:
-    user_id = request.headers.get("X-User-Id")
+def _verify_supabase_jwt(token: str) -> str:
+    """Verify a Supabase-issued access token and return the authenticated user's id.
+
+    Security note: this is the ONLY source of truth for user identity in this
+    application. Client-supplied identity headers (e.g. X-User-Id) must never
+    be trusted on their own -- they are not proof of anything, since any
+    client can set an arbitrary value. The `sub` claim of a JWT that verifies
+    either against SUPABASE_JWT_SECRET (legacy HS256 projects) or against the
+    project's own public key fetched from its JWKS endpoint (newer ES256/
+    RS256 projects) is proof, because only Supabase Auth (which authenticated
+    the user's login) could have produced a valid signature. Which path
+    applies is read from the token's own header, never trusted from outside
+    it: HS256 is only ever checked against our dedicated shared secret, and
+    ES256/RS256 only ever against the real public key looked up by `kid` from
+    Supabase's JWKS, so the two verification paths can't be crossed to forge
+    a signature (no alg-confusion between a public key and a shared secret).
+    """
+    try:
+        alg = pyjwt.get_unverified_header(token).get("alg")
+        if alg == "HS256":
+            if not SUPABASE_JWT_SECRET:
+                raise HTTPException(status_code=401, detail="Invalid or expired session token")
+            payload = pyjwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"require": ["exp", "sub"]},
+            )
+        elif alg in ("ES256", "RS256"):
+            signing_key = _get_supabase_jwks_client().get_signing_key_from_jwt(token)
+            payload = pyjwt.decode(
+                token,
+                signing_key.key,
+                algorithms=[alg],
+                audience="authenticated",
+                options={"require": ["exp", "sub"]},
+            )
+        else:
+            raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    except HTTPException:
+        raise
+    except PyJWTError as exc:
+        logger.warning("Supabase JWT verification failed: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid or expired session token") from exc
+
+    user_id = str(payload.get("sub") or "").strip()
     if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+        raise HTTPException(status_code=401, detail="Invalid session token: missing subject")
     return user_id
+
+
+def get_user_id_header(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+) -> str:
+    """FastAPI dependency resolving the authenticated caller's user id.
+
+    Requires a verified Supabase JWT (`Authorization: Bearer <access_token>`).
+    The legacy `X-User-Id` header is intentionally never consulted here: it is
+    a plain client-supplied string with no cryptographic proof behind it, so
+    trusting it would let any caller impersonate any other user.
+    """
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
+    return _verify_supabase_jwt(token)
+
+
+def _get_authenticated_user_id_optional(request: Request) -> Optional[str]:
+    """Best-effort verified caller identity for endpoints that use it only as a
+    lookup hint (never for access control). Returns None rather than raising
+    when no valid Bearer token is present -- callers must not treat this as an
+    authorization decision, only as an optional cache/lookup key. Never falls
+    back to the unverified X-User-Id header.
+    """
+    authorization = request.headers.get("Authorization") or request.headers.get("authorization")
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    try:
+        return _verify_supabase_jwt(token)
+    except HTTPException:
+        return None
 
 def _parse_iso_datetime(value: Any) -> Optional[datetime]:
     if not value:
@@ -512,6 +679,7 @@ async def _ensure_retention_deadline_on_subscription(
         await supabase_update_souscription_row(
             str(subscription_id),
             {"retention_deadline_at": retention_deadline.isoformat()},
+            user_id=latest_subscription.get("userid"),
         )
 
 
@@ -548,6 +716,7 @@ async def _disable_subscription_account_if_needed(
                 "account_disabled_at": now_utc.isoformat(),
                 "retention_deadline_at": retention_deadline.isoformat(),
             },
+            user_id=latest_subscription.get("userid"),
         )
 
 
@@ -1031,7 +1200,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
     caption_row: Optional[Dict[str, Any]] = None
 
     try:
-        maybe_reel = await supabase_get_reel_by_job_clip(job_id, int(clip_index))
+        maybe_reel = await supabase_get_reel_by_job_clip(job_id, int(clip_index), user_id=user_id)
         if str((maybe_reel or {}).get("reel_user_id") or "").strip() == user_id:
             reel_row = maybe_reel
     except Exception:
@@ -1134,6 +1303,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
                     reel_url=reel_media_url,
                     reel_s3_key=str(reel_row.get("reel_s3_key") or "") or None,
                     reel_thumbnail_url=reel_thumb_key,
+                    user_id=user_id,
                 )
             if not preview_url:
                 preview_url = _reel_thumbnail_url_from_s3_key(reel_thumb_key) or ""
@@ -1153,7 +1323,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
         return preview_url
 
     if reel_row:
-        refreshed = _normalize_reel_row(await supabase_get_reel_by_job_clip(job_id, int(clip_index)) or {})
+        refreshed = _normalize_reel_row(await supabase_get_reel_by_job_clip(job_id, int(clip_index), user_id=user_id) or {})
         fallback_reel_thumb = str(refreshed.get("reel_thumbnail_url") or "")
         if fallback_reel_thumb and not _is_probably_video_url(fallback_reel_thumb):
             return fallback_reel_thumb
@@ -1335,7 +1505,12 @@ async def _finalize_failed_reel_job(
     )
 
     debit_applied = False
-    if not fail_result.get("retry") and user_id and consumption["actual_credit"] > 0:
+    reserved_credits = float((job_data or {}).get("reel_required_credits") or 0.0)
+    # Settle on any terminal (non-retryable) failure whenever there's a
+    # partial charge to bill OR a reservation to refund -- otherwise a job
+    # that fails before any billable progress (actual_credit == 0) would
+    # never release its reservation back to the user.
+    if not fail_result.get("retry") and user_id and (consumption["actual_credit"] > 0 or reserved_credits > 0):
         try:
             debit_applied = await reel_job_manager.debit_credits_for_job(
                 job_id=job_id,
@@ -1343,6 +1518,7 @@ async def _finalize_failed_reel_job(
                 credits=consumption["actual_credit"],
                 storage_delta=0.0,
                 operation_type="generation_reel",
+                reserved_credits=reserved_credits,
             )
         except Exception as billing_error:
             jobs[job_id]["logs"].append(f"Partial billing failed: {billing_error}")
@@ -1365,7 +1541,7 @@ async def _finalize_failed_reel_job(
         project_id = job_data.get("project_id")
         if project_id:
             try:
-                await supabase_update_project_status(project_id, "failed")
+                await supabase_update_project_status(project_id, "failed", user_id=user_id)
                 logger.info(f"Project {project_id} marked as failed")
             except Exception as e:
                 logger.warning(f"Failed to update project status to failed: {str(e)}")
@@ -1566,7 +1742,7 @@ async def _persist_reels_for_job(
     # Update project output count if project exists
     if project_id:
         try:
-            await supabase_increment_project_output_count(project_id)
+            await supabase_increment_project_output_count(project_id, user_id=user_id)
         except Exception as e:
             logger.warning(f"Failed to increment project output count: {str(e)}")
 
@@ -1691,10 +1867,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Enable CORS for frontend
+# Enable CORS for frontend.
+# Security: a wildcard origin combined with allow_credentials=True lets any
+# website make authenticated-as-any-caller cross-origin requests and read
+# the JSON response -- an explicit allow-list is required instead. Defaults
+# to FRONTEND_ORIGIN (already a required, exact-origin env var used for the
+# OAuth postMessage target); additional origins (e.g. a staging domain) can
+# be added via CORS_ALLOWED_ORIGINS (comma-separated).
+_cors_extra_origins = [
+    o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+_cors_allowed_origins = sorted(set([FRONTEND_ORIGIN, *_cors_extra_origins]))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1734,13 +1920,18 @@ async def _close_proxy_stream(upstream, client):
 
 
 @app.get("/api/media/proxy")
-async def proxy_media(request: Request, url: str):
-    """Proxy remote media through the backend so browser-side Remotion can fetch it same-origin."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise HTTPException(status_code=400, detail="Invalid media URL")
+async def proxy_media(request: Request, url: str, user_id: str = Depends(get_user_id_header)):
+    """Proxy remote media through the backend so browser-side Remotion can fetch it same-origin.
 
+    Security: this endpoint performs a server-side HTTP request to a URL the
+    caller fully controls -- a classic SSRF primitive. It must never be
+    reachable without authentication, and every request (including redirect
+    hops) must go through _validate_download_url so it cannot be used to
+    reach cloud metadata endpoints or internal/loopback services.
+    """
     import httpx
+
+    _validate_download_url(url)
 
     forward_headers = {}
     if request.headers.get("range"):
@@ -1748,9 +1939,9 @@ async def proxy_media(request: Request, url: str):
     if request.headers.get("user-agent"):
         forward_headers["User-Agent"] = request.headers["user-agent"]
 
-    client = httpx.AsyncClient(follow_redirects=True, timeout=120.0)
+    client = httpx.AsyncClient(follow_redirects=False, timeout=120.0)
     try:
-        upstream = await client.send(client.build_request("GET", url, headers=forward_headers), stream=True)
+        upstream = await _validated_stream_request(client, "GET", url, headers=forward_headers)
     except Exception:
         await client.aclose()
         raise
@@ -1809,8 +2000,22 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
 
         # Async wait for process with incremental updates
         start_wait = time.time()
+        timed_out = False
         while process.poll() is None:
             if execution_ctx and execution_ctx.get("preempt_requested"):
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+            elif time.time() - start_wait > REEL_JOB_MAX_PROCESSING_SECONDS:
+                # Security/reliability: kill a job that has been running far
+                # longer than any legitimate input should require, instead
+                # of letting it occupy a worker slot indefinitely (see
+                # security audit finding H13).
+                timed_out = True
+                jobs[job_id]['logs'].append(
+                    f"Job exceeded max processing time ({REEL_JOB_MAX_PROCESSING_SECONDS}s); terminating."
+                )
                 try:
                     process.terminate()
                 except Exception:
@@ -1942,8 +2147,12 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 )
                 debit_applied = False
                 logger.info(f"Billing info for job {job_id}: {billing}")
+                job_reserved_credits = float(job_data.get("reel_required_credits") or 0.0)
+                # Settle whenever there's an actual charge/storage change OR an
+                # outstanding reservation to release -- otherwise a job whose
+                # actual cost rounds to 0 would never refund its reservation.
                 if is_supabase_configured() and user_id and (
-                    billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0
+                    billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0 or job_reserved_credits > 0
                 ):
                     try:
                         logger.info(f"Debiting credits for job {job_id}")
@@ -1953,6 +2162,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                             credits=billing["actual_credit"],
                             storage_delta=-billing["actual_storage_gb"],
                             operation_type="generation_reel",
+                            reserved_credits=job_reserved_credits,
                         )
                     except Exception as billing_error:
                         logger.error(f"Billing update failed: {billing_error}")
@@ -1985,7 +2195,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 project_id = job_data.get("project_id") if job_data else None
                 if project_id and is_supabase_configured():
                     try:
-                        await supabase_update_project_status(project_id, "completed")
+                        await supabase_update_project_status(project_id, "completed", user_id=user_id)
                         summary_text = ""
                         if enriched_clips:
                             top_clip = enriched_clips[0] if isinstance(enriched_clips[0], dict) else {}
@@ -2234,6 +2444,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
                     credits=caption_required_credits,
                     storage_delta=-caption_storage_gb,
                     operation_type="sous_titre",
+                    reserved_credits=caption_required_credits,
                 )
                 if not debit_ok:
                     raise RuntimeError("Insufficient credit/storage balance to finalize caption job")
@@ -2259,7 +2470,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
         project_id = job_data.get("project_id")
         if project_id and is_supabase_configured():
             try:
-                await supabase_update_project_status(project_id, "completed")
+                await supabase_update_project_status(project_id, "completed", user_id=user_id)
                 project_summary = _build_short_project_summary(
                     str(normalized_item.get("caption_description") or "")
                     or str(normalized_item.get("caption_title") or "")
@@ -2311,10 +2522,20 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             project_id = job_data.get("project_id")
             if project_id:
                 try:
-                    await supabase_update_project_status(project_id, "failed")
+                    await supabase_update_project_status(project_id, "failed", user_id=user_id)
                     logger.info(f"Project {project_id} marked as failed")
                 except Exception as e:
                     logger.warning(f"Failed to update project status to failed: {str(e)}")
+
+        # Release the reservation made at job creation: nothing was billed
+        # in this failure path, so the full reserved amount is refundable.
+        if not result.get("retry") and user_id:
+            reserved = float(job_data.get("caption_required_credits") or 0.0)
+            if reserved > 0 and is_supabase_configured():
+                try:
+                    await reel_job_manager.refund_reservation(job_id, user_id, reserved, operation_type="sous_titre")
+                except Exception as refund_error:
+                    logger.warning(f"Failed to refund caption reservation: {refund_error}")
 
         if result.get("retry"):
             asyncio.create_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
@@ -2394,7 +2615,7 @@ def _probe_local_video_duration_seconds(video_path: str) -> float:
             "-of", "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
-        out = subprocess.check_output(probe_cmd, stderr=subprocess.STDOUT).decode().strip()
+        out = subprocess.check_output(probe_cmd, stderr=subprocess.STDOUT, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
         duration = float(out or 0)
         if duration > 0:
             return duration
@@ -2419,9 +2640,19 @@ def _probe_remote_video_metadata(url_value: str) -> Dict[str, Any]:
     if not url_value:
         return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
 
+    # Security: url_value is client-supplied. Require it to actually look
+    # like an http(s) URL before ever handing it to yt-dlp -- otherwise a
+    # value starting with "-" could be parsed as a yt-dlp CLI flag (e.g.
+    # --exec) instead of a target URL (argument injection). The "--" below
+    # is a second, independent layer: it tells yt-dlp's own argument parser
+    # that everything after it is a positional argument, never an option,
+    # regardless of what url_value contains.
+    if urlparse(url_value).scheme not in ("http", "https"):
+        return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
+
     try:
-        cmd = ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", url_value]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().strip()
+        cmd = ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", "--", url_value]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
         if not out:
             return {"duration_seconds": 0.0, "size_bytes": 0.0, "title": "", "description": ""}
         payload = json.loads(out.splitlines()[-1])
@@ -2635,22 +2866,106 @@ def _build_billing_details(
     return details
 
 
-async def _assert_user_has_required_credits(user_id: str, required_credits: float) -> float:
-    _ = required_credits
+async def _enforce_job_concurrency_limit(user_id: str) -> None:
+    """Reject new job submissions once a user already has
+    MAX_ACTIVE_JOBS_PER_USER non-terminal jobs. MAX_CONCURRENT_JOBS only
+    throttles execution (a semaphore around actually running jobs) -- it
+    does nothing to stop one account from enqueueing an unbounded number of
+    jobs, each of which uploads a source file to S3 and occupies a queue
+    slot/local disk/database row before ever being throttled by that
+    semaphore (see security audit finding H7)."""
     if not is_supabase_configured():
-        return float(required_credits)
+        return
+    active_count = await supabase_count_active_jobs_for_user(user_id)
+    if active_count >= MAX_ACTIVE_JOBS_PER_USER:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Trop de traitements en cours ({active_count}/{MAX_ACTIVE_JOBS_PER_USER}). "
+                f"Attendez qu'un traitement se termine avant d'en lancer un nouveau."
+            ),
+        )
+
+
+async def _assert_user_has_required_credits(user_id: str, required_credits: float) -> float:
+    required = float(required_credits or 0.0)
+    if not is_supabase_configured():
+        return required
 
     user_data = await supabase_get_user_data(user_id)
     available = float(user_data.get("credit", 0)) if user_data else 0.0
-    if available <= MIN_OPERATION_START_CREDITS:
+    # Security: the balance must cover both the actual estimated cost of this
+    # operation AND the baseline minimum -- previously `required_credits` was
+    # computed but never compared against `available`, letting any account
+    # with a token balance above MIN_OPERATION_START_CREDITS (default 1)
+    # launch operations of arbitrary cost for free while accruing unlimited
+    # debt (see security audit finding C7).
+    effective_minimum = max(MIN_OPERATION_START_CREDITS, required)
+    if available < effective_minimum:
         raise HTTPException(
             status_code=402,
             detail=(
                 f"Crédits insuffisants pour lancer l'operation. "
-                f"Minimum requis : {MIN_OPERATION_START_CREDITS} cr, disponible : {available} cr."
+                f"Requis : {effective_minimum} cr, disponible : {available} cr."
             ),
         )
-    return float(required_credits)
+    return required
+
+
+async def _assert_user_has_storage_headroom(user_id: str) -> None:
+    """Reject new uploads once the user's aggregate storage quota is already
+    exhausted (audit finding P2-10).
+
+    Storage consumption is only ever settled against ``stockage``/
+    ``stockage_max`` at job completion (see deduct_user_credits'
+    storage_delta), once the actual output size is known. Nothing upstream
+    of that stopped an account already over its storage quota from starting
+    yet more jobs -- only the credit balance gated new work. This mirrors
+    the same overage tolerance used at settlement time so an account isn't
+    blocked here by a stricter rule than the one that will actually charge it.
+    """
+    if not is_supabase_configured():
+        return
+    user_data = await supabase_get_user_data(user_id)
+    if not user_data:
+        return
+    current_storage = float(user_data.get("stockage", 0) or 0.0)
+    storage_max = float(user_data.get("stockage_max", max(current_storage, 0.0)) or 0.0)
+    overage_limit = (storage_max * STORAGE_OVERAGE_TOLERANCE_PERCENT) / 100.0
+    if current_storage < -overage_limit:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                "Quota de stockage depasse. Liberez de l'espace ou mettez a "
+                "niveau votre abonnement avant de lancer un nouveau traitement."
+            ),
+        )
+
+
+async def _reserve_job_credits(user_id: str, required_credits: float) -> float:
+    """Atomically reserve ``required_credits`` for a queued job (reel/caption
+    generation) instead of merely checking the balance covers it. Two
+    concurrent job submissions can no longer both pass a stale balance
+    check before either is billed: the second submission sees the
+    already-reduced balance from the first reservation (see security audit
+    finding H8). The reservation is settled (extra debit or refund of the
+    difference) against the job's actual cost at completion/failure via
+    JobManager.debit_credits_for_job(reserved_credits=...), or refunded in
+    full via JobManager.refund_reservation if the job never runs.
+    """
+    required = float(required_credits or 0.0)
+    if not is_supabase_configured():
+        return required
+    if not await reel_job_manager.reserve_credits(user_id, required):
+        available = float((await supabase_get_user_data(user_id) or {}).get("credit", 0))
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Crédits insuffisants pour lancer l'operation. "
+                f"Requis : {math.ceil(required)} cr, disponible : {available} cr."
+            ),
+        )
+    return required
 
 
 def _allowed_video_formats() -> List[str]:
@@ -2768,7 +3083,12 @@ def _apply_auto_edit_options_to_filter_data(
 
 
 def _run_ffmpeg_command(cmd: List[str]) -> None:
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=FFMPEG_STEP_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"FFmpeg command timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s") from exc
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="ignore") or "FFmpeg command failed")
 
@@ -2782,7 +3102,9 @@ def _video_has_audio_stream(video_path: str) -> bool:
             "-of", "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8", errors="ignore").strip()
+        out = subprocess.check_output(
+            cmd, stderr=subprocess.STDOUT, timeout=FFPROBE_TIMEOUT_SECONDS
+        ).decode("utf-8", errors="ignore").strip()
         return bool(out)
     except Exception:
         return False
@@ -2859,7 +3181,7 @@ def _detect_silence_cut_ranges(video_path: str, total_duration: float) -> List[t
         "-af", "silencedetect=noise=-35dB:d=0.35",
         "-f", "null", "-",
     ]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
     log_text = result.stderr.decode("utf-8", errors="ignore")
 
     starts = [float(val) for val in re.findall(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", log_text)]
@@ -3231,6 +3553,9 @@ async def process_endpoint(
     if url and DISABLE_YOUTUBE_URL:
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
 
+    await _enforce_job_concurrency_limit(user_id)
+    await _assert_user_has_storage_headroom(user_id)
+
     # Capture attestation context for legal record (IP + timestamp + UA)
     client_ip = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for")
@@ -3300,7 +3625,7 @@ async def process_endpoint(
             uses_youtube_source=True,
         )
         try:
-            await _assert_user_has_required_credits(user_id, reel_required_credits)
+            await _reserve_job_credits(user_id, reel_required_credits)
         except HTTPException:
             if input_path and os.path.exists(input_path):
                 os.remove(input_path)
@@ -3318,7 +3643,10 @@ async def process_endpoint(
         project_description = _build_short_project_summary(project_name, fallback_title=project_name)
 
         # Save uploaded file with size limit check
-        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
+        # Security: sanitize the client-supplied filename to a safe basename
+        # before joining it into a filesystem path (path traversal guard).
+        safe_upload_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{safe_upload_name}")
 
         # Read file in chunks to check size
         size = 0
@@ -3346,7 +3674,7 @@ async def process_endpoint(
             uses_youtube_source=False,
         )
         try:
-            await _assert_user_has_required_credits(user_id, reel_required_credits)
+            await _reserve_job_credits(user_id, reel_required_credits)
         except HTTPException:
             if os.path.exists(input_path):
                 os.remove(input_path)
@@ -3440,7 +3768,7 @@ async def process_endpoint(
         },
         runtime_data=dict(runtime_payload),
         max_attempts=REEL_JOB_MAX_ATTEMPTS,
-        reserved_quota=1.0,
+        reserved_quota=reel_required_credits,
         priority=job_priority,
         queue_name="reels",
     )
@@ -3456,12 +3784,12 @@ async def process_endpoint(
     }
 
 @app.get("/api/status/{job_id}")
-async def get_status(job_id: str):
-    user_id = None
-    # Best effort read user scope from in-memory runtime when available.
+async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
+    # Best effort read of in-memory runtime state, but the *authorization*
+    # scope always comes from the verified caller identity above -- never
+    # fall back to an unscoped (user_id=None) lookup, which would let any
+    # caller read any other user's job status/results (see security audit).
     runtime_job = reel_job_manager.runtime_jobs.get(job_id) or jobs.get(job_id)
-    if runtime_job:
-        user_id = runtime_job.get("user_id")
 
     supabase_view = await reel_job_manager.get_job_view(job_id, user_id=user_id)
     if supabase_view:
@@ -3500,6 +3828,9 @@ async def get_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = jobs[job_id]
+    if (job.get("user_id") or "") != user_id:
+        # Security: never serve another user's in-memory job state.
+        raise HTTPException(status_code=404, detail="Job not found")
     response = {
         "status": job['status'],
         "logs": job['logs'],
@@ -3571,6 +3902,37 @@ def _sanitize_input_filename(value: Optional[str]) -> Optional[str]:
     return candidate or None
 
 
+_JOB_ID_PATTERN = re.compile(r"^[0-9a-fA-F-]{8,64}$")
+
+
+async def _require_job_ownership(job_id: str, user_id: str) -> None:
+    """Validate job_id format and verify it belongs to the authenticated caller.
+
+    Security: job_id is interpolated into filesystem paths (os.path.join)
+    and, for subtitle burning, into an ffmpeg -vf filter expression. Without
+    this check a client could supply another user's job_id (cross-tenant
+    IDOR) or a path-traversal payload like "../../etc" (see security audit
+    finding on /api/edit and /api/subtitle). Ownership is verified against
+    persisted job state, not just in-memory state, so it still works after a
+    worker restart.
+    """
+    if not _JOB_ID_PATTERN.match(job_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+
+    in_memory = jobs.get(job_id) or reel_job_manager.runtime_jobs.get(job_id)
+    if in_memory:
+        if (in_memory.get("user_id") or "") != user_id:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return
+
+    if is_supabase_configured():
+        row = await reel_job_manager.get_job_view(job_id, user_id=user_id)
+        if row:
+            return
+
+    raise HTTPException(status_code=404, detail="Job not found")
+
+
 def _is_youtube_url(value: str) -> bool:
     parsed = urlparse(str(value or "").strip())
     host = (parsed.netloc or "").lower()
@@ -3579,11 +3941,23 @@ def _is_youtube_url(value: str) -> bool:
     return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
 
 
+class _SSRFSafeRedirectHandler(HTTPRedirectHandler):
+    """Re-validates every redirect hop against _validate_download_url, so a
+    malicious/compromised server cannot bypass SSRF protection by 302-ing to
+    an internal/loopback/cloud-metadata address after the initial URL passed
+    validation."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, str]:
     """Download a remote clip URL into output/<job_id> and return (path, filename)."""
-    parsed = urlparse(input_url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="Invalid input URL")
+    # Security: this fetches a URL fully controlled by the client (SSRF
+    # primitive) -- always validate against private/loopback/link-local/cloud
+    # metadata addresses before making any outbound request.
+    _validate_download_url(input_url)
     if _is_youtube_url(input_url):
         raise HTTPException(
             status_code=400,
@@ -3602,7 +3976,8 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 
     try:
         request = UrlRequest(input_url, headers={"User-Agent": "Vireel/1.0"})
-        with urlopen(request, timeout=45) as response:
+        opener = build_opener(_SSRFSafeRedirectHandler)
+        with opener.open(request, timeout=45) as response:
             content_type = response.headers.get("Content-Type", "")
             if "text/html" in content_type.lower():
                 raise HTTPException(
@@ -3618,7 +3993,10 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Could not download input URL: {e}")
+        raise _generic_error(
+            "Failed to download input URL", e, status_code=404,
+            detail="Impossible de telecharger l'URL fournie.",
+        ) from e
 
     return local_path, filename
 
@@ -3629,6 +4007,8 @@ async def edit_clip(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     user_id: str = Depends(get_user_id_header),
 ):
+    await _require_job_ownership(req.job_id, user_id)
+
     # Determine API Key
     final_api_key = req.api_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
 
@@ -3801,8 +4181,7 @@ async def edit_clip(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Edit Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Edit Error", e)
 
 @app.post("/api/captions/process")
 async def process_caption_endpoint(
@@ -3816,6 +4195,9 @@ async def process_caption_endpoint(
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     if not ack_flag:
         raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
+
+    await _enforce_job_concurrency_limit(user_id)
+    await _assert_user_has_storage_headroom(user_id)
 
     _validate_video_extension(file.filename if file else "", context_label="sous-titres")
 
@@ -3855,7 +4237,7 @@ async def process_caption_endpoint(
         size_bytes=float(size_bytes),
     )
     try:
-        await _assert_user_has_required_credits(user_id, caption_required_credits)
+        await _reserve_job_credits(user_id, caption_required_credits)
     except HTTPException:
         if os.path.exists(input_path):
             os.remove(input_path)
@@ -3924,10 +4306,11 @@ async def process_caption_endpoint(
             "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
             "project_id": project.get("id") if project else None,
             "source_duration_seconds": float(local_duration or 0.0),
+            "caption_required_credits": caption_required_credits,
         },
         runtime_data=dict(runtime_payload),
         max_attempts=CAPTION_JOB_MAX_ATTEMPTS,
-        reserved_quota=1.0,
+        reserved_quota=caption_required_credits,
         priority=job_priority,
         queue_name="captions",
     )
@@ -3970,10 +4353,11 @@ class SubtitleRequest(BaseModel):
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
-async def get_clip_transcript(job_id: str, clip_index: int, x_user_id: Optional[str] = Header(default=None)):
+async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     """Return word-level captions for a specific clip, formatted for Remotion."""
     # Do not depend on in-memory jobs: Reels page must keep working after restarts.
-    _, data = await _get_or_build_job_metadata(job_id, clip_index, user_id=(x_user_id or None))
+    verified_user_id = _get_authenticated_user_id_optional(request)
+    _, data = await _get_or_build_job_metadata(job_id, clip_index, user_id=verified_user_id)
     if not data:
         # Graceful fallback when metadata cannot be reconstructed.
         return {
@@ -4083,7 +4467,7 @@ async def persist_captioned_reel(
         except Exception:
             existing_caption_row = None
         try:
-            reel_row = await supabase_get_reel_by_job_clip(job_id, clip_index)
+            reel_row = await supabase_get_reel_by_job_clip(job_id, clip_index, user_id=user_id)
             source_video_url_for_history = (
                 _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
                 or str((reel_row or {}).get("reel_url") or "")
@@ -4273,6 +4657,7 @@ async def persist_captioned_reel(
                     reel_url=persisted_video_url,
                     reel_s3_key=caption_s3_key or None,
                     reel_thumbnail_url=reel_thumbnail_s3_key or None,
+                    user_id=user_id,
                 )
             except Exception as e:
                 print(f"⚠️ Failed to sync reel URL after captions persist: {e}")
@@ -4327,29 +4712,54 @@ async def persist_captioned_reel(
 
 # --- Remotion Render Proxy ---
 RENDER_SERVICE_URL = os.getenv("RENDER_SERVICE_URL", "http://renderer:3100")
+RENDER_SERVICE_API_KEY = os.getenv("RENDER_SERVICE_API_KEY")
+if not RENDER_SERVICE_API_KEY and not _is_pytest_runtime():
+    raise RuntimeError(
+        "RENDER_SERVICE_API_KEY manquant dans l'environnement -- requis pour "
+        "s'authentifier aupres du render-service interne."
+    )
+_RENDER_SERVICE_HEADERS = {"x-internal-api-key": RENDER_SERVICE_API_KEY or "unit-test-render-key"}
+
 
 @app.post("/api/render")
-async def proxy_render(request: Request):
-    """Proxy render requests to the Node.js Remotion render service."""
+async def proxy_render(request: Request, user_id: str = Depends(get_user_id_header)):
+    """Proxy render requests to the Node.js Remotion render service.
+
+    Security: this endpoint used to forward the raw client body to an
+    internal service with no authentication of its own -- requiring a
+    verified session here, and authenticating to render-service with a
+    shared internal API key, closes both the unauthenticated-proxy and the
+    unauthenticated-render-service issues together.
+    """
     import httpx
     body = await request.json()
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{RENDER_SERVICE_URL}/render", json=body)
+            resp = await client.post(
+                f"{RENDER_SERVICE_URL}/render", json=body, headers=_RENDER_SERVICE_HEADERS
+            )
             return resp.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Render service unavailable: {e}")
+        raise _generic_error(
+            "Render service unavailable (proxy_render)", e, status_code=502,
+            detail="Le service de rendu est indisponible.",
+        )
 
 @app.get("/api/render/{render_id}")
-async def proxy_render_status(render_id: str):
+async def proxy_render_status(render_id: str, user_id: str = Depends(get_user_id_header)):
     """Proxy render status polling to the Node.js Remotion render service."""
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{RENDER_SERVICE_URL}/render/{render_id}")
+            resp = await client.get(
+                f"{RENDER_SERVICE_URL}/render/{render_id}", headers=_RENDER_SERVICE_HEADERS
+            )
             return resp.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Render service unavailable: {e}")
+        raise _generic_error(
+            "Render service unavailable (proxy_render_status)", e, status_code=502,
+            detail="Le service de rendu est indisponible.",
+        )
 
 
 class EffectsGenerateRequest(BaseModel):
@@ -4431,7 +4841,7 @@ async def generate_effects_config(
                     '-of', 'json',
                     safe_input_path
                 ]
-                probe_result = subprocess.check_output(probe_cmd).decode().strip()
+                probe_result = subprocess.check_output(probe_cmd, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
                 probe_data = json.loads(probe_result)
 
                 stream = probe_data.get('streams', [{}])[0]
@@ -4487,12 +4897,12 @@ async def generate_effects_config(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Effects Generation Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Effects Generation Error", e)
 
 
 @app.post("/api/subtitle")
 async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id_header)):
+    await _require_job_ownership(req.job_id, user_id)
     subtitle_required_credits = 0.0
     await _assert_user_has_required_credits(user_id, subtitle_required_credits)
 
@@ -4531,7 +4941,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         except Exception:
             pass
         try:
-            reel_row = await supabase_get_reel_by_job_clip(req.job_id, req.clip_index)
+            reel_row = await supabase_get_reel_by_job_clip(req.job_id, req.clip_index, user_id=user_id)
             source_video_url_for_history = (
                 _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
                 or str((reel_row or {}).get("reel_url") or "")
@@ -4626,9 +5036,10 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_burn)
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"❌ Subtitle Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Subtitle Error", e)
 
     local_subtitle_url = f"/videos/{req.job_id}/{output_filename}"
     persisted_subtitle_url = local_subtitle_url
@@ -4646,6 +5057,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
                 clip_index=req.clip_index,
                 reel_url=persisted_subtitle_url,
                 reel_s3_key=subtitle_s3_key or None,
+                user_id=user_id,
             )
         except Exception as e:
             print(f"⚠️ Failed to sync reel URL after subtitle edit: {e}")
@@ -4854,6 +5266,7 @@ async def get_caption_style_history_debug(
 
 @app.post("/api/hook")
 async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header)):
+    await _require_job_ownership(req.job_id, user_id)
     hook_required_credits = 0.0
 
     job = jobs.get(req.job_id)
@@ -4915,8 +5328,7 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
         await loop.run_in_executor(None, run_hook)
 
     except Exception as e:
-        print(f"❌ Hook Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Hook Error", e)
 
     # Update Persistence (Same logic as subtitles)
     # Update InMemory Jobs
@@ -5351,7 +5763,7 @@ async def translate_captions(req: TranslateRequest, request: Request):
     if not source_segments:
         raise HTTPException(status_code=400, detail="No transcript segments found for this clip range")
 
-    request_user_id = (request.headers.get("X-User-Id") or "").strip()
+    request_user_id = _get_authenticated_user_id_optional(request) or ""
     owner_user_id = request_user_id or await _resolve_job_owner_user_id(req.job_id, normalized_clip_index)
     transcription_row = None
     if owner_user_id and is_supabase_configured():
@@ -5441,7 +5853,7 @@ async def translate_clip(req: TranslateRequest, request: Request):
     if not metadata_path or not data:
         raise HTTPException(status_code=404, detail="Metadata not found")
     translation_cache = _get_translation_cache(data)
-    request_user_id = (request.headers.get("X-User-Id") or "").strip()
+    request_user_id = _get_authenticated_user_id_optional(request) or ""
     owner_user_id = request_user_id or await _resolve_job_owner_user_id(req.job_id, req.clip_index)
     transcription_row = None
     if owner_user_id and is_supabase_configured():
@@ -5527,8 +5939,7 @@ async def translate_clip(req: TranslateRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Translation(subtitles-only) Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Translation(subtitles-only) Error", e)
 
     # Update in-memory job result if the job is still alive in memory.
     if job and req.clip_index < len(job.get("result", {}).get("clips", [])):
@@ -5610,9 +6021,14 @@ import httpx
 
 
 def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:
-    resolved = (explicit_user_id or user_id or "").strip()
+    # Security: `explicit_user_id` comes from a client-supplied request body
+    # field and must never override the verified identity resolved from the
+    # authenticated session (`user_id`, from get_user_id_header). Otherwise a
+    # client could act on behalf of an arbitrary victim simply by setting
+    # `user_id` in the JSON body.
+    resolved = (user_id or "").strip()
     if not resolved:
-        raise HTTPException(status_code=400, detail="Missing user id (user_id body field or X-User-Id header)")
+        raise HTTPException(status_code=400, detail="Missing authenticated user id")
     return resolved
 
 
@@ -5773,6 +6189,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
 async def thumbnail_upload(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Upload video and start background Whisper transcription immediately."""
     if not url and not file:
@@ -5784,7 +6201,8 @@ async def thumbnail_upload(
     # Save file if uploaded directly
     video_path = None
     if file:
-        video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{file.filename}")
+        safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+        video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
         with open(video_path, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
@@ -5845,7 +6263,8 @@ async def thumbnail_analyze(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Analyze a video and suggest viral YouTube titles."""
     # Use .env configuration (ignore header for security)
@@ -5885,7 +6304,8 @@ async def thumbnail_analyze(
             from main import download_youtube_video
             video_path, _ = download_youtube_video(url, UPLOAD_DIR)
         else:
-            video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{file.filename}")
+            safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+            video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
             with open(video_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
@@ -5918,8 +6338,7 @@ async def thumbnail_analyze(
         }
 
     except Exception as e:
-        print(f"❌ Thumbnail Analyze Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Analyze Error", e)
 
 
 class ThumbnailTitlesRequest(BaseModel):
@@ -5930,7 +6349,8 @@ class ThumbnailTitlesRequest(BaseModel):
 @app.post("/api/thumbnail/titles")
 async def thumbnail_titles(
     req: ThumbnailTitlesRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Refine title suggestions or accept a manual title."""
     # Use .env configuration (ignore header for security)
@@ -5980,8 +6400,7 @@ async def thumbnail_titles(
         return {"titles": new_titles}
 
     except Exception as e:
-        print(f"❌ Thumbnail Titles Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Titles Error", e)
 
 
 @app.post("/api/thumbnail/generate")
@@ -5993,9 +6412,16 @@ async def thumbnail_generate(
     count: int = Form(3),
     face: Optional[UploadFile] = File(None),
     background: Optional[UploadFile] = File(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
+    # Security: session_id is client-supplied and gets joined into a
+    # filesystem path below -- reject anything that isn't a well-formed
+    # identifier before it ever reaches os.path.join (path traversal guard).
+    if not _JOB_ID_PATTERN.match(session_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
     # Use .env configuration (ignore header for security)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -6012,12 +6438,14 @@ async def thumbnail_generate(
 
     try:
         if face and face.filename:
-            face_path = os.path.join(thumb_upload_dir, f"face_{face.filename}")
+            safe_face_name = _sanitize_input_filename(face.filename) or "face.jpg"
+            face_path = os.path.join(thumb_upload_dir, f"face_{safe_face_name}")
             with open(face_path, "wb") as f:
                 f.write(await face.read())
 
         if background and background.filename:
-            bg_path = os.path.join(thumb_upload_dir, f"bg_{background.filename}")
+            safe_bg_name = _sanitize_input_filename(background.filename) or "background.jpg"
+            bg_path = os.path.join(thumb_upload_dir, f"bg_{safe_bg_name}")
             with open(bg_path, "wb") as f:
                 f.write(await background.read())
 
@@ -6049,8 +6477,7 @@ async def thumbnail_generate(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Thumbnail Generate Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Generate Error", e)
 
 
 class ThumbnailDescribeRequest(BaseModel):
@@ -6060,7 +6487,8 @@ class ThumbnailDescribeRequest(BaseModel):
 @app.post("/api/thumbnail/describe")
 async def thumbnail_describe(
     req: ThumbnailDescribeRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Generate a YouTube description with chapters from the transcript."""
     # Use .env configuration (ignore header for security)
@@ -6090,8 +6518,7 @@ async def thumbnail_describe(
         return {"description": result.get("description", "")}
 
     except Exception as e:
-        print(f"❌ Thumbnail Describe Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _generic_error("Thumbnail Describe Error", e)
 
 
 @app.post("/api/thumbnail/publish")
@@ -6101,7 +6528,7 @@ async def thumbnail_publish(
     title: str = Form(...),
     description: str = Form(...),
     thumbnail_url: str = Form(...),
-    user_id: str = Form(...),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Kick off a background upload to YouTube using the user's connected social account."""
     if session_id not in thumbnail_sessions:
@@ -6500,11 +6927,11 @@ async def list_abonnements():
 
 
 @app.get("/api/souscription")
-async def get_current_souscription(request: Request) -> Optional[Dict[str, Any]]:
+async def get_current_souscription(
+    request: Request,
+    user_id: str = Depends(get_user_id_header),
+) -> Optional[Dict[str, Any]]:
     """Get the current active subscription for a user."""
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     await _enforce_subscription_retention_policy(user_id)
     subscription = await get_user_abonnement(user_id)
     if not subscription:
@@ -6524,11 +6951,12 @@ async def get_current_souscription(request: Request) -> Optional[Dict[str, Any]]
 
 
 @app.get("/api/souscription/history")
-async def get_souscription_history(request: Request, limit: int = Query(50, ge=1, le=200)):
+async def get_souscription_history(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    user_id: str = Depends(get_user_id_header),
+):
     """Return subscription history only (excluding one-off credit purchases)."""
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase is not configured")
 
@@ -6561,11 +6989,8 @@ async def get_souscription_history(request: Request, limit: int = Query(50, ge=1
 # ---------------------------------------------------------------------------
 
 @app.get("/api/user/credits")
-async def get_user_credits(request: Request):
+async def get_user_credits(request: Request, user_id: str = Depends(get_user_id_header)):
     """Return the credit/storage balance for the authenticated user."""
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase is not configured")
 
@@ -6629,11 +7054,9 @@ async def get_user_history(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(get_user_id_header),
 ):
     """Return paginated credit/storage history for the authenticated user."""
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase is not configured")
 
@@ -6653,13 +7076,13 @@ class BuyCreditsRequest(BaseModel):
 
 
 @app.post("/api/stripe/buy-credits")
-async def buy_credits_checkout(request: Request, payload: BuyCreditsRequest):
+async def buy_credits_checkout(
+    request: Request,
+    payload: BuyCreditsRequest,
+    user_id: str = Depends(get_user_id_header),
+):
     """Create a Stripe Checkout session for purchasing additional credits."""
     _require_stripe_ready()
-
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase is not configured")
 
@@ -7316,27 +7739,47 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _xor_bytes(value: bytes, key: bytes) -> bytes:
-    if not key:
-        return value
-    return bytes(value[i] ^ key[i % len(key)] for i in range(len(value)))
+def _derive_token_encryption_key() -> bytes:
+    """Derive a 256-bit AES key from ENCRYPTION_KEY via HKDF-SHA256.
+
+    Using a KDF (rather than the raw secret bytes) gives a full-entropy,
+    fixed-length key regardless of the raw secret's length/format, and scopes
+    it to this specific purpose via the `info` label.
+    """
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"vireel-social-token-encryption-v1")
+    return hkdf.derive(_ENCRYPTION_KEY_RAW.encode("utf-8"))
+
+
+_TOKEN_ENCRYPTION_KEY = _derive_token_encryption_key()
+_TOKEN_ENCRYPTION_PREFIX = "v1:"
 
 
 def _encrypt_token(token: str) -> str:
+    """Encrypt a social-platform OAuth token with AES-256-GCM (authenticated
+    encryption) before storing it in Supabase. Replaces a previous XOR-based
+    scheme that offered neither real confidentiality nor integrity, and that
+    silently stored tokens in plaintext whenever ENCRYPTION_KEY was unset."""
     if not token:
         return ""
-    key = (os.environ.get("ENCRYPTION_KEY", "") or "").encode("utf-8")
-    raw = token.encode("utf-8")
-    return base64.urlsafe_b64encode(_xor_bytes(raw, key)).decode("ascii")
+    nonce = secrets.token_bytes(12)  # AES-GCM standard nonce size; must never repeat for a given key
+    ciphertext = AESGCM(_TOKEN_ENCRYPTION_KEY).encrypt(nonce, token.encode("utf-8"), None)
+    return _TOKEN_ENCRYPTION_PREFIX + base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
 
 
 def _decrypt_token(token_encrypted: Optional[str]) -> str:
     if not token_encrypted:
         return ""
+    if not token_encrypted.startswith(_TOKEN_ENCRYPTION_PREFIX):
+        # Tokens written by the legacy XOR scheme are intentionally treated
+        # as unusable rather than "best-effort" decoded: forcing a
+        # reconnection is far safer than trusting a weaker/ambiguous format.
+        logger.warning("Encountered a legacy-format encrypted token; treating as invalid (reconnect required).")
+        return ""
     try:
-        key = (os.environ.get("ENCRYPTION_KEY", "") or "").encode("utf-8")
-        decoded = base64.urlsafe_b64decode(token_encrypted.encode("ascii"))
-        return _xor_bytes(decoded, key).decode("utf-8")
+        raw = base64.urlsafe_b64decode(token_encrypted[len(_TOKEN_ENCRYPTION_PREFIX):].encode("ascii"))
+        nonce, ciphertext = raw[:12], raw[12:]
+        plaintext = AESGCM(_TOKEN_ENCRYPTION_KEY).decrypt(nonce, ciphertext, None)
+        return plaintext.decode("utf-8")
     except Exception:
         return ""
 
@@ -7693,7 +8136,7 @@ async def _update_publish_job_status(
 
 
 @app.get("/api/social/accounts")
-async def list_social_accounts(user_id: str = Query(...)):
+async def list_social_accounts(user_id: str = Depends(get_user_id_header)):
     client = await supabase_get_client()
     response = (
         await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
@@ -7714,7 +8157,7 @@ async def list_social_accounts(user_id: str = Query(...)):
 
 
 @app.delete("/api/social/accounts/{platform}")
-async def disconnect_social_account(platform: str, user_id: str = Query(...)):
+async def disconnect_social_account(platform: str, user_id: str = Depends(get_user_id_header)):
     key = (platform or "").strip().lower()
     if key not in PLATFORM_CONFIG:
         raise HTTPException(status_code=404, detail="Unsupported platform")
@@ -7907,7 +8350,13 @@ async def select_facebook_page(payload: SelectFacebookPageRequest):
 
 
 @app.get("/api/auth/{platform}/connect")
-def connect(platform: str, request: Request, user_id: str = Query(...)):
+def connect(platform: str, request: Request, user_id: str = Depends(get_user_id_header)):
+    # Security: `user_id` MUST come from the verified session (get_user_id_header),
+    # never from an unauthenticated query parameter -- otherwise an attacker
+    # could craft a /connect link carrying their own user_id, get a victim to
+    # complete the OAuth consent with the victim's real social account, and
+    # have the resulting token linked to the attacker's Vireel account
+    # (account-linking CSRF).
     key = (platform or "").strip().lower()
     config = _resolve_platform_config(key)
     redirect_uri = _oauth_redirect_uri(key, request)
@@ -8144,6 +8593,20 @@ async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> N
         ) from e
 
 
+def _resolve_and_validate_ips(hostname: str) -> List[str]:
+    """Resolve hostname and reject it if any resolved address is
+    private/loopback/link-local/multicast/reserved. Returns the resolved IPs."""
+    try:
+        resolved_ips = list({info[4][0] for info in socket.getaddrinfo(hostname, None)})
+    except socket.gaierror as e:
+        raise HTTPException(status_code=400, detail="video_url host could not be resolved") from e
+    for ip_str in resolved_ips:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            raise HTTPException(status_code=400, detail="video_url points to a disallowed address")
+    return resolved_ips
+
+
 def _validate_download_url(url: str) -> None:
     """Anti-SSRF minimal avant un GET serveur vers une URL fournie par l'utilisateur."""
     parsed = urlparse(url)
@@ -8152,24 +8615,77 @@ def _validate_download_url(url: str) -> None:
     hostname = parsed.hostname
     if not hostname:
         raise HTTPException(status_code=400, detail="video_url is invalid")
-    try:
-        resolved_ips = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
-    except socket.gaierror as e:
-        raise HTTPException(status_code=400, detail="video_url host could not be resolved") from e
-    for ip_str in resolved_ips:
-        ip = ipaddress.ip_address(ip_str)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
-            raise HTTPException(status_code=400, detail="video_url points to a disallowed address")
+    _resolve_and_validate_ips(hostname)
+
+
+def _pin_url_to_validated_ip(url: str) -> tuple[str, Dict[str, Any]]:
+    """Resolve+validate url's hostname, then rewrite the URL to connect
+    directly to that validated IP, returning the rewritten URL plus httpx
+    request extensions that keep TLS SNI / certificate hostname verification
+    targeting the original hostname.
+
+    Security: this closes the DNS-rebinding TOCTOU where _validate_download_url
+    resolves and checks a hostname, but the actual HTTP client performs its
+    own, independent DNS lookup at connect time -- an attacker controlling
+    DNS for their domain (short TTL) could return a public IP for the check
+    and a private/loopback IP for the real connection. Pinning the exact
+    validated IP for the connection itself eliminates that window.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="video_url is invalid")
+    validated_ips = _resolve_and_validate_ips(hostname)
+    ip = validated_ips[0]
+    netloc_host = f"[{ip}]" if ":" in ip else ip
+    port = parsed.port
+    netloc = f"{netloc_host}:{port}" if port else netloc_host
+    pinned_url = parsed._replace(netloc=netloc).geturl()
+    extensions = {"sni_hostname": hostname} if parsed.scheme == "https" else {}
+    return pinned_url, extensions
+
+
+async def _validated_stream_request(client: "httpx.AsyncClient", method: str, url: str, max_redirects: int = 5, **kwargs):
+    """Issue a request without httpx's automatic redirect-following, so that
+    every hop (including ones a malicious server returns after the initial
+    validation) is re-checked by _validate_download_url before being
+    followed. httpx's built-in follow_redirects=True would otherwise let a
+    server bypass SSRF validation entirely by 302-redirecting to an
+    internal/loopback/link-local address after the first request passed.
+    Also pins each hop's connection to its validated IP (see
+    _pin_url_to_validated_ip) to close the DNS-rebinding TOCTOU window.
+    """
+    current_url = url
+    for _ in range(max_redirects + 1):
+        original_hostname = urlparse(current_url).hostname
+        pinned_url, extensions = _pin_url_to_validated_ip(current_url)
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("Host", original_hostname)
+        request = client.build_request(method, pinned_url, headers=headers, extensions=extensions, **kwargs)
+        response = await client.send(request, stream=True)
+        if response.is_redirect:
+            location = response.headers.get("location")
+            await response.aclose()
+            if not location:
+                response.raise_for_status()
+                return response
+            current_url = str(httpx.URL(current_url).join(location))
+            continue
+        return response
+    raise HTTPException(status_code=400, detail="Too many redirects while fetching video_url")
 
 
 async def _download_to_file(url: str, dest_path: str, timeout: float = 180.0) -> None:
     _validate_download_url(url)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        async with client.stream("GET", url) as response:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        response = await _validated_stream_request(client, "GET", url)
+        try:
             response.raise_for_status()
             with open(dest_path, "wb") as handle:
                 async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
                     handle.write(chunk)
+        finally:
+            await response.aclose()
 
 
 # --------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import path from "node:path";
 import { selectComposition, renderMedia } from "@remotion/renderer";
 import { getBundleLocation } from "./bundle.js";
 import { renderJobs } from "./server.js";
-import { buildRenderOutputLocation } from "./lib/render-utils.js";
+import { buildRenderOutputLocation, isSafeJobId } from "./lib/render-utils.js";
 
 export interface RenderParams {
   renderId: string;
@@ -35,6 +35,13 @@ export async function executeRender(params: RenderParams): Promise<void> {
   }
 
   try {
+    if (!isSafeJobId(jobId)) {
+      // Security: jobId is client-controlled and is used to build a
+      // filesystem path below -- reject anything that isn't a well-formed
+      // identifier before it ever reaches path.join/mkdirSync.
+      throw new Error(`Invalid jobId: ${jobId}`);
+    }
+
     job.status = "rendering";
     job.progress = 0;
 

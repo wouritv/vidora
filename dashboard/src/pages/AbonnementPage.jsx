@@ -1,6 +1,7 @@
 import React, {useEffect, useState} from "react";
 import {Check, CreditCardIcon, Star, Crown, Sparkles, Loader2, Coins, Plus, Minus} from "lucide-react";
 import {getApiUrl} from "../config.js";
+import { getAuthHeaders } from "../lib/apiAuth";
 import { useAuth } from "../state/AuthContext";
 import { useUserCredits } from "../state/UserCreditsContext";
 import { useTranslation } from "../state/LanguageContext";
@@ -74,7 +75,7 @@ export default function AbonnementPage() {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "X-User-Id": user.id,
+                    ...getAuthHeaders(user.id),
                     ...(user?.email ? { "X-User-Email": user.email } : {}),
                 },
                 body: JSON.stringify({
@@ -110,7 +111,7 @@ export default function AbonnementPage() {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "X-User-Id": user.id,
+                    ...getAuthHeaders(user.id),
                     ...(user?.email ? { "X-User-Email": user.email } : {}),
                 },
                 body: JSON.stringify({ amount_usd: buyAmount }),
@@ -131,7 +132,7 @@ export default function AbonnementPage() {
             try {
                 const response = await fetch(getApiUrl(`/api/souscription`), {
                     headers: {
-                        "X-User-Id": user.id,
+                        ...getAuthHeaders(user.id),
                     },
                 });
 

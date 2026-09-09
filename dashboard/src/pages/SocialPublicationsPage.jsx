@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Search, Trash2, ExternalLink, Calendar, Filter } from "lucide-react";
 import { getApiUrl } from "../config";
+import { getAuthHeaders } from "../lib/apiAuth";
 import { useAuth } from "../state/AuthContext";
 import { useTranslation } from "../state/LanguageContext";
 
@@ -257,7 +258,7 @@ const deleteSocialPublication = async ({
         const response = await fetch(getApiUrl(`/api/social/publish-jobs/${publication.id}`), {
             method: "DELETE",
             headers: {
-                "X-User-Id": userId,
+                ...getAuthHeaders(userId),
             },
         });
 
@@ -301,7 +302,7 @@ const fetchSocialPublications = async ({
 
     const response = await fetch(getApiUrl(`/api/social/publish-jobs?${params.toString()}`), {
         headers: {
-            "X-User-Id": userId,
+            ...getAuthHeaders(userId),
         },
     });
 

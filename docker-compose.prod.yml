@@ -17,6 +17,11 @@ services:
     restart: unless-stopped
     networks:
       - prod-network
+    # Security: cap resource usage so a single abusive/misbehaving job can't
+    # exhaust host memory/CPU and starve the other services on the VPS
+    # (audit finding H14).
+    mem_limit: ${BACKEND_MEM_LIMIT:-4g}
+    cpus: ${BACKEND_CPU_LIMIT:-4}
 
   frontend:
     image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-latest}
@@ -28,23 +33,31 @@ services:
       - backend
     networks:
       - prod-network
+    mem_limit: ${FRONTEND_MEM_LIMIT:-1g}
+    cpus: ${FRONTEND_CPU_LIMIT:-1}
 
   renderer:
     image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-latest}
     container_name: vireel-prod-renderer
     ports:
-      - "5002:3100"
+      # Bound to loopback only: render-service has no per-user auth of its
+      # own and must only be reachable from the backend over the internal
+      # Docker network, never from the public internet.
+      - "127.0.0.1:5002:3100"
     volumes:
       - output-data:/output
     environment:
       - REMOTION_BUNDLE_PATH=/app/remotion
       - OUTPUT_DIR=/output
       - PORT=3100
+      - RENDER_SERVICE_API_KEY=${RENDER_SERVICE_API_KEY:?RENDER_SERVICE_API_KEY must be set}
     restart: unless-stopped
     depends_on:
       - backend
     networks:
       - prod-network
+    mem_limit: ${RENDERER_MEM_LIMIT:-4g}
+    cpus: ${RENDERER_CPU_LIMIT:-4}
 
   pot-provider:
     image: brainicism/bgutil-ytdlp-pot-provider
@@ -52,6 +65,8 @@ services:
     restart: unless-stopped
     networks:
       - prod-network
+    mem_limit: ${POT_PROVIDER_MEM_LIMIT:-512m}
+    cpus: ${POT_PROVIDER_CPU_LIMIT:-1}
 
 volumes:
   output-data:
