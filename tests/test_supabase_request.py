@@ -496,7 +496,13 @@ def test_soft_delete_project_deletes_reels_captions_and_project(monkeypatch):
     fake_client = _FakeClient({
         supabase_request.SUPABASE_REELS_TABLE: [_FakeResponse(data=[])],
         supabase_request.SUPABASE_CAPTIONS_TABLE: [_FakeResponse(data=[])],
-        supabase_request.SUPABASE_PROJECTS_TABLE: [_FakeResponse(data=[{"id": "p1"}])],
+        # Two responses: the ownership-verification SELECT done before any
+        # cascading delete (security hardening, audit finding H5), then the
+        # final project DELETE.
+        supabase_request.SUPABASE_PROJECTS_TABLE: [
+            _FakeResponse(data=[{"id": "p1"}]),
+            _FakeResponse(data=[{"id": "p1"}]),
+        ],
     })
     _patch_get_client(monkeypatch, supabase_request, fake_client)
 
@@ -1216,6 +1222,11 @@ def test_deduct_user_credits_debt_and_storage_overage_paths(monkeypatch):
         {supabase_request.SUPABASE_USER_DATA_TABLE: [_FakeResponse(data=[{"user_id": "u1"}])]}
     )
     _patch_get_client(monkeypatch, supabase_request, fake_client)
+    # Security hardening (audit finding C7) caps how much debt an account can
+    # accrue; the default ceiling is 0, which would reject this test's
+    # debt-accrual scenario outright, so raise it high enough for the
+    # scenario below to exercise the "allowed, bounded debt" path.
+    monkeypatch.setattr(supabase_request, "MAX_CREDIT_DEBT", 10.0)
 
     async def _existing_for_debt(_uid):
         return {

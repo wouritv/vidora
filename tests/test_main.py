@@ -452,12 +452,12 @@ def _install_cli_runtime_stubs(monkeypatch, tmp_path, *, shorts_payload=None):
             self.stderr = types.SimpleNamespace(read=lambda: b"")
             self.returncode = 0
 
-        def wait(self):
+        def wait(self, timeout=None):
             return 0
 
     monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _Proc())
 
-    def _run(cmd, stdout=None, stderr=None, check=False):
+    def _run(cmd, stdout=None, stderr=None, check=False, **kwargs):
         if isinstance(cmd, list) and cmd and cmd[0] == "ffmpeg" and cmd[-1].endswith(".mp4"):
             os.makedirs(os.path.dirname(cmd[-1]) or ".", exist_ok=True)
             with open(cmd[-1], "wb") as f:
@@ -1314,7 +1314,7 @@ def test_process_frame_pipeline_and_audio_merge_helpers(monkeypatch):
             self.stderr = types.SimpleNamespace(read=lambda: b"")
             self.returncode = 0
 
-        def wait(self):
+        def wait(self, timeout=None):
             return 0
 
     class _Cap:
@@ -1739,7 +1739,7 @@ def test_cookie_render_and_process_frame_extra_branches(monkeypatch):
             self.stderr = types.SimpleNamespace(read=lambda: b"stderr")
             self.returncode = 0
 
-        def wait(self):
+        def wait(self, timeout=None):
             return 0
 
     class _Cap:

@@ -115,6 +115,24 @@ def _import_app_with_stubs(monkeypatch):
     return importlib.import_module("app")
 
 
+def _auth_headers(user_id="u1"):
+    """Build a valid Authorization Bearer header for TestClient calls.
+
+    Endpoints now require a verified Supabase JWT (audit finding C1) instead
+    of trusting a plain X-User-Id header, so any test driving a real request
+    through TestClient needs one of these or it gets rejected with 401
+    before ever reaching the endpoint logic under test.
+    """
+    import jwt as pyjwt
+
+    token = pyjwt.encode(
+        {"sub": user_id, "aud": "authenticated", "exp": 9999999999},
+        "unit-test-supabase-jwt-secret",
+        algorithm="HS256",
+    )
+    return {"Authorization": f"Bearer {token}", "X-User-Id": user_id}
+
+
 def test_verify_supabase_jwt_accepts_valid_hs256_token(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
     import jwt as pyjwt
@@ -233,17 +251,23 @@ def test_estimate_transcript_duration_uses_max_segment_or_meta(monkeypatch):
 
 
 def test_get_user_id_header_success_and_missing(monkeypatch):
+    # Security regression test: get_user_id_header used to trust a plain
+    # client-supplied X-User-Id header (spoofable by any caller). It now
+    # requires a verified Supabase JWT Bearer token instead (audit finding
+    # C1) -- this exercises both the success path (valid token) and the
+    # rejection path (no Authorization header at all).
     app = _import_app_with_stubs(monkeypatch)
+    import jwt as pyjwt
 
-    class _Req:
-        def __init__(self, user_id=None):
-            self.headers = {}
-            if user_id is not None:
-                self.headers["X-User-Id"] = user_id
+    token = pyjwt.encode(
+        {"sub": "u-1", "aud": "authenticated", "exp": 9999999999},
+        "unit-test-supabase-jwt-secret",
+        algorithm="HS256",
+    )
 
-    assert app.get_user_id_header(_Req("u-1")) == "u-1"
+    assert app.get_user_id_header(None, authorization=f"Bearer {token}") == "u-1"
     with pytest.raises(app.HTTPException):
-        app.get_user_id_header(_Req())
+        app.get_user_id_header(None, authorization=None)
 
 
 def test_resolve_scheduled_datetime_handles_aware_and_naive(monkeypatch):
@@ -1221,7 +1245,7 @@ def test_get_status_404_when_unknown_job(monkeypatch):
     app.reel_job_manager.get_job_view = AsyncMock(return_value=None)
 
     with TestClient(app.app) as client:
-        resp = client.get("/api/status/missing")
+        resp = client.get("/api/status/missing", headers=_auth_headers("u1"))
     assert resp.status_code == 404
 
 
@@ -1239,7 +1263,7 @@ def test_get_status_includes_partial_clips_from_runtime(monkeypatch):
     monkeypatch.setattr(app.os, "listdir", lambda p: ["job-1_clip_1.mp4", "temp_ignore.mp4", "job-1_clip_2.mp4"])
 
     with TestClient(app.app) as client:
-        resp = client.get("/api/status/job-1")
+        resp = client.get("/api/status/job-1", headers=_auth_headers("u1"))
     assert resp.status_code == 200
     payload = resp.json()
     assert "partialClips" in payload
@@ -1255,7 +1279,7 @@ def test_edit_endpoint_requires_api_key(monkeypatch):
         resp = client.post(
             "/api/edit",
             json={"job_id": "j1", "clip_index": 0},
-            headers={"X-User-Id": "u1"},
+            headers=_auth_headers("u1"),
         )
     assert resp.status_code == 400
 
@@ -1268,8 +1292,12 @@ def test_edit_endpoint_job_not_found_without_input_filename(monkeypatch):
     with TestClient(app.app) as client:
         resp = client.post(
             "/api/edit",
-            json={"job_id": "missing", "clip_index": 0},
-            headers={"X-User-Id": "u1"},
+            # A well-formed but nonexistent job_id: must pass the
+            # _JOB_ID_PATTERN format check (audit finding C7) to reach the
+            # "not found" branch this test actually targets, rather than
+            # being rejected earlier as a malformed id.
+            json={"job_id": "deadbeef-dead-beef-dead-beefdeadbeef", "clip_index": 0},
+            headers=_auth_headers("u1"),
         )
     assert resp.status_code == 404
 
@@ -1281,7 +1309,7 @@ def test_process_captions_endpoint_requires_ack(monkeypatch):
             "/api/captions/process",
             files={"file": ("v.mp4", b"abc", "video/mp4")},
             data={"acknowledged": "false"},
-            headers={"X-User-Id": "u1"},
+            headers=_auth_headers("u1"),
         )
     assert resp.status_code == 400
 
@@ -1291,7 +1319,7 @@ def test_ensure_clip_preview_endpoint_uses_mocked_preview(monkeypatch):
     app._ensure_preview_image_for_clip = AsyncMock(return_value="https://cdn.example/p.jpg")
 
     with TestClient(app.app) as client:
-        resp = client.get("/api/clip/job-1/0/preview-image/ensure", headers={"X-User-Id": "u1"})
+        resp = client.get("/api/clip/job-1/0/preview-image/ensure", headers=_auth_headers("u1"))
     assert resp.status_code == 200
     assert resp.json()["ensured"] is True
 
@@ -1446,8 +1474,11 @@ def test_process_endpoint_json_url_enqueues_job(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "_validate_reel_source_constraints", lambda **kwargs: None)
     monkeypatch.setattr(app, "_estimate_reel_required_credits", lambda **kwargs: 1.25)
     monkeypatch.setattr(app, "_resolve_user_job_priority", AsyncMock(return_value=3))
-    assert_credits = AsyncMock()
-    monkeypatch.setattr(app, "_assert_user_has_required_credits", assert_credits)
+    # Security hardening (audit finding H8): job creation now atomically
+    # *reserves* the estimated credits via _reserve_job_credits instead of
+    # merely checking the balance with _assert_user_has_required_credits.
+    reserve_credits = AsyncMock()
+    monkeypatch.setattr(app, "_reserve_job_credits", reserve_credits)
     monkeypatch.setattr(app, "is_supabase_configured", lambda: False)
     app.reel_job_manager.create_job = AsyncMock()
     app.reel_job_manager.enqueue_job = AsyncMock()
@@ -1487,7 +1518,7 @@ def test_process_endpoint_json_url_enqueues_job(monkeypatch, tmp_path):
     assert payload["status"] == "queued"
     assert "job-json-1" in app.jobs
     assert "-u" in app.jobs["job-json-1"]["cmd"]
-    assert_credits.assert_awaited_once()
+    reserve_credits.assert_awaited_once()
     app.reel_job_manager.create_job.assert_awaited_once()
     app.reel_job_manager.enqueue_job.assert_awaited_once_with("job-json-1")
     enqueue_job.assert_awaited_once_with("job-json-1", priority=3)
@@ -1551,18 +1582,18 @@ def test_render_proxy_endpoints_forward_requests(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def post(self, url, json):
+        async def post(self, url, json, headers=None):
             return types.SimpleNamespace(json=lambda: {"ok": True, "url": url, "body": json})
 
-        async def get(self, url):
+        async def get(self, url, headers=None):
             return types.SimpleNamespace(json=lambda: {"ok": True, "url": url})
 
     httpx_mod.AsyncClient = _Client
     monkeypatch.setitem(sys.modules, "httpx", httpx_mod)
 
     with TestClient(app.app) as client:
-        post_resp = client.post("/api/render", json={"composition": "Main"})
-        get_resp = client.get("/api/render/r-123")
+        post_resp = client.post("/api/render", json={"composition": "Main"}, headers=_auth_headers("u1"))
+        get_resp = client.get("/api/render/r-123", headers=_auth_headers("u1"))
 
     assert post_resp.status_code == 200
     assert post_resp.json()["url"] == "http://render.test/render"
@@ -1587,7 +1618,7 @@ def test_generate_effects_config_with_input_filename_success(monkeypatch, tmp_pa
     monkeypatch.setattr(
         app.subprocess,
         "check_output",
-        lambda _cmd: b'{"streams":[{"width":1080,"height":1920,"r_frame_rate":"30/1","duration":8}],"format":{"duration":8}}',
+        lambda _cmd, **_kwargs: b'{"streams":[{"width":1080,"height":1920,"r_frame_rate":"30/1","duration":8}],"format":{"duration":8}}',
     )
     monkeypatch.setattr(app.shutil, "copy", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(app.os, "remove", lambda _p: None)
@@ -1613,7 +1644,7 @@ def test_generate_effects_config_with_input_filename_success(monkeypatch, tmp_pa
         resp = client.post(
             "/api/effects/generate",
             json={"job_id": "j-effects", "clip_index": 0, "input_filename": "clip.mp4"},
-            headers={"X-User-Id": "u1"},
+            headers=_auth_headers("u1"),
         )
 
     assert resp.status_code == 200, resp.text
@@ -1635,7 +1666,7 @@ def test_add_subtitles_dubbed_video_uses_transcription(monkeypatch, tmp_path):
 
     meta = {
         "transcript": {"segments": [{"text": "hello"}]},
-        "shorts": [{"start": 0.0, "end": 4.0, "video_url": "/videos/job-sub/translated_clip.mp4"}],
+        "shorts": [{"start": 0.0, "end": 4.0, "video_url": "/videos/deadbeef/translated_clip.mp4"}],
     }
     monkeypatch.setattr(app, "_get_or_build_job_metadata", AsyncMock(return_value=("/tmp/meta.json", meta)))
 
@@ -1658,18 +1689,21 @@ def test_add_subtitles_dubbed_video_uses_transcription(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(app, "SubtitleStyleOptions", _StyleOptions)
-    app.jobs["job-sub"] = {"result": {"clips": [{"video_url": "/videos/job-sub/translated_clip.mp4"}]}}
+    app.jobs["deadbeef"] = {
+        "user_id": "u1",
+        "result": {"clips": [{"video_url": "/videos/deadbeef/translated_clip.mp4"}]},
+    }
 
     with TestClient(app.app) as client:
         resp = client.post(
             "/api/subtitle",
             json={
-                "job_id": "job-sub",
+                "job_id": "deadbeef",
                 "clip_index": 0,
                 "input_filename": "translated_clip.mp4",
                 "words_per_line": 6,
             },
-            headers={"X-User-Id": "u1"},
+            headers=_auth_headers("u1"),
         )
 
     assert resp.status_code == 200
