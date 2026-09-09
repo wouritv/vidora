@@ -6295,6 +6295,51 @@ def get_languages():
     }
 
 
+async def _resolve_translation_cache_and_owner(request: Request, job_id: str, clip_index: int, translation_cache: Dict[str, Any]):
+    request_user_id = _get_authenticated_user_id_optional(request) or ""
+    owner_user_id = request_user_id or await _resolve_job_owner_user_id(job_id, clip_index)
+    transcription_row = None
+    if owner_user_id and is_supabase_configured():
+        transcription_row = await _load_cached_transcription(owner_user_id, job_id, clip_index)
+        db_cache = (transcription_row or {}).get("translations_cache") or {}
+        if isinstance(db_cache, dict) and db_cache:
+            translation_cache = db_cache
+    return owner_user_id, transcription_row, translation_cache
+
+
+async def _persist_translation_usage_billing(
+    owner_user_id: str, req: "TranslateRequest", normalized_clip_index: int, transcription_row: Optional[Dict[str, Any]],
+    translation_cache: Dict[str, Any], source_lang: str, target_lang: str, transcript: Dict[str, Any], cache_stats: Dict[str, Any],
+) -> None:
+    if not (owner_user_id and is_supabase_configured()):
+        return
+    usage_payload = {
+        "operation": "translation",
+        "source_language": source_lang or "auto",
+        "target_language": target_lang,
+        "cache": {"hits": cache_stats.get("hits", 0), "misses": cache_stats.get("misses", 0)},
+        "usage": cache_stats.get("usage", {}),
+        "total_cost_usd": cache_stats.get("cost_usd", 0.0),
+    }
+    if not transcription_row:
+        await _persist_transcription_cache(
+            user_id=owner_user_id,
+            job_id=req.job_id,
+            clip_index=normalized_clip_index,
+            source_type="translation",
+            source_value=req.input_url or req.input_filename or req.job_id,
+            transcript=transcript,
+            billing_details=usage_payload,
+        )
+    await supabase_update_transcription_translations_cache(
+        req.job_id,
+        normalized_clip_index,
+        owner_user_id,
+        translation_cache,
+        billing_details=usage_payload,
+    )
+
+
 @app.post("/api/translate/captions", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_captions(req: TranslateRequest, request: Request):
     """Translate reel transcript into Remotion-friendly timed word captions."""
@@ -6321,20 +6366,14 @@ async def translate_captions(req: TranslateRequest, request: Request):
     if not source_segments:
         raise HTTPException(status_code=400, detail="No transcript segments found for this clip range")
 
-    request_user_id = _get_authenticated_user_id_optional(request) or ""
-    owner_user_id = request_user_id or await _resolve_job_owner_user_id(req.job_id, normalized_clip_index)
-    transcription_row = None
-    if owner_user_id and is_supabase_configured():
-        transcription_row = await _load_cached_transcription(owner_user_id, req.job_id, normalized_clip_index)
-        db_cache = (transcription_row or {}).get("translations_cache") or {}
-        if isinstance(db_cache, dict) and db_cache:
-            translation_cache = db_cache
-
-    def run_translate_segments():
-        return _translate_segments_with_cache(source_segments, source_lang, target_lang, translation_cache)
+    owner_user_id, transcription_row, translation_cache = await _resolve_translation_cache_and_owner(
+        request, req.job_id, normalized_clip_index, translation_cache,
+    )
 
     loop = asyncio.get_event_loop()
-    translated_segments, cache_stats = await loop.run_in_executor(None, run_translate_segments)
+    translated_segments, cache_stats = await loop.run_in_executor(
+        None, _translate_segments_with_cache, source_segments, source_lang, target_lang, translation_cache,
+    )
 
     if cache_stats["misses"] > 0:
         try:
@@ -6342,40 +6381,10 @@ async def translate_captions(req: TranslateRequest, request: Request):
         except Exception as e:
             print(f"⚠️ Failed to persist translation cache: {e}")
 
-    if owner_user_id and is_supabase_configured():
-        usage_payload = {
-            "operation": "translation",
-            "source_language": source_lang or "auto",
-            "target_language": target_lang,
-            "cache": {"hits": cache_stats.get("hits", 0), "misses": cache_stats.get("misses", 0)},
-            "usage": cache_stats.get("usage", {}),
-            "total_cost_usd": cache_stats.get("cost_usd", 0.0),
-        }
-        if transcription_row:
-            await supabase_update_transcription_translations_cache(
-                req.job_id,
-                normalized_clip_index,
-                owner_user_id,
-                translation_cache,
-                billing_details=usage_payload,
-            )
-        else:
-            await _persist_transcription_cache(
-                user_id=owner_user_id,
-                job_id=req.job_id,
-                clip_index=normalized_clip_index,
-                source_type="translation",
-                source_value=req.input_url or req.input_filename or req.job_id,
-                transcript=data.get("transcript") or {},
-                billing_details=usage_payload,
-            )
-            await supabase_update_transcription_translations_cache(
-                req.job_id,
-                normalized_clip_index,
-                owner_user_id,
-                translation_cache,
-                billing_details=usage_payload,
-            )
+    await _persist_translation_usage_billing(
+        owner_user_id, req, normalized_clip_index, transcription_row, translation_cache,
+        source_lang, target_lang, data.get("transcript") or {}, cache_stats,
+    )
 
     captions = _translated_segments_to_caption_words(translated_segments)
     if not captions:
