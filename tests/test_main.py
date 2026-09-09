@@ -679,7 +679,13 @@ def test_normalize_short_durations_clips_to_min_max(monkeypatch):
     }
 
     result = main._normalize_short_durations(clips_data, 150)
-    assert len(result["shorts"]) >= 2  # Should keep valid ones
+    assert len(result["shorts"]) == 3
+    assert result["shorts"][0]["start"] == 0.0
+    assert result["shorts"][0]["end"] == 30.0
+    assert result["shorts"][1]["start"] == 0.0
+    assert result["shorts"][1]["end"] == 60.0
+    assert result["shorts"][2]["start"] == 0.0
+    assert result["shorts"][2]["end"] == 90.0
 
 
 def test_extract_error_message_handles_exceptions(monkeypatch):
@@ -1013,6 +1019,69 @@ def test_transcribe_video_hybrid_fallback(monkeypatch):
     monkeypatch.setattr(main, "_transcribe_with_faster_whisper", lambda _: {"text": "fallback", "segments": []})
     result = main.transcribe_video("in.mp4")
     assert result["text"] == "fallback"
+
+
+def test_transcribe_video_faster_whisper_provider(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "faster_whisper")
+    monkeypatch.setattr(main, "_transcribe_with_faster_whisper", lambda _: {"text": "local", "segments": []})
+    result = main.transcribe_video("in.mp4")
+    assert result["text"] == "local"
+
+
+def test_transcribe_video_hybrid_returns_assembly_result_without_fallback(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "hybrid")
+    monkeypatch.setenv("ASSEMBLY_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("ASSEMBLY_RETRY_DELAY_SECONDS", "0")
+
+    fallback_calls = {"n": 0}
+
+    def _fallback(_):
+        fallback_calls["n"] += 1
+        return {"text": "fallback", "segments": []}
+
+    monkeypatch.setattr(main, "_transcribe_with_assemblyai", lambda _: {"text": "asm", "segments": []})
+    monkeypatch.setattr(main, "_transcribe_with_faster_whisper", _fallback)
+
+    result = main.transcribe_video("in.mp4")
+    assert result["text"] == "asm"
+    assert fallback_calls["n"] == 0
+
+
+def test_transcribe_video_hybrid_fallback_disabled_raises(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "hybrid")
+    monkeypatch.setenv("TRANSCRIBER_FALLBACK", "none")
+    monkeypatch.setenv("ASSEMBLY_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("ASSEMBLY_RETRY_DELAY_SECONDS", "0")
+    monkeypatch.setattr(main, "_transcribe_with_assemblyai", lambda _: (_ for _ in ()).throw(RuntimeError("down")))
+    with pytest.raises(RuntimeError, match="fallback disabled"):
+        main.transcribe_video("in.mp4")
+
+
+def test_transcribe_video_assembly_retries_sleep_between_attempts(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setenv("TRANSCRIBER_PROVIDER", "assemblyai")
+    monkeypatch.setenv("ASSEMBLY_RETRY_ATTEMPTS", "3")
+    monkeypatch.setenv("ASSEMBLY_RETRY_DELAY_SECONDS", "0.5")
+
+    calls = {"n": 0}
+    sleeps = []
+
+    def _asm(_):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("temporary")
+        return {"text": "ok", "segments": []}
+
+    monkeypatch.setattr(main, "_transcribe_with_assemblyai", _asm)
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = main.transcribe_video("in.mp4")
+    assert result["text"] == "ok"
+    assert calls["n"] == 3
+    assert sleeps == [0.5, 0.5]
 
 
 def test_get_viral_clips_provider_routing(monkeypatch):
@@ -1432,6 +1501,28 @@ def test_normalize_short_durations_and_main_entry_guard(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["main.py", "-i", str(missing)])
     with pytest.raises(SystemExit):
         runpy.run_module("main", run_name="__main__")
+
+
+def test_normalize_short_durations_skips_invalid_and_rounds(monkeypatch):
+    main = _import_main_with_stubs(monkeypatch)
+    monkeypatch.setattr(main, "MIN_CLIP_DURATION_SECONDS", 10)
+    monkeypatch.setattr(main, "MAX_CLIP_DURATIONS_SECOND", 20)
+
+    clips_data = {
+        "shorts": [
+            "bad-item",
+            {"start": "1.11119", "end": "9.0"},
+            {"start": 10, "end": 10},
+            {"start": 5, "end": 25},
+        ]
+    }
+
+    result = main._normalize_short_durations(clips_data, 30)
+    assert len(result["shorts"]) == 2
+    assert result["shorts"][0]["start"] == 1.111
+    assert result["shorts"][0]["end"] == 11.111
+    assert result["shorts"][1]["start"] == 5.0
+    assert result["shorts"][1]["end"] == 25.0
 
 
 def test_visual_helpers_and_scene_detector_paths(monkeypatch):

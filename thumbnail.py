@@ -171,35 +171,35 @@ OUTPUT JSON:
         return {"titles": ["Could not refine titles - please try again"]}
 
 
-def _build_thumbnail_prompt_parts(title, video_context, extra_prompt, face_image_path, bg_image_path):
-    prompt_parts = []
+def _append_image_if_exists(prompt_parts, image_path):
+    if not image_path or not os.path.exists(image_path):
+        return False
 
-    # Add face image if provided
-    if face_image_path and os.path.exists(face_image_path):
-        face_img = Image.open(face_image_path)
-        prompt_parts.append(face_img)
+    prompt_parts.append(Image.open(image_path))
+    return True
 
-    # Add background image if provided
-    if bg_image_path and os.path.exists(bg_image_path):
-        bg_img = Image.open(bg_image_path)
-        prompt_parts.append(bg_img)
 
-    # Build video context block
-    context_block = ""
-    if video_context:
-        context_block = f"""
+def _build_thumbnail_context_block(video_context):
+    if not video_context:
+        return ""
+
+    return f"""
 VIDEO CONTEXT (use this to understand the video and design a relevant thumbnail):
 {video_context}
 """
 
-    # Build extra instructions block (high priority)
-    extra_block = ""
-    if extra_prompt:
-        extra_block = f"""
+
+def _build_thumbnail_extra_block(extra_prompt):
+    if not extra_prompt:
+        return ""
+
+    return f"""
 ⚠️ MANDATORY USER INSTRUCTIONS (MUST follow these exactly — they override any default behavior):
 {extra_prompt}
 """
 
+
+def _build_thumbnail_text_prompt(title, context_block, extra_block, has_face_image, has_bg_image):
     text_prompt = f"""Generate a professional, eye-catching YouTube thumbnail image.
 
 VIDEO TITLE (for reference — do NOT put the full title on the thumbnail): "{title}"
@@ -218,51 +218,32 @@ DESIGN REQUIREMENTS:
 - Clean composition — text and face/subject as clear focal points
 - NO clutter, NO small text, NO watermarks"""
 
-    if face_image_path and os.path.exists(face_image_path):
+    if has_face_image:
         text_prompt += "\n- Include the provided face/person prominently with an exaggerated expression (surprise, excitement, shock)"
 
-    if bg_image_path and os.path.exists(bg_image_path):
+    if has_bg_image:
         text_prompt += "\n- Use the provided background image as the base/backdrop"
 
-    prompt_parts.append(text_prompt)
-    return prompt_parts
+    return text_prompt
 
 
-def _generate_single_thumbnail(client, prompt_parts, output_dir, session_id, index, count):
-    """Run a single Gemini thumbnail generation attempt.
+def _extract_and_save_thumbnail(response_parts, output_dir, session_id, index):
+    for part in response_parts:
+        if part.text is not None:
+            print(f"📝 [Thumbnail] Gemini text: {part.text}")
+            continue
 
-    Returns ``(url, error)`` -- exactly one of them is set on failure/no
-    image, both are None if the model returned no image and raised nothing.
-    """
-    print(f"🎨 [Thumbnail] Generating thumbnail {index + 1}/{count}...")
-    try:
-        response = client.models.generate_content(
-            model=os.environ.get("GEMINI_MODEL"),
-            contents=prompt_parts,
-            config=types.GenerateContentConfig(
-                response_modalities=["TEXT", "IMAGE"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="16:9",
-                    image_size="2K"
-                )
-            )
-        )
+        image = part.as_image()
+        if not image:
+            continue
 
-        for part in response.parts:
-            if part.text is not None:
-                print(f"📝 [Thumbnail] Gemini text: {part.text}")
-            elif image := part.as_image():
-                filename = f"thumb_{index + 1}.jpg"
-                filepath = os.path.join(output_dir, filename)
-                image.save(filepath)
-                print(f"✅ [Thumbnail] Saved: {filepath}")
-                return f"/thumbnails/{session_id}/{filename}", None
+        filename = f"thumb_{index + 1}.jpg"
+        filepath = os.path.join(output_dir, filename)
+        image.save(filepath)
+        print(f"✅ [Thumbnail] Saved: {filepath}")
+        return f"/thumbnails/{session_id}/{filename}"
 
-    except Exception as e:
-        print(f"❌ [Thumbnail] Generation {index + 1} failed: {e}")
-        return None, str(e)
-
-    return None, None
+    return None
 
 
 def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context=""):
@@ -275,16 +256,39 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
     output_dir = os.path.join("output", "thumbnails", session_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    prompt_parts = _build_thumbnail_prompt_parts(title, video_context, extra_prompt, face_image_path, bg_image_path)
+    prompt_parts = []
+    has_face_image = _append_image_if_exists(prompt_parts, face_image_path)
+    has_bg_image = _append_image_if_exists(prompt_parts, bg_image_path)
+
+    context_block = _build_thumbnail_context_block(video_context)
+    extra_block = _build_thumbnail_extra_block(extra_prompt)
+    text_prompt = _build_thumbnail_text_prompt(title, context_block, extra_block, has_face_image, has_bg_image)
+    prompt_parts.append(text_prompt)
 
     thumbnails = []
     last_error = None
     for i in range(count):
-        url, error = _generate_single_thumbnail(client, prompt_parts, output_dir, session_id, i, count)
-        if url:
-            thumbnails.append(url)
-        if error:
-            last_error = error
+        print(f"🎨 [Thumbnail] Generating thumbnail {i + 1}/{count}...")
+        try:
+            response = client.models.generate_content(
+                model=os.environ.get("GEMINI_MODEL"),
+                contents=prompt_parts,
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio="16:9",
+                        image_size="2K"
+                    )
+                )
+            )
+
+            thumbnail_path = _extract_and_save_thumbnail(response.parts, output_dir, session_id, i)
+            if thumbnail_path:
+                thumbnails.append(thumbnail_path)
+
+        except Exception as e:
+            last_error = str(e)
+            print(f"❌ [Thumbnail] Generation {i + 1} failed: {e}")
 
     if not thumbnails and last_error:
         raise RuntimeError(f"All thumbnail generations failed. Last error: {last_error}")

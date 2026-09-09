@@ -1577,21 +1577,24 @@ def _transcribe_with_faster_whisper(video_path):
     }
 
 
-def _try_assemblyai_with_retries(video_path, assembly_retry_attempts, assembly_retry_delay_seconds):
-    """Attempt AssemblyAI transcription with retries.
+def _load_transcriber_settings():
+    provider = os.getenv("TRANSCRIBER_PROVIDER", "hybrid").strip().lower()
+    fallback = os.getenv("TRANSCRIBER_FALLBACK", "faster_whisper").strip().lower()
+    assembly_retry_attempts = max(1, int(os.getenv("ASSEMBLY_RETRY_ATTEMPTS", "2")))
+    assembly_retry_delay_seconds = max(0.0, float(os.getenv("ASSEMBLY_RETRY_DELAY_SECONDS", "2")))
+    return provider, fallback, assembly_retry_attempts, assembly_retry_delay_seconds
 
-    Returns ``(result, last_error)`` where ``result`` is ``None`` if every
-    attempt failed (AssemblyAI never returns None on success).
-    """
+
+def _run_assemblyai_attempts(video_path, retry_attempts, retry_delay_seconds):
     last_error = None
-    for attempt in range(1, assembly_retry_attempts + 1):
+    for attempt in range(1, retry_attempts + 1):
         try:
             return _transcribe_with_assemblyai(video_path), None
         except Exception as exc:
             last_error = exc
-            print(f"⚠️ AssemblyAI failed (attempt {attempt}/{assembly_retry_attempts}): {exc}")
-            if attempt < assembly_retry_attempts and assembly_retry_delay_seconds > 0:
-                time.sleep(assembly_retry_delay_seconds)
+            print(f"⚠️ AssemblyAI failed (attempt {attempt}/{retry_attempts}): {exc}")
+            if attempt < retry_attempts and retry_delay_seconds > 0:
+                time.sleep(retry_delay_seconds)
     return None, last_error
 
 
@@ -1601,15 +1604,16 @@ def transcribe_video(video_path):
     TRANSCRIBER_PROVIDER: assemblyai | faster_whisper | hybrid
     TRANSCRIBER_FALLBACK: faster_whisper | none
     """
-    provider = os.getenv("TRANSCRIBER_PROVIDER", "hybrid").strip().lower()
-    fallback = os.getenv("TRANSCRIBER_FALLBACK", "faster_whisper").strip().lower()
-    assembly_retry_attempts = max(1, int(os.getenv("ASSEMBLY_RETRY_ATTEMPTS", "2")))
-    assembly_retry_delay_seconds = max(0.0, float(os.getenv("ASSEMBLY_RETRY_DELAY_SECONDS", "2")))
+    provider, fallback, assembly_retry_attempts, assembly_retry_delay_seconds = _load_transcriber_settings()
 
     print(f"🎛️  Transcriber provider: {provider}")
 
     if provider == "assemblyai":
-        result, last_error = _try_assemblyai_with_retries(video_path, assembly_retry_attempts, assembly_retry_delay_seconds)
+        result, last_error = _run_assemblyai_attempts(
+            video_path,
+            assembly_retry_attempts,
+            assembly_retry_delay_seconds,
+        )
         if result is not None:
             return result
         raise RuntimeError(f"AssemblyAI transcription failed after {assembly_retry_attempts} attempts: {last_error}")
@@ -1618,7 +1622,11 @@ def transcribe_video(video_path):
         return _transcribe_with_faster_whisper(video_path)
 
     # Hybrid: retry AssemblyAI first, then fallback local if enabled.
-    result, last_error = _try_assemblyai_with_retries(video_path, assembly_retry_attempts, assembly_retry_delay_seconds)
+    result, last_error = _run_assemblyai_attempts(
+        video_path,
+        assembly_retry_attempts,
+        assembly_retry_delay_seconds,
+    )
     if result is not None:
         return result
 
@@ -1885,28 +1893,33 @@ def _build_external_costs(transcript, clips_data):
     }
 
 
-def _normalize_single_short_clip(clip, source_duration, min_clip_duration, max_clip_duration):
+def _clip_duration_bounds():
+    return float(MIN_CLIP_DURATION_SECONDS), float(MAX_CLIP_DURATIONS_SECOND)
+
+
+def _clamp_clip_window(start, end, source_duration):
+    start = max(0.0, min(start, source_duration))
+    end = max(0.0, min(end, source_duration))
+    return start, end
+
+
+def _normalize_single_short(clip, source_duration, min_clip_duration, max_clip_duration):
     if not isinstance(clip, dict):
         return None
 
     start = _safe_float(clip.get("start"), 0.0)
     end = _safe_float(clip.get("end"), 0.0)
-
-    # timestamps absolus dans la vidéo
-    start = max(0.0, min(start, source_duration))
-    end = max(0.0, min(end, source_duration))
-
+    start, end = _clamp_clip_window(start, end, source_duration)
     if end <= start:
         return None
 
     duration = end - start
-
     if duration < min_clip_duration:
         end = min(source_duration, start + min_clip_duration)
-        duration = end - start
-        if duration < min_clip_duration:
+        if (end - start) < min_clip_duration:
             return None
 
+    duration = end - start
     if duration > max_clip_duration:
         end = start + max_clip_duration
         if end > source_duration:
@@ -1930,14 +1943,19 @@ def _normalize_short_durations(clips_data, video_duration):
     if source_duration <= 0:
         return clips_data
 
-    min_clip_duration = float(MIN_CLIP_DURATION_SECONDS)
-    max_clip_duration = float(MAX_CLIP_DURATIONS_SECOND)
+    min_clip_duration, max_clip_duration = _clip_duration_bounds()
 
     normalized_shorts = []
+
     for clip in shorts:
-        normalized_clip = _normalize_single_short_clip(clip, source_duration, min_clip_duration, max_clip_duration)
-        if normalized_clip is not None:
-            normalized_shorts.append(normalized_clip)
+        normalized = _normalize_single_short(
+            clip,
+            source_duration,
+            min_clip_duration,
+            max_clip_duration,
+        )
+        if normalized is not None:
+            normalized_shorts.append(normalized)
 
     clips_data["shorts"] = normalized_shorts
     return clips_data
