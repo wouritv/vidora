@@ -2168,6 +2168,391 @@ async def proxy_media(request: Request, url: str, user_id: Annotated[str, Depend
         background=BackgroundTask(_close_proxy_stream, upstream, client),
     )
 
+def _spawn_job_subprocess(cmd, env, job_id: str, execution_ctx: Optional[Dict[str, Any]]):
+    # Sonar false positive (S7487): this supervises the child process with
+    # Popen + a non-blocking .poll()/.terminate() loop yielding via
+    # `await asyncio.sleep(2)` between checks -- Popen's own spawn and
+    # .poll()/.terminate() calls don't block the loop for any
+    # meaningful duration (they're near-instant syscalls), and stdout
+    # is drained on a dedicated thread below rather than on this task.
+    # Converting to asyncio.create_subprocess_exec would need a
+    # parallel rewrite of the preemption/timeout/partial-result-polling
+    # state machine below and the threaded log capture -- deliberately
+    # deferred as its own separately-tested change given how central
+    # this function is to job execution, rather than rewritten
+    # untested in the same pass as unrelated Sonar findings.
+    process = subprocess.Popen(  # NOSONAR
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, # Merge stderr to stdout
+        env=env,
+        cwd=os.getcwd()
+    )
+    if execution_ctx is not None:
+        execution_ctx["process"] = process
+
+    # We need to capture logs in a thread because Popen isn't async
+    t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
+    t_log.daemon = True
+    t_log.start()
+    return process
+
+
+def _terminate_job_process_if_needed(process, job_id: str, execution_ctx: Optional[Dict[str, Any]], start_wait: float) -> None:
+    if execution_ctx and execution_ctx.get("preempt_requested"):
+        try:
+            process.terminate()  # NOSONAR(S7487) same rationale as the Popen() call above
+        except Exception:
+            pass
+    elif time.time() - start_wait > REEL_JOB_MAX_PROCESSING_SECONDS:
+        # Security/reliability: kill a job that has been running far
+        # longer than any legitimate input should require, instead
+        # of letting it occupy a worker slot indefinitely (see
+        # security audit finding H13).
+        jobs[job_id]['logs'].append(
+            f"Job exceeded max processing time ({REEL_JOB_MAX_PROCESSING_SECONDS}s); terminating."
+        )
+        try:
+            process.terminate()  # NOSONAR(S7487) same rationale as the Popen() call above
+        except Exception:
+            pass
+
+
+async def _publish_partial_reel_results_if_ready(output_dir: str, job_id: str, pipeline) -> None:
+    # Check for partial results every 2 seconds. Look for metadata file.
+    try:
+        json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
+        if not json_files:
+            return
+        target_json = json_files[0]
+        # Read metadata (it might be being written to, so simple try/except or just read)
+        # Use a lock or just robust read? json.load might fail if file is partial.
+        # Usually main.py writes it once at start (based on my review).
+        if os.path.getsize(target_json) <= 0:
+            return
+        # Sonar false positive (S7493): a small, infrequent read
+        # (this loop only reaches here once every 2s, see
+        # the `await asyncio.sleep(2)` a few lines up) --
+        # not worth the risk of converting to aiofiles here,
+        # which would break this function's existing
+        # `builtins.open` test-mocking (aiofiles captures
+        # its own reference to open() at import time, before
+        # a test's monkeypatch of builtins.open can apply).
+        with open(target_json, 'r') as f:  # NOSONAR
+            data = json.load(f)
+
+        base_name = os.path.basename(target_json).replace(_METADATA_JSON_SUFFIX, '')
+        clips = data.get('shorts', [])
+        cost_analysis = data.get('cost_analysis')
+
+        # Check which clips actually exist on disk
+        ready_clips = []
+        for i, clip in enumerate(clips):
+            clip_filename = f"{base_name}_clip_{i+1}.mp4"
+            clip_path = os.path.join(output_dir, clip_filename)
+            if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
+                # Checking if file is growing? For now assume if it exists and main.py moves it there, it's done.
+                # main.py writes to temp_... then moves to final name. So presence means ready!
+                clip_copy = dict(clip)
+                clip_copy['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                clip_copy['reel_clip_index'] = i
+                clip_copy['reel_job_id'] = job_id
+                ready_clips.append(clip_copy)
+
+        if ready_clips:
+            jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
+            await pipeline.cutting_clips()
+    except Exception:
+        # Ignore read errors during processing
+        pass
+
+
+async def _supervise_job_subprocess(process, job_id: str, output_dir: str, pipeline, execution_ctx: Optional[Dict[str, Any]]) -> int:
+    start_wait = time.time()
+    while process.poll() is None:  # NOSONAR(S7487) same rationale as the Popen() call above
+        _terminate_job_process_if_needed(process, job_id, execution_ctx, start_wait)
+        await asyncio.sleep(2)
+        await _publish_partial_reel_results_if_ready(output_dir, job_id, pipeline)
+    return process.returncode
+
+
+async def _requeue_preempted_job(job_id: str, job_priority: int) -> None:
+    jobs[job_id]['status'] = 'queued'
+    jobs[job_id]['logs'].append("Job preempted by a higher-priority task and re-queued.")
+    await reel_job_manager.enqueue_job(job_id)
+    await enqueue_reel_job(job_id, priority=job_priority)
+
+
+def _find_completed_job_metadata_path(job_id: str, output_dir: str) -> Optional[str]:
+    json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
+    if not json_files:
+        # Backward-compat rescue if outputs were written to OUTPUT_DIR root
+        if _relocate_root_job_artifacts(job_id, output_dir):
+            json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
+    return json_files[0] if json_files else None
+
+
+async def _persist_completed_reel_job_or_fail(
+    job_id: str, job_data: Dict[str, Any], output_dir: str, user_id: Optional[str],
+    source_is_url: bool, target_json: str, clips: List[Dict[str, Any]], start_ts: float,
+):
+    try:
+        project_id = job_data.get("project_id") if job_data else None
+        return await _persist_reels_for_job(
+            job_id=job_id,
+            user_id=user_id,
+            output_dir=output_dir,
+            metadata_path=target_json,
+            clips=clips,
+            uses_youtube_source=source_is_url,
+            project_id=project_id,
+        )
+    except Exception as persist_error:
+        jobs[job_id]['status'] = 'failed'
+        jobs[job_id]['logs'].append(f"Supabase persistence failed: {persist_error}")
+        fail_result = await _finalize_failed_reel_job(
+            job_id=job_id,
+            user_id=user_id,
+            output_dir=output_dir,
+            job_data=job_data,
+            start_ts=start_ts,
+            error_message=f"Supabase persistence failed: {persist_error}",
+            error_code="REEL_PERSISTENCE_FAILED",
+            retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+        )
+        if fail_result.get("retry"):
+            _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+        return None
+
+
+def _enrich_clips_with_saved_rows(clips: List[Dict[str, Any]], saved_rows: List[Dict[str, Any]], job_id: str) -> List[Dict[str, Any]]:
+    enriched_clips: List[Dict[str, Any]] = []
+    for i, clip in enumerate(clips):
+        clip_copy = dict(clip)
+        clip_copy['reel_clip_index'] = i
+        clip_copy['reel_job_id'] = job_id
+        if i < len(saved_rows):
+            clip_copy['video_url'] = saved_rows[i].get('reel_playback_url') or saved_rows[i].get('reel_url')
+            clip_copy['reel_id'] = saved_rows[i].get('id')
+            clip_copy['thumbnail_url'] = saved_rows[i].get('reel_thumbnail_url') or saved_rows[i].get('reel_preview_url') or ''
+            clip_copy['preview_image_url'] = saved_rows[i].get('reel_preview_url') or saved_rows[i].get('reel_thumbnail_url') or ''
+        enriched_clips.append(clip_copy)
+    return enriched_clips
+
+
+async def _finalize_completed_reel_billing(
+    job_id: str, job_data: Dict[str, Any], user_id: Optional[str], source_is_url: bool,
+    start_ts: float, enriched_clips: List[Dict[str, Any]], cost_analysis, saved_rows: List[Dict[str, Any]],
+) -> None:
+    elapsed = round(calc_elapsed_seconds(start_ts), 3)
+    total_reel_size_bytes = sum(int(row.get("reel_size_bytes") or 0) for row in saved_rows)
+    billing = _estimate_reel_job_consumption(
+        elapsed_seconds=elapsed,
+        uses_youtube=source_is_url,
+        processed_clips=len(saved_rows),
+        expected_clips=len(enriched_clips),
+        storage_bytes=total_reel_size_bytes,
+    )
+    debit_applied = False
+    logger.info(f"Billing info for job {job_id}: {billing}")
+    job_reserved_credits = float(job_data.get("reel_required_credits") or 0.0)
+    # Settle whenever there's an actual charge/storage change OR an
+    # outstanding reservation to release -- otherwise a job whose
+    # actual cost rounds to 0 would never refund its reservation.
+    if is_supabase_configured() and user_id and (
+        billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0 or job_reserved_credits > 0
+    ):
+        try:
+            logger.info(f"Debiting credits for job {job_id}")
+            debit_applied = await reel_job_manager.debit_credits_for_job(
+                job_id=job_id,
+                user_id=user_id,
+                credits=billing["actual_credit"],
+                storage_delta=-billing["actual_storage_gb"],
+                operation_type="generation_reel",
+                reserved_credits=job_reserved_credits,
+            )
+        except Exception as billing_error:
+            logger.exception("Billing update failed")
+            jobs[job_id]['logs'].append(f"Billing update failed: {billing_error}")
+
+    result_payload = {
+        'clips': enriched_clips,
+        'cost_analysis': cost_analysis,
+        'reels': saved_rows,
+        'duration_seconds': elapsed,
+        'billing': {
+            'actual_cost_usd': billing['actual_cost_usd'],
+            'actual_credit': billing['actual_credit'],
+            'actual_storage_gb': billing['actual_storage_gb'],
+            'processing_ratio': billing['processing_ratio'],
+            'debit_applied': bool(debit_applied),
+        },
+    }
+    await reel_job_manager.complete_job(
+        job_id,
+        result_payload,
+        actual_cost_usd=billing['actual_cost_usd'],
+        actual_credit=billing['actual_credit'],
+        actual_storage_gb=billing['actual_storage_gb'],
+        consumed_quota=billing['processing_ratio'],
+        cost_breakdown=billing['cost_breakdown'],
+    )
+
+
+async def _update_project_on_reel_completion(
+    job_data: Dict[str, Any], user_id: Optional[str], enriched_clips: List[Dict[str, Any]], saved_rows: List[Dict[str, Any]],
+) -> None:
+    project_id = job_data.get("project_id") if job_data else None
+    if not (project_id and is_supabase_configured()):
+        return
+    try:
+        await supabase_update_project_status(project_id, "completed", user_id=user_id)
+        summary_text = ""
+        if enriched_clips:
+            top_clip = enriched_clips[0] if isinstance(enriched_clips[0], dict) else {}
+            summary_text = (
+                str(top_clip.get("video_description_for_instagram") or "")
+                or str(top_clip.get("video_description_for_tiktok") or "")
+                or str(top_clip.get("video_title_for_youtube_short") or "")
+            )
+        if not summary_text and saved_rows:
+            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
+            summary_text = str(first_row.get("reel_description") or "")
+
+        thumbnail_url = ""
+        if saved_rows:
+            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
+            thumbnail_url = str(first_row.get("reel_thumbnail_url") or "")
+
+        project_updates = {
+            "description": _build_short_project_summary(summary_text),
+            "output_count": len(saved_rows),
+        }
+        source_duration_value = int(float((job_data or {}).get("source_duration_seconds") or 0.0))
+        if source_duration_value > 0:
+            project_updates["source_duration"] = source_duration_value
+        if thumbnail_url:
+            project_updates["thumbnail_url"] = thumbnail_url
+        await supabase_update_project(project_id, user_id or "", project_updates)
+        logger.info(f"Project {project_id} marked as completed")
+    except Exception as e:
+        logger.warning(f"Failed to update project status to completed: {str(e)}")
+
+
+async def _handle_completed_reel_job_with_metadata(
+    job_id: str, job_data: Dict[str, Any], output_dir: str, user_id: Optional[str],
+    source_is_url: bool, start_ts: float, target_json: str, pipeline,
+) -> None:
+    # Sonar false positive (S7493): same reasoning as the read above in
+    # this function -- small one-off read, and this function's
+    # tests patch builtins.open directly (which aiofiles, having
+    # captured its own reference to the real open() at import
+    # time, wouldn't observe).
+    with open(target_json, 'r') as f:  # NOSONAR
+        data = json.load(f)
+
+    # Enhance result with video URLs
+    clips = data.get('shorts', [])
+    cost_analysis = data.get('cost_analysis')
+
+    await pipeline.uploading_reels(len(clips))
+    saved_rows = await _persist_completed_reel_job_or_fail(
+        job_id, job_data, output_dir, user_id, source_is_url, target_json, clips, start_ts,
+    )
+    if saved_rows is None:
+        return
+
+    enriched_clips = _enrich_clips_with_saved_rows(clips, saved_rows, job_id)
+
+    jobs[job_id]['result'] = {
+        'clips': enriched_clips,
+        'cost_analysis': cost_analysis,
+        'reels': saved_rows,
+    }
+    await pipeline.finalizing()
+    await _finalize_completed_reel_billing(job_id, job_data, user_id, source_is_url, start_ts, enriched_clips, cost_analysis, saved_rows)
+    await _update_project_on_reel_completion(job_data, user_id, enriched_clips, saved_rows)
+
+    _cleanup_generated_clips_after_job(output_dir, os.path.basename(target_json).replace(_METADATA_JSON_SUFFIX, ''))
+
+
+async def _handle_completed_reel_job_without_metadata(job_id: str, job_data: Dict[str, Any], output_dir: str, start_ts: float) -> None:
+    jobs[job_id]['status'] = 'failed'
+    jobs[job_id]['logs'].append("No metadata file generated.")
+    result = await _finalize_failed_reel_job(
+        job_id=job_id,
+        user_id=job_data.get("user_id"),
+        output_dir=output_dir,
+        job_data=job_data,
+        start_ts=start_ts,
+        error_message="No metadata file generated",
+        error_code="METADATA_NOT_FOUND",
+        retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+    )
+    if result.get("retry"):
+        _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+
+
+async def _handle_completed_reel_job(job_id: str, job_data: Dict[str, Any], output_dir: str, user_id: Optional[str], source_is_url: bool, start_ts: float, pipeline) -> None:
+    jobs[job_id]['status'] = 'completed'
+    jobs[job_id]['logs'].append("Process finished successfully.")
+
+    target_json = _find_completed_job_metadata_path(job_id, output_dir)
+    if target_json:
+        await _handle_completed_reel_job_with_metadata(job_id, job_data, output_dir, user_id, source_is_url, start_ts, target_json, pipeline)
+    else:
+        await _handle_completed_reel_job_without_metadata(job_id, job_data, output_dir, start_ts)
+
+
+async def _handle_failed_reel_job_process(job_id: str, job_data: Dict[str, Any], output_dir: str, start_ts: float, returncode: int) -> None:
+    jobs[job_id]['status'] = 'failed'
+    jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
+    result = await _finalize_failed_reel_job(
+        job_id=job_id,
+        user_id=job_data.get("user_id"),
+        output_dir=output_dir,
+        job_data=job_data,
+        start_ts=start_ts,
+        error_message=f"Process failed with exit code {returncode}",
+        error_code="PROCESS_EXIT",
+        retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+    )
+    if result.get("retry"):
+        _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+
+
+async def _handle_reel_job_execution_error(job_id: str, job_data: Dict[str, Any], output_dir: str, start_ts: float, error: Exception) -> None:
+    jobs[job_id]['status'] = 'failed'
+    jobs[job_id]['logs'].append(f"Execution error: {str(error)}")
+    result = await _finalize_failed_reel_job(
+        job_id=job_id,
+        user_id=job_data.get("user_id"),
+        output_dir=output_dir,
+        job_data=job_data,
+        start_ts=start_ts,
+        error_message=f"Execution error: {str(error)}",
+        error_code="EXECUTION_ERROR",
+        retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
+    )
+    if result.get("retry"):
+        _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+
+
+def _cleanup_job_input_file(input_path: Optional[str], job_id: str) -> None:
+    # Only remove uploaded source files (stored under UPLOAD_DIR).
+    # Downloaded files inside output/<job_id>/ must be preserved for retries;
+    # they will be cleaned up by the periodic output sweep.
+    if input_path and os.path.exists(input_path):
+        output_job_dir = os.path.abspath(os.path.join(OUTPUT_DIR, job_id))
+        is_in_output_dir = os.path.abspath(input_path).startswith(output_job_dir)
+        if not is_in_output_dir:
+            try:
+                os.remove(input_path)
+            except Exception:
+                pass
+
+
 async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = None):
     """Executes the subprocess for a specific job."""
 
@@ -2189,332 +2574,23 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
 
     try:
-        # Sonar false positive (S7487): this supervises the child process with
-        # Popen + a non-blocking .poll()/.terminate() loop yielding via
-        # `await asyncio.sleep(2)` between checks -- Popen's own spawn and
-        # .poll()/.terminate() calls don't block the loop for any
-        # meaningful duration (they're near-instant syscalls), and stdout
-        # is drained on a dedicated thread below rather than on this task.
-        # Converting to asyncio.create_subprocess_exec would need a
-        # parallel rewrite of the preemption/timeout/partial-result-polling
-        # state machine below and the threaded log capture -- deliberately
-        # deferred as its own separately-tested change given how central
-        # this function is to job execution, rather than rewritten
-        # untested in the same pass as unrelated Sonar findings.
-        process = subprocess.Popen(  # NOSONAR
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, # Merge stderr to stdout
-            env=env,
-            cwd=os.getcwd()
-        )
-        if execution_ctx is not None:
-            execution_ctx["process"] = process
-
-        # We need to capture logs in a thread because Popen isn't async
-        t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
-        t_log.daemon = True
-        t_log.start()
-
-        # Async wait for process with incremental updates
-        start_wait = time.time()
-        while process.poll() is None:  # NOSONAR(S7487) same rationale as the Popen() call above
-            if execution_ctx and execution_ctx.get("preempt_requested"):
-                try:
-                    process.terminate()  # NOSONAR(S7487) same rationale as the Popen() call above
-                except Exception:
-                    pass
-            elif time.time() - start_wait > REEL_JOB_MAX_PROCESSING_SECONDS:
-                # Security/reliability: kill a job that has been running far
-                # longer than any legitimate input should require, instead
-                # of letting it occupy a worker slot indefinitely (see
-                # security audit finding H13).
-                jobs[job_id]['logs'].append(
-                    f"Job exceeded max processing time ({REEL_JOB_MAX_PROCESSING_SECONDS}s); terminating."
-                )
-                try:
-                    process.terminate()  # NOSONAR(S7487) same rationale as the Popen() call above
-                except Exception:
-                    pass
-            await asyncio.sleep(2)
-
-            # Check for partial results every 2 seconds
-            # Look for metadata file
-            try:
-                json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
-                if json_files:
-                    target_json = json_files[0]
-                    # Read metadata (it might be being written to, so simple try/except or just read)
-                    # Use a lock or just robust read? json.load might fail if file is partial.
-                    # Usually main.py writes it once at start (based on my review).
-                    if os.path.getsize(target_json) > 0:
-                        # Sonar false positive (S7493): a small, infrequent read
-                        # (this loop only reaches here once every 2s, see
-                        # the `await asyncio.sleep(2)` a few lines up) --
-                        # not worth the risk of converting to aiofiles here,
-                        # which would break this function's existing
-                        # `builtins.open` test-mocking (aiofiles captures
-                        # its own reference to open() at import time, before
-                        # a test's monkeypatch of builtins.open can apply).
-                        with open(target_json, 'r') as f:  # NOSONAR
-                            data = json.load(f)
-
-                        base_name = os.path.basename(target_json).replace(_METADATA_JSON_SUFFIX, '')
-                        clips = data.get('shorts', [])
-                        cost_analysis = data.get('cost_analysis')
-
-                        # Check which clips actually exist on disk
-                        ready_clips = []
-                        for i, clip in enumerate(clips):
-                             clip_filename = f"{base_name}_clip_{i+1}.mp4"
-                             clip_path = os.path.join(output_dir, clip_filename)
-                             if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
-                                 # Checking if file is growing? For now assume if it exists and main.py moves it there, it's done.
-                                 # main.py writes to temp_... then moves to final name. So presence means ready!
-                                 clip_copy = dict(clip)
-                                 clip_copy['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                                 clip_copy['reel_clip_index'] = i
-                                 clip_copy['reel_job_id'] = job_id
-                                 ready_clips.append(clip_copy)
-
-                        if ready_clips:
-                             jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
-                             await pipeline.cutting_clips()
-            except Exception as e:
-                # Ignore read errors during processing
-                pass
-
-        returncode = process.returncode
+        process = _spawn_job_subprocess(cmd, env, job_id, execution_ctx)
+        returncode = await _supervise_job_subprocess(process, job_id, output_dir, pipeline, execution_ctx)
         preempted = bool(execution_ctx and execution_ctx.get("preempt_requested"))
 
         if preempted:
-            jobs[job_id]['status'] = 'queued'
-            jobs[job_id]['logs'].append("Job preempted by a higher-priority task and re-queued.")
-            await reel_job_manager.enqueue_job(job_id)
-            await enqueue_reel_job(job_id, priority=job_priority)
+            await _requeue_preempted_job(job_id, job_priority)
             return
 
         if returncode == 0:
-            jobs[job_id]['status'] = 'completed'
-            jobs[job_id]['logs'].append("Process finished successfully.")
-
-            # Find result JSON
-            json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
-            if not json_files:
-                # Backward-compat rescue if outputs were written to OUTPUT_DIR root
-                if _relocate_root_job_artifacts(job_id, output_dir):
-                    json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
-            if json_files:
-                target_json = json_files[0]
-                # Sonar false positive (S7493): same reasoning as the read above in
-                # this function -- small one-off read, and this function's
-                # tests patch builtins.open directly (which aiofiles, having
-                # captured its own reference to the real open() at import
-                # time, wouldn't observe).
-                with open(target_json, 'r') as f:  # NOSONAR
-                    data = json.load(f)
-
-                # Enhance result with video URLs
-                clips = data.get('shorts', [])
-                cost_analysis = data.get('cost_analysis')
-
-                try:
-                    await pipeline.uploading_reels(len(clips))
-                    project_id = job_data.get("project_id") if job_data else None
-                    saved_rows = await _persist_reels_for_job(
-                        job_id=job_id,
-                        user_id=user_id,
-                        output_dir=output_dir,
-                        metadata_path=target_json,
-                        clips=clips,
-                        uses_youtube_source=source_is_url,
-                        project_id=project_id,
-                    )
-                except Exception as persist_error:
-                    jobs[job_id]['status'] = 'failed'
-                    jobs[job_id]['logs'].append(f"Supabase persistence failed: {persist_error}")
-                    fail_result = await _finalize_failed_reel_job(
-                        job_id=job_id,
-                        user_id=user_id,
-                        output_dir=output_dir,
-                        job_data=job_data,
-                        start_ts=start_ts,
-                        error_message=f"Supabase persistence failed: {persist_error}",
-                        error_code="REEL_PERSISTENCE_FAILED",
-                        retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
-                    )
-                    if fail_result.get("retry"):
-                        _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
-                    return
-
-                enriched_clips: List[Dict[str, Any]] = []
-                for i, clip in enumerate(clips):
-                    clip_copy = dict(clip)
-                    clip_copy['reel_clip_index'] = i
-                    clip_copy['reel_job_id'] = job_id
-                    if i < len(saved_rows):
-                        clip_copy['video_url'] = saved_rows[i].get('reel_playback_url') or saved_rows[i].get('reel_url')
-                        clip_copy['reel_id'] = saved_rows[i].get('id')
-                        clip_copy['thumbnail_url'] = saved_rows[i].get('reel_thumbnail_url') or saved_rows[i].get('reel_preview_url') or ''
-                        clip_copy['preview_image_url'] = saved_rows[i].get('reel_preview_url') or saved_rows[i].get('reel_thumbnail_url') or ''
-                    enriched_clips.append(clip_copy)
-
-                jobs[job_id]['result'] = {
-                    'clips': enriched_clips,
-                    'cost_analysis': cost_analysis,
-                    'reels': saved_rows,
-                }
-                await pipeline.finalizing()
-                elapsed = round(calc_elapsed_seconds(start_ts), 3)
-                total_reel_size_bytes = sum(int(row.get("reel_size_bytes") or 0) for row in saved_rows)
-                billing = _estimate_reel_job_consumption(
-                    elapsed_seconds=elapsed,
-                    uses_youtube=source_is_url,
-                    processed_clips=len(saved_rows),
-                    expected_clips=len(clips),
-                    storage_bytes=total_reel_size_bytes,
-                )
-                debit_applied = False
-                logger.info(f"Billing info for job {job_id}: {billing}")
-                job_reserved_credits = float(job_data.get("reel_required_credits") or 0.0)
-                # Settle whenever there's an actual charge/storage change OR an
-                # outstanding reservation to release -- otherwise a job whose
-                # actual cost rounds to 0 would never refund its reservation.
-                if is_supabase_configured() and user_id and (
-                    billing["actual_credit"] > 0 or billing["actual_storage_gb"] > 0 or job_reserved_credits > 0
-                ):
-                    try:
-                        logger.info(f"Debiting credits for job {job_id}")
-                        debit_applied = await reel_job_manager.debit_credits_for_job(
-                            job_id=job_id,
-                            user_id=user_id,
-                            credits=billing["actual_credit"],
-                            storage_delta=-billing["actual_storage_gb"],
-                            operation_type="generation_reel",
-                            reserved_credits=job_reserved_credits,
-                        )
-                    except Exception as billing_error:
-                        logger.exception("Billing update failed")
-                        jobs[job_id]['logs'].append(f"Billing update failed: {billing_error}")
-
-                result_payload = {
-                    'clips': enriched_clips,
-                    'cost_analysis': cost_analysis,
-                    'reels': saved_rows,
-                    'duration_seconds': elapsed,
-                    'billing': {
-                        'actual_cost_usd': billing['actual_cost_usd'],
-                        'actual_credit': billing['actual_credit'],
-                        'actual_storage_gb': billing['actual_storage_gb'],
-                        'processing_ratio': billing['processing_ratio'],
-                        'debit_applied': bool(debit_applied),
-                    },
-                }
-                await reel_job_manager.complete_job(
-                    job_id,
-                    result_payload,
-                    actual_cost_usd=billing['actual_cost_usd'],
-                    actual_credit=billing['actual_credit'],
-                    actual_storage_gb=billing['actual_storage_gb'],
-                    consumed_quota=billing['processing_ratio'],
-                    cost_breakdown=billing['cost_breakdown'],
-                )
-
-                # Update project status to completed if associated with a project
-                project_id = job_data.get("project_id") if job_data else None
-                if project_id and is_supabase_configured():
-                    try:
-                        await supabase_update_project_status(project_id, "completed", user_id=user_id)
-                        summary_text = ""
-                        if enriched_clips:
-                            top_clip = enriched_clips[0] if isinstance(enriched_clips[0], dict) else {}
-                            summary_text = (
-                                str(top_clip.get("video_description_for_instagram") or "")
-                                or str(top_clip.get("video_description_for_tiktok") or "")
-                                or str(top_clip.get("video_title_for_youtube_short") or "")
-                            )
-                        if not summary_text and saved_rows:
-                            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
-                            summary_text = str(first_row.get("reel_description") or "")
-
-                        thumbnail_url = ""
-                        if saved_rows:
-                            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
-                            thumbnail_url = str(first_row.get("reel_thumbnail_url") or "")
-
-                        project_updates = {
-                            "description": _build_short_project_summary(summary_text),
-                            "output_count": len(saved_rows),
-                        }
-                        source_duration_value = int(float((job_data or {}).get("source_duration_seconds") or 0.0))
-                        if source_duration_value > 0:
-                            project_updates["source_duration"] = source_duration_value
-                        if thumbnail_url:
-                            project_updates["thumbnail_url"] = thumbnail_url
-                        await supabase_update_project(project_id, user_id or "", project_updates)
-                        logger.info(f"Project {project_id} marked as completed")
-                    except Exception as e:
-                        logger.warning(f"Failed to update project status to completed: {str(e)}")
-
-                _cleanup_generated_clips_after_job(output_dir, os.path.basename(target_json).replace(_METADATA_JSON_SUFFIX, ''))
-            else:
-                 jobs[job_id]['status'] = 'failed'
-                 jobs[job_id]['logs'].append("No metadata file generated.")
-                 result = await _finalize_failed_reel_job(
-                     job_id=job_id,
-                     user_id=user_id,
-                     output_dir=output_dir,
-                     job_data=job_data,
-                     start_ts=start_ts,
-                     error_message="No metadata file generated",
-                     error_code="METADATA_NOT_FOUND",
-                     retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
-                 )
-                 if result.get("retry"):
-                     _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+            await _handle_completed_reel_job(job_id, job_data, output_dir, user_id, source_is_url, start_ts, pipeline)
         else:
-            jobs[job_id]['status'] = 'failed'
-            jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
-            result = await _finalize_failed_reel_job(
-                job_id=job_id,
-                user_id=user_id,
-                output_dir=output_dir,
-                job_data=job_data,
-                start_ts=start_ts,
-                error_message=f"Process failed with exit code {returncode}",
-                error_code="PROCESS_EXIT",
-                retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
-            )
-            if result.get("retry"):
-                _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+            await _handle_failed_reel_job_process(job_id, job_data, output_dir, start_ts, returncode)
 
     except Exception as e:
-        jobs[job_id]['status'] = 'failed'
-        jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
-        result = await _finalize_failed_reel_job(
-            job_id=job_id,
-            user_id=user_id,
-            output_dir=output_dir,
-            job_data=job_data,
-            start_ts=start_ts,
-            error_message=f"Execution error: {str(e)}",
-            error_code="EXECUTION_ERROR",
-            retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
-        )
-        if result.get("retry"):
-            _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+        await _handle_reel_job_execution_error(job_id, job_data, output_dir, start_ts, e)
     finally:
-        # Only remove uploaded source files (stored under UPLOAD_DIR).
-        # Downloaded files inside output/<job_id>/ must be preserved for retries;
-        # they will be cleaned up by the periodic output sweep.
-        if input_path and os.path.exists(input_path):
-            output_job_dir = os.path.abspath(os.path.join(OUTPUT_DIR, job_id))
-            is_in_output_dir = os.path.abspath(input_path).startswith(output_job_dir)
-            if not is_in_output_dir:
-                try:
-                    os.remove(input_path)
-                except Exception:
-                    pass
+        _cleanup_job_input_file(input_path, job_id)
 
 
 async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):  # NOSONAR(S1172) kept for call-site symmetry with run_job, which does use it for preemption/timeout control -- both are dispatched identically from run_job_wrapper
