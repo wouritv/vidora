@@ -134,7 +134,9 @@ export default function SettingsPage() {
     if (!user?.id) return;
     try {
       setSocialError('');
-      const response = await fetch(getApiUrl(`/api/social/accounts?user_id=${encodeURIComponent(user.id)}`));
+      const response = await fetch(getApiUrl(`/api/social/accounts?user_id=${encodeURIComponent(user.id)}`), {
+        headers: getAuthHeaders(user.id),
+      });
       if (!response.ok) {
         const detail = await response.text();
         throw new Error(detail || t("settings.socialError","Impossible de charger les comptes sociaux."));
@@ -433,6 +435,7 @@ export default function SettingsPage() {
     try {
       const response = await fetch(getApiUrl(`/api/social/accounts/${platform}?user_id=${encodeURIComponent(user.id)}`), {
         method: 'DELETE',
+        headers: getAuthHeaders(user.id),
       });
       if (!response.ok) {
         const detail = await response.text();

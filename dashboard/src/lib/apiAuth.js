@@ -15,13 +15,33 @@ import { getSupabaseBrowserClient } from "./supabase-browser";
 let cachedAccessToken = null;
 let initialized = false;
 
+/**
+ * Set by AuthContext the moment it resolves a session -- synchronously, in
+ * the same callback that flips `isAuthenticated` to true. This is the
+ * primary way the cache gets populated: AuthContext already awaits
+ * getSession() once at the app root, so components lower in the tree that
+ * fetch data as soon as `isAuthenticated` becomes true (in a useEffect keyed
+ * on it) would otherwise race a *second*, independent getSession() call
+ * started lazily from here on their first getAuthHeaders() call -- which,
+ * being a fresh promise, cannot have resolved yet at that same synchronous
+ * instant. Sourcing the token from AuthContext's already-resolved session
+ * instead removes that race entirely.
+ */
+export function setCachedAccessToken(token) {
+    cachedAccessToken = token || null;
+}
+
 function ensureTokenCacheInitialized() {
     if (initialized) return;
     initialized = true;
     try {
         const supabase = getSupabaseBrowserClient();
+        // Fallback only, for any caller outside AuthProvider's tree: kept so
+        // the cache still eventually settles even without the direct push.
         supabase.auth.getSession().then(({ data }) => {
-            cachedAccessToken = data?.session?.access_token || null;
+            if (cachedAccessToken === null) {
+                cachedAccessToken = data?.session?.access_token || null;
+            }
         });
         supabase.auth.onAuthStateChange((_event, session) => {
             cachedAccessToken = session?.access_token || null;
