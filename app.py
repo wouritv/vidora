@@ -6629,6 +6629,76 @@ def _resolve_public_video_url(video_ref: str, request: Request, job_id: str) -> 
     base_url = SOCIAL_BASE_URL or str(request.base_url).rstrip("/")
     return f"{base_url}/videos/{job_id}/{ref}"
 
+async def _schedule_social_post_job(
+    user_id: str, platform_name: str, req: "SocialPostRequest", publish_priority: int,
+    scheduled_for, final_title: str, final_description: str, public_video_url: str,
+) -> Dict[str, Any]:
+    publish_job_id = await _insert_publish_job(
+        user_id=user_id,
+        platform=platform_name,
+        external_id="scheduled",
+        status="queued",
+        priority=publish_priority,
+        scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
+        timezone=req.timezone or "UTC",
+        payload={
+            "source_type": "job_clip",
+            "source_id": req.job_id,
+            "clip_index": req.clip_index,
+            "title": final_title,
+            "description": final_description,
+            "media_url": public_video_url,
+        },
+    )
+    return {
+        "success": True,
+        "scheduled": True,
+        "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
+        "publish_job_id": publish_job_id,
+    }
+
+
+async def _publish_social_post_now(
+    user_id: str, platform_name: str, publish_priority: int,
+    final_title: str, final_description: str, public_video_url: str, local_video_path: str,
+) -> Dict[str, Any]:
+    try:
+        account = await _get_social_account(user_id, platform_name)
+        if not account:
+            raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
+
+        # Sonar false positive (S5332): validates the URL is absolute (any
+        # scheme) before submitting it to the platform API -- not a
+        # hardcoded http:// request of our own.
+        if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith((_HTTPS_SCHEME_PREFIX, "http://")):  # NOSONAR
+            raise HTTPException(status_code=400, detail=f"{platform_name} requires a public video URL")
+
+        publish_payload = PublishRequest(
+            user_id=user_id,
+            title=final_title,
+            description=final_description,
+            text=final_description,
+            caption=final_description,
+            video_url=public_video_url,
+            video_file=local_video_path or "",
+        )
+
+        platform_result = await publish_post(account, publish_payload)
+        external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
+        await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
+        return {
+            "success": True,
+            "result": platform_result,
+        }
+    except Exception as exc:
+        err_msg = str(exc)
+        await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg, priority=publish_priority)
+        return {
+            "success": False,
+            "error": err_msg,
+        }
+
+
 @app.post("/api/social/post", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: Annotated[str, Depends(get_user_id_header)]):
     selected_platforms = _resolve_social_platforms(req.platforms)
@@ -6656,67 +6726,17 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
 
     for platform_name in selected_platforms:
         if is_scheduled:
-            publish_job_id = await _insert_publish_job(
-                user_id=user_id,
-                platform=platform_name,
-                external_id="scheduled",
-                status="queued",
-                priority=publish_priority,
-                scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
-                timezone=req.timezone or "UTC",
-                payload={
-                    "source_type": "job_clip",
-                    "source_id": req.job_id,
-                    "clip_index": req.clip_index,
-                    "title": final_title,
-                    "description": final_description,
-                    "media_url": public_video_url,
-                },
+            results[platform_name] = await _schedule_social_post_job(
+                user_id, platform_name, req, publish_priority, scheduled_for, final_title, final_description, public_video_url,
             )
-            results[platform_name] = {
-                "success": True,
-                "scheduled": True,
-                "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
-                "publish_job_id": publish_job_id,
-            }
             continue
 
-        try:
-            account = await _get_social_account(user_id, platform_name)
-            if not account:
-                raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
-
-            # Sonar false positive (S5332): validates the URL is absolute (any
-            # scheme) before submitting it to the platform API -- not a
-            # hardcoded http:// request of our own.
-            if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith((_HTTPS_SCHEME_PREFIX, "http://")):  # NOSONAR
-                raise HTTPException(status_code=400, detail=f"{platform_name} requires a public video URL")
-
-            publish_payload = PublishRequest(
-                user_id=user_id,
-                title=final_title,
-                description=final_description,
-                text=final_description,
-                caption=final_description,
-                video_url=public_video_url,
-                video_file=local_video_path or "",
-            )
-
-            platform_result = await publish_post(account, publish_payload)
-            external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
-            results[platform_name] = {
-                "success": True,
-                "result": platform_result,
-            }
-        except Exception as exc:
+        result = await _publish_social_post_now(
+            user_id, platform_name, publish_priority, final_title, final_description, public_video_url, local_video_path,
+        )
+        results[platform_name] = result
+        if not result["success"]:
             overall_success = False
-            err_msg = str(exc)
-            await _insert_publish_job(user_id=user_id, platform=platform_name, external_id="n/a", status="failed", error_message=err_msg, priority=publish_priority)
-            results[platform_name] = {
-                "success": False,
-                "error": err_msg,
-            }
 
     return {
         "success": overall_success,
