@@ -93,7 +93,7 @@ def test_generate_presigned_url_returns_none_when_clienterror(monkeypatch):
     monkeypatch.setattr(s3_uploader, "get_s3_client", lambda: _Client())
 
     assert s3_uploader.generate_presigned_url("bucket", "path/video.mp4") is None
-    logger.error.assert_called_once()
+    logger.exception.assert_called_once()
 
 
 def test_delete_s3_object_validates_inputs_and_handles_success(monkeypatch):

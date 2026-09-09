@@ -43,9 +43,8 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
     padding_y = 25 
     line_spacing = 20 # Increased spacing
     cornerradius = 20
-    shadow_offset = (5, 5) 
-    shadow_blur = 10
-    
+    shadow_offset = (5, 5)
+
     # Font Size Calculation (approx 5% of width - tuned to match Noto Serif Bold metrics in browser)
     base_font_size = int(target_width * 0.05)
     font_size = int(base_font_size * font_scale)

@@ -29,7 +29,7 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
         if file_info.state == "ACTIVE":
             break
         elif file_info.state == "FAILED":
-            raise Exception("Video processing failed by Gemini.")
+            raise RuntimeError("Video processing failed by Gemini.")
         time.sleep(2)
 
     prompt = f"""You are a YouTube title expert who creates viral, click-worthy titles.

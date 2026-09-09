@@ -1301,11 +1301,11 @@ def test_process_frame_pipeline_and_audio_merge_helpers(monkeypatch):
     speaker_tracker = types.SimpleNamespace(get_target=lambda *args, **kwargs: None)
     monkeypatch.setattr(main, "detect_face_candidates", lambda _f: [])
     monkeypatch.setattr(main, "detect_person_yolo", lambda _f: [1, 1, 5, 5])
-    out = main._render_frame_by_strategy(frame, 0, 0, [(0, 10)], ["TRACK"], [[]], cameraman, speaker_tracker, 10, 20, 20)
+    out = main._render_frame_by_strategy(frame, 0, 0, [(0, 10)], ["TRACK"], cameraman, speaker_tracker, 10, 20, 20)
     assert out.shape == (20, 10, 3)
 
     monkeypatch.setattr(main, "create_general_frame", lambda *_: "general")
-    out2 = main._render_frame_by_strategy(frame, 1, 0, [(0, 10)], ["GENERAL"], [[]], cameraman, speaker_tracker, 10, 20, 20)
+    out2 = main._render_frame_by_strategy(frame, 1, 0, [(0, 10)], ["GENERAL"], cameraman, speaker_tracker, 10, 20, 20)
     assert out2 == "general"
 
     class _Proc:
@@ -1730,7 +1730,7 @@ def test_cookie_render_and_process_frame_extra_branches(monkeypatch):
     spk = types.SimpleNamespace(get_target=lambda *_a, **_k: None)
     monkeypatch.setattr(main, "detect_face_candidates", lambda _f: [])
     monkeypatch.setattr(main, "detect_person_yolo", lambda _f: [1, 1, 3, 3])
-    out = main._render_frame_by_strategy(frame, 0, 0, [(0, 1)], ["TRACK"], [[]], cam, spk, 10, 20, 10)
+    out = main._render_frame_by_strategy(frame, 0, 0, [(0, 1)], ["TRACK"], cam, spk, 10, 20, 10)
     assert out.shape == (20, 10, 3)
 
     class _Proc:
@@ -1930,7 +1930,7 @@ def test_remaining_non_cli_branches(monkeypatch):
     track_out = main._render_track_frame(base_frame, 0, (0, 1), spk, cam, 8, 16, 8)
     assert track_out.shape == (16, 8, 3)
     monkeypatch.setattr(cam, "get_crop_box", lambda force_snap=False: (0, 0, 0, 0))
-    any_out = main._render_frame_by_strategy(base_frame, 0, 0, [(0, 1)], ["TRACK"], [[]], cam, spk, 8, 16, 8)
+    any_out = main._render_frame_by_strategy(base_frame, 0, 0, [(0, 1)], ["TRACK"], cam, spk, 8, 16, 8)
     assert any_out.shape == (16, 8, 3)
 
     # merge without audio file path.

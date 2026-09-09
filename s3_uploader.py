@@ -84,8 +84,8 @@ def generate_presigned_url(bucket_name, object_key, expiration=3600):
                                                             'Key': object_key},
                                                     ExpiresIn=expiration)
         return response
-    except ClientError as e:
-        logger.error(e)
+    except ClientError:
+        logger.exception("Failed to generate presigned URL")
         return None
 
 
@@ -126,7 +126,7 @@ def upload_job_artifacts(directory, job_id):
 
     for filename in os.listdir(directory):
         # Upload .mp4 clips and the metadata JSON
-        if (filename.endswith(".mp4") or filename.endswith(".json")) and not filename.startswith("temp_"):
+        if filename.endswith((".mp4", ".json")) and not filename.startswith("temp_"):
             file_path = os.path.join(directory, filename)
             s3_key = f"{job_id}/{filename}"
             upload_file_to_s3(file_path, bucket_name, s3_key)
