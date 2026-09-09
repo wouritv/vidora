@@ -45,6 +45,35 @@ def _load_hook_font(target_width, font_scale):
     return font, font_size
 
 
+def _wrap_paragraph_into_lines(paragraph, font, max_text_width, draw):
+    words = paragraph.split()
+    lines = []
+    current_line = []
+
+    for word in words:
+        # Test if adding word fits
+        test_line = ' '.join(current_line + [word])
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        w = bbox[2] - bbox[0]
+
+        if w <= max_text_width:
+            current_line.append(word)
+        else:
+            # Line full, push current_line and start new
+            if current_line:
+                lines.append(' '.join(current_line))
+                current_line = [word]
+            else:
+                # Single word too long? Force it.
+                lines.append(word)
+                current_line = []
+
+    if current_line:
+        lines.append(' '.join(current_line))
+
+    return lines
+
+
 def _wrap_hook_text_lines(text, font, max_text_width):
     # Wrap text logic (Pixel-based)
     dummy_img = Image.new('RGBA', (1, 1))
@@ -59,29 +88,7 @@ def _wrap_hook_text_lines(text, font, max_text_width):
             lines.append("")
             continue
 
-        words = p.split()
-        current_line = []
-
-        for word in words:
-            # Test if adding word fits
-            test_line = ' '.join(current_line + [word])
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            w = bbox[2] - bbox[0]
-
-            if w <= max_text_width:
-                current_line.append(word)
-            else:
-                # Line full, push current_line and start new
-                if current_line:
-                    lines.append(' '.join(current_line))
-                    current_line = [word]
-                else:
-                    # Single word too long? Force it.
-                    lines.append(word)
-                    current_line = []
-
-        if current_line:
-            lines.append(' '.join(current_line))
+        lines.extend(_wrap_paragraph_into_lines(p, font, max_text_width, draw))
 
     return lines
 
