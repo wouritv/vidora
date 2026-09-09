@@ -273,16 +273,37 @@ if not SECRET_KEY:
 
 _oauth_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
-# Supabase issues HS256-signed JWTs for authenticated sessions. This secret is
-# found in the Supabase dashboard under Project Settings -> API -> JWT Secret.
-# It is distinct from SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY.
+# Supabase issues JWTs for authenticated sessions signed either with a legacy
+# shared secret (HS256) or, for newer projects, with an asymmetric signing
+# key (ES256) verified via the project's public JWKS endpoint. Which one
+# applies is a per-project setting (Project Settings -> API -> JWT Settings),
+# so both are supported here based on the `alg` in the token's own header --
+# see _verify_supabase_jwt. SUPABASE_JWT_SECRET is distinct from
+# SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY and only used for HS256.
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
-if not SUPABASE_JWT_SECRET:
+SUPABASE_URL_FOR_JWKS = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+if not SUPABASE_JWT_SECRET and not SUPABASE_URL_FOR_JWKS:
     raise RuntimeError(
-        "SUPABASE_JWT_SECRET manquant dans l'environnement -- requis pour verifier "
-        "les tokens de session Supabase (sans lui, aucune requete ne peut etre "
-        "authentifiee de maniere fiable)."
+        "Ni SUPABASE_JWT_SECRET ni SUPABASE_URL ne sont definis -- l'un des deux "
+        "est requis pour verifier les tokens de session Supabase (sans cela, "
+        "aucune requete ne peut etre authentifiee de maniere fiable)."
     )
+
+_supabase_jwks_client: Optional["pyjwt.PyJWKClient"] = None
+
+
+def _get_supabase_jwks_client() -> "pyjwt.PyJWKClient":
+    global _supabase_jwks_client
+    if _supabase_jwks_client is None:
+        if not SUPABASE_URL_FOR_JWKS:
+            raise RuntimeError(
+                "SUPABASE_URL manquant dans l'environnement -- requis pour verifier "
+                "les tokens de session signes en ES256 via le JWKS du projet Supabase."
+            )
+        _supabase_jwks_client = pyjwt.PyJWKClient(
+            f"{SUPABASE_URL_FOR_JWKS}/auth/v1/.well-known/jwks.json"
+        )
+    return _supabase_jwks_client
 
 router = APIRouter()
 
@@ -431,18 +452,43 @@ def _verify_supabase_jwt(token: str) -> str:
     application. Client-supplied identity headers (e.g. X-User-Id) must never
     be trusted on their own -- they are not proof of anything, since any
     client can set an arbitrary value. The `sub` claim of a JWT that verifies
-    against SUPABASE_JWT_SECRET is proof, because only Supabase Auth (which
-    authenticated the user's login) could have produced a valid signature.
+    either against SUPABASE_JWT_SECRET (legacy HS256 projects) or against the
+    project's own public key fetched from its JWKS endpoint (newer ES256/
+    RS256 projects) is proof, because only Supabase Auth (which authenticated
+    the user's login) could have produced a valid signature. Which path
+    applies is read from the token's own header, never trusted from outside
+    it: HS256 is only ever checked against our dedicated shared secret, and
+    ES256/RS256 only ever against the real public key looked up by `kid` from
+    Supabase's JWKS, so the two verification paths can't be crossed to forge
+    a signature (no alg-confusion between a public key and a shared secret).
     """
     try:
-        payload = pyjwt.decode(
-            token,
-            SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"require": ["exp", "sub"]},
-        )
+        alg = pyjwt.get_unverified_header(token).get("alg")
+        if alg == "HS256":
+            if not SUPABASE_JWT_SECRET:
+                raise HTTPException(status_code=401, detail="Invalid or expired session token")
+            payload = pyjwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"require": ["exp", "sub"]},
+            )
+        elif alg in ("ES256", "RS256"):
+            signing_key = _get_supabase_jwks_client().get_signing_key_from_jwt(token)
+            payload = pyjwt.decode(
+                token,
+                signing_key.key,
+                algorithms=[alg],
+                audience="authenticated",
+                options={"require": ["exp", "sub"]},
+            )
+        else:
+            raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    except HTTPException:
+        raise
     except PyJWTError as exc:
+        logger.warning("Supabase JWT verification failed: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid or expired session token") from exc
 
     user_id = str(payload.get("sub") or "").strip()
