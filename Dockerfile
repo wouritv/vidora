@@ -65,10 +65,14 @@ RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # Copie du code en dernier : c'est le layer qui change le plus souvent,
 # le placer en fin de fichier maximise la réutilisation du cache pour tout le reste.
-# Sonar false positive (S6470): .dockerignore excludes cookies.txt/*.pem/*.key/
-# *.p12/*.pfx/*credentials*/*secret* (see that file) so this recursive copy
-# cannot pull secret material into the image.
-COPY --chown=appuser:appuser . .  # NOSONAR
+# Security (docker:S6470): copy only what the backend actually needs at
+# runtime instead of the whole build context -- a blanket `COPY . .` would
+# also bake in anything a developer happens to have sitting locally
+# (uncommitted secrets, stray files) that .dockerignore doesn't happen to
+# cover. dashboard/, render-service/, remotion/, node_modules/, tests/ and
+# the supabase/ CLI migrations are never read by this image at runtime.
+COPY --chown=appuser:appuser *.py ./
+COPY --chown=appuser:appuser fonts/ ./fonts/
 
 EXPOSE 8000
 
