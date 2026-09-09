@@ -5285,6 +5285,75 @@ class EffectsGenerateRequest(BaseModel):
     input_url: Optional[str] = None
     auto_edit_options: Optional[Dict[str, bool]] = None
 
+def _probe_video_stream_for_effects(safe_input_path: str):
+    probe_cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,r_frame_rate,duration',
+        '-show_entries', 'format=duration',
+        '-of', 'json',
+        safe_input_path
+    ]
+    probe_result = subprocess.check_output(probe_cmd, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
+    probe_data = json.loads(probe_result)
+
+    stream = probe_data.get('streams', [{}])[0]
+    width = int(stream.get('width', 1080))
+    height = int(stream.get('height', 1920))
+
+    # Parse fps from r_frame_rate (e.g. "30/1")
+    r_frame_rate = stream.get('r_frame_rate', '30/1')
+    num, den = r_frame_rate.split('/')
+    fps = round(int(num) / int(den), 2)
+
+    # Get duration from stream or format
+    duration = float(stream.get('duration', 0))
+    if duration == 0:
+        duration = float(probe_data.get('format', {}).get('duration', 0))
+
+    return width, height, fps, duration
+
+
+def _load_transcript_for_effects(job_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        meta_files = glob.glob(os.path.join(OUTPUT_DIR, job_id, _METADATA_JSON_GLOB))
+        if meta_files:
+            # Sonar false positive (S7493): this is
+            # inside a nested sync def (see below, run via
+            # loop.run_in_executor in a thread pool), not
+            # actually executing on the event loop despite
+            # being lexically inside an async endpoint.
+            with open(meta_files[0], 'r') as f:  # NOSONAR
+                data = json.load(f)
+                return data.get('transcript')
+    except Exception as e:
+        print(f"⚠️ Could not load transcript for effects config: {e}")
+    return None
+
+
+def _run_effects_generation(final_api_key: str, job_id: str, input_path: str):
+    editor = VideoEditor(api_key=final_api_key)
+
+    # Create safe ASCII filename to avoid encoding issues
+    safe_filename = f"temp_effects_{job_id}.mp4"
+    safe_input_path = os.path.join(OUTPUT_DIR, job_id, safe_filename)
+    shutil.copy(input_path, safe_input_path)
+
+    try:
+        # Upload video to Gemini
+        vid_file = editor.upload_video(safe_input_path)
+        width, height, fps, duration = _probe_video_stream_for_effects(safe_input_path)
+        transcript = _load_transcript_for_effects(job_id)
+
+        # Generate effects config
+        return editor.get_effects_config(
+            vid_file, duration, fps=fps, width=width, height=height, transcript=transcript
+        )
+    finally:
+        if os.path.exists(safe_input_path):
+            os.remove(safe_input_path)
+
+
 @app.post("/api/effects/generate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def generate_effects_config(
     req: EffectsGenerateRequest,
@@ -5300,27 +5369,7 @@ async def generate_effects_config(
     job = jobs.get(req.job_id)
 
     try:
-        # Resolve input path
-        if req.input_filename:
-            safe_name = _sanitize_input_filename(req.input_filename)
-            if not safe_name:
-                raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
-            input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
-            filename = safe_name
-        else:
-            if not job:
-                raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
-            if 'result' not in job or 'clips' not in job['result']:
-                raise HTTPException(status_code=400, detail="Job result not available")
-            clip = job['result']['clips'][req.clip_index]
-            filename = clip['video_url'].split('/')[-1]
-            input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-
-        if not os.path.exists(input_path) and req.input_url:
-            input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
-
-        if not os.path.exists(input_path):
-            raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+        input_path, _filename = _resolve_edit_clip_input_path(req, job)
 
         input_size_bytes = float(os.path.getsize(input_path) if os.path.exists(input_path) else 0)
         input_duration_seconds = _probe_local_video_duration_seconds(input_path)
@@ -5336,72 +5385,8 @@ async def generate_effects_config(
 
         os.makedirs(os.path.join(OUTPUT_DIR, req.job_id), exist_ok=True)
 
-        def run_effects_generation():
-            editor = VideoEditor(api_key=final_api_key)
-
-            # Create safe ASCII filename to avoid encoding issues
-            safe_filename = f"temp_effects_{req.job_id}.mp4"
-            safe_input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_filename)
-            shutil.copy(input_path, safe_input_path)
-
-            try:
-                # Upload video to Gemini
-                vid_file = editor.upload_video(safe_input_path)
-
-                # Get video metadata via ffprobe
-                probe_cmd = [
-                    'ffprobe', '-v', 'error',
-                    '-select_streams', 'v:0',
-                    '-show_entries', 'stream=width,height,r_frame_rate,duration',
-                    '-show_entries', 'format=duration',
-                    '-of', 'json',
-                    safe_input_path
-                ]
-                probe_result = subprocess.check_output(probe_cmd, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
-                probe_data = json.loads(probe_result)
-
-                stream = probe_data.get('streams', [{}])[0]
-                width = int(stream.get('width', 1080))
-                height = int(stream.get('height', 1920))
-
-                # Parse fps from r_frame_rate (e.g. "30/1")
-                r_frame_rate = stream.get('r_frame_rate', '30/1')
-                num, den = r_frame_rate.split('/')
-                fps = round(int(num) / int(den), 2)
-
-                # Get duration from stream or format
-                duration = float(stream.get('duration', 0))
-                if duration == 0:
-                    duration = float(probe_data.get('format', {}).get('duration', 0))
-
-                # Load transcript from metadata
-                transcript = None
-                try:
-                    meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, _METADATA_JSON_GLOB))
-                    if meta_files:
-                        # Sonar false positive (S7493): this is
-                        # inside a nested sync def (see below, run via
-                        # loop.run_in_executor in a thread pool), not
-                        # actually executing on the event loop despite
-                        # being lexically inside an async endpoint.
-                        with open(meta_files[0], 'r') as f:  # NOSONAR
-                            data = json.load(f)
-                            transcript = data.get('transcript')
-                except Exception as e:
-                    print(f"⚠️ Could not load transcript for effects config: {e}")
-
-                # Generate effects config
-                effects_config = editor.get_effects_config(
-                    vid_file, duration, fps=fps, width=width, height=height, transcript=transcript
-                )
-
-                return effects_config
-            finally:
-                if os.path.exists(safe_input_path):
-                    os.remove(safe_input_path)
-
         loop = asyncio.get_event_loop()
-        effects_config = await loop.run_in_executor(None, run_effects_generation)
+        effects_config = await loop.run_in_executor(None, _run_effects_generation, final_api_key, req.job_id, input_path)
 
         if effects_config is None:
             raise HTTPException(status_code=500, detail="Failed to generate effects config from Gemini")
