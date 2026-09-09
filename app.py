@@ -2593,6 +2593,206 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
         _cleanup_job_input_file(input_path, job_id)
 
 
+async def _transcribe_caption_source(user_id: Optional[str], job_id: str, input_path: str, source_name: str):
+    cached_transcription = await _load_cached_transcription(user_id, job_id, 0)
+    if cached_transcription:
+        jobs[job_id]["logs"].append("Using cached transcription from database.")
+        return dict(cached_transcription.get("transcript_payload") or {})
+
+    from main import transcribe_video
+
+    loop = asyncio.get_event_loop()
+    async with asyncio.timeout(max(1, CAPTION_TRANSCRIBE_TIMEOUT_SECONDS)):
+        transcript = await loop.run_in_executor(None, transcribe_video, input_path)
+    await _persist_transcription_cache(
+        user_id=user_id,
+        job_id=job_id,
+        clip_index=0,
+        source_type="caption_upload",
+        source_value=source_name,
+        transcript=transcript,
+    )
+    return transcript
+
+
+def _build_and_persist_caption_metadata(job_id: str, output_dir: str, source_name: str, title: str, duration_sec: float, local_video_ref: str, transcript: Dict[str, Any]) -> None:
+    metadata = {
+        "shorts": [
+            {
+                "title": title,
+                "start": 0.0,
+                "end": duration_sec,
+                "duration": duration_sec,
+                "video_url": local_video_ref,
+                "video_title_for_youtube_short": title,
+                "video_description_for_instagram": "",
+                "video_description_for_tiktok": "",
+            }
+        ],
+        "transcript": transcript,
+        "standalone_caption": {
+            "created_at": int(time.time()),
+            "source": "upload",
+            "input_filename": source_name,
+        },
+    }
+    metadata_path = os.path.join(output_dir, f"{job_id}_metadata.json")
+    _persist_metadata_json(metadata_path, metadata)
+
+
+def _upload_caption_source_and_thumbnail(input_path: str, user_id: Optional[str], job_id: str, bucket: str, local_video_ref: str):
+    caption_s3_key = f"captions/{user_id}/{job_id}/{os.path.basename(input_path)}"
+    if not upload_file_to_s3(input_path, bucket, caption_s3_key):
+        raise RuntimeError("Failed to upload caption source video to S3")
+    media_url = _caption_media_url_from_s3_key(caption_s3_key) or local_video_ref
+
+    thumbnail_ref = ""
+    thumb_local = _generate_reel_thumbnail_from_video(input_path, OUTPUT_DIR, job_id, 0)
+    if thumb_local:
+        thumb_key = f"captions/{user_id}/{job_id}/thumbnail.jpg"
+        if upload_file_to_s3(thumb_local, bucket, thumb_key):
+            thumbnail_ref = thumb_key
+        try:
+            if os.path.exists(thumb_local):
+                os.remove(thumb_local)
+        except Exception:
+            pass
+
+    return caption_s3_key, media_url, thumbnail_ref
+
+
+def _build_caption_row_payload(
+    job_id: str, job_data: Dict[str, Any], user_id: Optional[str], source_name: str, title: str,
+    duration_sec: float, media_url: str, thumbnail_ref: str, caption_s3_key: str,
+    caption_required_credits: float, caption_storage_gb: float, caption_cost_breakdown: Dict[str, Any],
+) -> Dict[str, Any]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    row_payload: Dict[str, Any] = {
+        "caption_url": media_url,
+        "caption_thumbnail_url": thumbnail_ref,
+        "caption_title": title,
+        "caption_description": "",
+        "caption_duration": max(1, int(round(duration_sec))),
+        "caption_created_at": now_iso,
+        "caption_updated_at": now_iso,
+        "caption_user_id": user_id,
+        "caption_status": "termine",
+        "caption_job_id": job_id,
+        "caption_clip_index": 0,
+        "caption_s3_key": caption_s3_key,
+        "generation_inputs": {
+            "source_type": "file",
+            "source_value": source_name,
+            "caption_max_duration_minutes": CAPTION_MAX_DURATION_MINUTES,
+            "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
+            "duration_seconds": duration_sec,
+        },
+        "input_source_type": "file",
+        "input_source_value": source_name,
+        "billing_details": _build_billing_details(
+            "sous_titre",
+            caption_cost_breakdown,
+            actual_credit=caption_required_credits,
+            actual_storage_gb=caption_storage_gb,
+            extra={
+                "source_type": "file",
+                "source_value": source_name,
+            },
+        ),
+        "total_cost_usd": 0,
+    }
+    project_id = str(job_data.get("project_id") or "").strip()
+    if project_id:
+        row_payload["project_id"] = project_id
+    return row_payload
+
+
+async def _save_caption_row_and_debit(
+    row_payload: Dict[str, Any], job_id: str, user_id: Optional[str],
+    caption_required_credits: float, caption_storage_gb: float,
+) -> Dict[str, Any]:
+    normalized_item = {"id": f"local-{job_id}", **row_payload}
+    if not is_supabase_configured():
+        return normalized_item
+
+    saved = await supabase_insert_captions([row_payload])
+    if saved:
+        normalized_item = _normalize_caption_row(saved[0])
+
+    if user_id and (caption_required_credits > 0 or caption_storage_gb > 0):
+        debit_ok = await reel_job_manager.debit_credits_for_job(
+            job_id=job_id,
+            user_id=user_id,
+            credits=caption_required_credits,
+            storage_delta=-caption_storage_gb,
+            operation_type="sous_titre",
+            reserved_credits=caption_required_credits,
+        )
+        if not debit_ok:
+            raise RuntimeError("Insufficient credit/storage balance to finalize caption job")
+
+    return normalized_item
+
+
+async def _update_project_on_caption_completion(job_data: Dict[str, Any], user_id: Optional[str], normalized_item: Dict[str, Any], local_duration: float) -> None:
+    project_id = job_data.get("project_id")
+    if not (project_id and is_supabase_configured()):
+        return
+    try:
+        await supabase_update_project_status(project_id, "completed", user_id=user_id)
+        project_summary = _build_short_project_summary(
+            str(normalized_item.get("caption_description") or "")
+            or str(normalized_item.get("caption_title") or "")
+        )
+        await supabase_update_project(
+            project_id,
+            user_id or "",
+            {
+                "description": project_summary,
+                "thumbnail_url": str(normalized_item.get("caption_thumbnail_url") or "") or None,
+                "output_count": 1,
+                "source_duration": int(float(job_data.get("source_duration_seconds") or local_duration or 0.0)) or None,
+            },
+        )
+        logger.info(f"Project {project_id} marked as completed")
+    except Exception as e:
+        logger.warning(f"Failed to update project status to completed: {str(e)}")
+
+
+async def _handle_caption_job_failure(job_id: str, job_data: Dict[str, Any], user_id: Optional[str], exc: Exception) -> None:
+    jobs[job_id]["status"] = "failed"
+    jobs[job_id]["logs"].append(f"Caption job failed: {exc}")
+    result = await reel_job_manager.fail_job(
+        job_id,
+        str(exc),
+        error_code="CAPTION_JOB_FAILED",
+        retry_delay_seconds=CAPTION_JOB_RETRY_DELAY_SECONDS,
+    )
+
+    # Update project status to failed if associated with a project
+    if is_supabase_configured():
+        project_id = job_data.get("project_id")
+        if project_id:
+            try:
+                await supabase_update_project_status(project_id, "failed", user_id=user_id)
+                logger.info(f"Project {project_id} marked as failed")
+            except Exception as e:
+                logger.warning(f"Failed to update project status to failed: {str(e)}")
+
+    # Release the reservation made at job creation: nothing was billed
+    # in this failure path, so the full reserved amount is refundable.
+    if not result.get("retry") and user_id:
+        reserved = float(job_data.get("caption_required_credits") or 0.0)
+        if reserved > 0 and is_supabase_configured():
+            try:
+                await reel_job_manager.refund_reservation(job_id, user_id, reserved, operation_type="sous_titre")
+            except Exception as refund_error:
+                logger.warning(f"Failed to refund caption reservation: {refund_error}")
+
+    if result.get("retry"):
+        _spawn_background_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
+
+
 async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):  # NOSONAR(S1172) kept for call-site symmetry with run_job, which does use it for preemption/timeout control -- both are dispatched identically from run_job_wrapper
     user_id = job_data.get("user_id")
     output_dir = str(job_data.get("output_dir") or "")
@@ -2618,24 +2818,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
         )
 
         await pipeline.transcribing()
-        cached_transcription = await _load_cached_transcription(user_id, job_id, 0)
-        if cached_transcription:
-            transcript = dict(cached_transcription.get("transcript_payload") or {})
-            jobs[job_id]["logs"].append("Using cached transcription from database.")
-        else:
-            from main import transcribe_video
-
-            loop = asyncio.get_event_loop()
-            async with asyncio.timeout(max(1, CAPTION_TRANSCRIBE_TIMEOUT_SECONDS)):
-                transcript = await loop.run_in_executor(None, transcribe_video, input_path)
-            await _persist_transcription_cache(
-                user_id=user_id,
-                job_id=job_id,
-                clip_index=0,
-                source_type="caption_upload",
-                source_value=source_name,
-                transcript=transcript,
-            )
+        transcript = await _transcribe_caption_source(user_id, job_id, input_path, source_name)
 
         await pipeline.persisting()
         duration_sec = max(0.5, float(local_duration) or _estimate_transcript_duration_seconds(transcript))
@@ -2650,107 +2833,18 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
         title = os.path.splitext(source_name)[0] or "Sous-titres"
         local_video_ref = f"/videos/{job_id}/{os.path.basename(input_path)}"
 
-        metadata = {
-            "shorts": [
-                {
-                    "title": title,
-                    "start": 0.0,
-                    "end": duration_sec,
-                    "duration": duration_sec,
-                    "video_url": local_video_ref,
-                    "video_title_for_youtube_short": title,
-                    "video_description_for_instagram": "",
-                    "video_description_for_tiktok": "",
-                }
-            ],
-            "transcript": transcript,
-            "standalone_caption": {
-                "created_at": int(time.time()),
-                "source": "upload",
-                "input_filename": source_name,
-            },
-        }
-        metadata_path = os.path.join(output_dir, f"{job_id}_metadata.json")
-        _persist_metadata_json(metadata_path, metadata)
+        _build_and_persist_caption_metadata(job_id, output_dir, source_name, title, duration_sec, local_video_ref, transcript)
 
         bucket = os.environ.get("AWS_S3_BUCKET", "")
         if not bucket:
             raise RuntimeError("AWS_S3_BUCKET is required for caption persistence")
-        caption_s3_key = ""
-        media_url = local_video_ref
-        thumbnail_ref = ""
-        caption_s3_key = f"captions/{user_id}/{job_id}/{os.path.basename(input_path)}"
-        if not upload_file_to_s3(input_path, bucket, caption_s3_key):
-            raise RuntimeError("Failed to upload caption source video to S3")
-        media_url = _caption_media_url_from_s3_key(caption_s3_key) or local_video_ref
+        caption_s3_key, media_url, thumbnail_ref = _upload_caption_source_and_thumbnail(input_path, user_id, job_id, bucket, local_video_ref)
 
-        thumb_local = _generate_reel_thumbnail_from_video(input_path, OUTPUT_DIR, job_id, 0)
-        if thumb_local:
-            thumb_key = f"captions/{user_id}/{job_id}/thumbnail.jpg"
-            if upload_file_to_s3(thumb_local, bucket, thumb_key):
-                thumbnail_ref = thumb_key
-            try:
-                if os.path.exists(thumb_local):
-                    os.remove(thumb_local)
-            except Exception:
-                pass
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-        row_payload: Dict[str, Any] = {
-            "caption_url": media_url,
-            "caption_thumbnail_url": thumbnail_ref,
-            "caption_title": title,
-            "caption_description": "",
-            "caption_duration": max(1, int(round(duration_sec))),
-            "caption_created_at": now_iso,
-            "caption_updated_at": now_iso,
-            "caption_user_id": user_id,
-            "caption_status": "termine",
-            "caption_job_id": job_id,
-            "caption_clip_index": 0,
-            "caption_s3_key": caption_s3_key,
-            "generation_inputs": {
-                "source_type": "file",
-                "source_value": source_name,
-                "caption_max_duration_minutes": CAPTION_MAX_DURATION_MINUTES,
-                "caption_max_storage_gb": CAPTION_MAX_STORAGE_GB,
-                "duration_seconds": duration_sec,
-            },
-            "input_source_type": "file",
-            "input_source_value": source_name,
-            "billing_details": _build_billing_details(
-                "sous_titre",
-                caption_cost_breakdown,
-                actual_credit=caption_required_credits,
-                actual_storage_gb=caption_storage_gb,
-                extra={
-                    "source_type": "file",
-                    "source_value": source_name,
-                },
-            ),
-            "total_cost_usd": 0,
-        }
-        project_id = str(job_data.get("project_id") or "").strip()
-        if project_id:
-            row_payload["project_id"] = project_id
-
-        normalized_item = {"id": f"local-{job_id}", **row_payload}
-        if is_supabase_configured():
-            saved = await supabase_insert_captions([row_payload])
-            if saved:
-                normalized_item = _normalize_caption_row(saved[0])
-
-            if user_id and (caption_required_credits > 0 or caption_storage_gb > 0):
-                debit_ok = await reel_job_manager.debit_credits_for_job(
-                    job_id=job_id,
-                    user_id=user_id,
-                    credits=caption_required_credits,
-                    storage_delta=-caption_storage_gb,
-                    operation_type="sous_titre",
-                    reserved_credits=caption_required_credits,
-                )
-                if not debit_ok:
-                    raise RuntimeError("Insufficient credit/storage balance to finalize caption job")
+        row_payload = _build_caption_row_payload(
+            job_id, job_data, user_id, source_name, title, duration_sec, media_url, thumbnail_ref,
+            caption_s3_key, caption_required_credits, caption_storage_gb, caption_cost_breakdown,
+        )
+        normalized_item = await _save_caption_row_and_debit(row_payload, job_id, user_id, caption_required_credits, caption_storage_gb)
 
         await pipeline.rendering()
         result_payload = {
@@ -2769,28 +2863,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             cost_breakdown=caption_cost_breakdown,
         )
 
-        # Update project status to completed if associated with a project
-        project_id = job_data.get("project_id")
-        if project_id and is_supabase_configured():
-            try:
-                await supabase_update_project_status(project_id, "completed", user_id=user_id)
-                project_summary = _build_short_project_summary(
-                    str(normalized_item.get("caption_description") or "")
-                    or str(normalized_item.get("caption_title") or "")
-                )
-                await supabase_update_project(
-                    project_id,
-                    user_id or "",
-                    {
-                        "description": project_summary,
-                        "thumbnail_url": str(normalized_item.get("caption_thumbnail_url") or "") or None,
-                        "output_count": 1,
-                        "source_duration": int(float(job_data.get("source_duration_seconds") or local_duration or 0.0)) or None,
-                    },
-                )
-                logger.info(f"Project {project_id} marked as completed")
-            except Exception as e:
-                logger.warning(f"Failed to update project status to completed: {str(e)}")
+        await _update_project_on_caption_completion(job_data, user_id, normalized_item, local_duration)
 
         await _persist_transcription_cache(
             user_id=user_id,
@@ -2811,37 +2884,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             ),
         )
     except Exception as exc:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["logs"].append(f"Caption job failed: {exc}")
-        result = await reel_job_manager.fail_job(
-            job_id,
-            str(exc),
-            error_code="CAPTION_JOB_FAILED",
-            retry_delay_seconds=CAPTION_JOB_RETRY_DELAY_SECONDS,
-        )
-
-        # Update project status to failed if associated with a project
-        if is_supabase_configured():
-            project_id = job_data.get("project_id")
-            if project_id:
-                try:
-                    await supabase_update_project_status(project_id, "failed", user_id=user_id)
-                    logger.info(f"Project {project_id} marked as failed")
-                except Exception as e:
-                    logger.warning(f"Failed to update project status to failed: {str(e)}")
-
-        # Release the reservation made at job creation: nothing was billed
-        # in this failure path, so the full reserved amount is refundable.
-        if not result.get("retry") and user_id:
-            reserved = float(job_data.get("caption_required_credits") or 0.0)
-            if reserved > 0 and is_supabase_configured():
-                try:
-                    await reel_job_manager.refund_reservation(job_id, user_id, reserved, operation_type="sous_titre")
-                except Exception as refund_error:
-                    logger.warning(f"Failed to refund caption reservation: {refund_error}")
-
-        if result.get("retry"):
-            _spawn_background_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
+        await _handle_caption_job_failure(job_id, job_data, user_id, exc)
     finally:
         # Keep caption sources local only during processing.
         if input_path and os.path.exists(input_path):
