@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  NEXUS_REGISTRY: nexus.wouri.tv
+  NEXUS_REGISTRY: nexus.wouri.tv:8082
   IMAGE_PREFIX: vireel
 
 # Security: least-privilege default for GITHUB_TOKEN. This pipeline only
