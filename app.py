@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Annotated
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote, urlencode
 from urllib.request import Request as UrlRequest, urlopen, HTTPRedirectHandler, build_opener
@@ -548,7 +548,7 @@ def _verify_supabase_jwt(token: str) -> str:
 
 def get_user_id_header(
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: Annotated[Optional[str], Header()] = None,
 ) -> str:
     """FastAPI dependency resolving the authenticated caller's user id.
 
@@ -1969,7 +1969,7 @@ async def _close_proxy_stream(upstream, client):
 
 
 @app.get("/api/media/proxy")
-async def proxy_media(request: Request, url: str, user_id: str = Depends(get_user_id_header)):
+async def proxy_media(request: Request, url: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy remote media through the backend so browser-side Remotion can fetch it same-origin.
 
     Security: this endpoint performs a server-side HTTP request to a URL the
@@ -3597,10 +3597,10 @@ def _apply_auto_edit_media_steps(
 @app.post("/api/process", responses={400: {"description": "Bad Request"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}})
 async def process_endpoint(
     request: Request,
-    file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None),
-    acknowledged: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    file: Annotated[Optional[UploadFile], File()] = None,
+    url: Annotated[Optional[str], Form()] = None,
+    acknowledged: Annotated[Optional[str], Form()] = None,
 ):
     # Determine API Key: Use .env configuration (GEMINI_API_KEY or OPENAI_API_KEY as fallback)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -3861,7 +3861,7 @@ async def process_endpoint(
     }
 
 @app.get("/api/status/{job_id}", responses={404: {"description": "Not Found"}})
-async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
+async def get_status(job_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     # Best effort read of in-memory runtime state, but the *authorization*
     # scope always comes from the verified caller identity above -- never
     # fall back to an unscoped (user_id=None) lookup, which would let any
@@ -4080,8 +4080,8 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 async def edit_clip(
     request: Request,
     req: EditRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     await _require_job_ownership(req.job_id, user_id)
 
@@ -4261,9 +4261,9 @@ async def edit_clip(
 
 @app.post("/api/captions/process", responses={400: {"description": "Bad Request"}, 413: {"description": "Payload Too Large"}})
 async def process_caption_endpoint(
-    file: UploadFile = File(...),
-    acknowledged: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    file: Annotated[UploadFile, File()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    acknowledged: Annotated[Optional[str], Form()] = None,
 ):
     if not file:
         raise HTTPException(status_code=400, detail="Must provide a video file")
@@ -4491,7 +4491,7 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
 async def ensure_clip_preview_image(
     job_id: str,
     clip_index: int,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     preview_image_url = await _ensure_preview_image_for_clip(job_id, clip_index, user_id)
     return {
@@ -4504,10 +4504,10 @@ async def ensure_clip_preview_image(
 async def persist_captioned_reel(
     job_id: str,
     clip_index: int,
-    file: UploadFile = File(...),
-    subtitle_config: Optional[str] = Form(None),
-    remotion_layers: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    file: Annotated[UploadFile, File()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    subtitle_config: Annotated[Optional[str], Form()] = None,
+    remotion_layers: Annotated[Optional[str], Form()] = None,
 ):
     caption_required_credits = 0.0
 
@@ -4811,7 +4811,7 @@ _RENDER_SERVICE_HEADERS = {"x-internal-api-key": RENDER_SERVICE_API_KEY or "unit
 
 
 @app.post("/api/render")
-async def proxy_render(request: Request, user_id: str = Depends(get_user_id_header)):
+async def proxy_render(request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy render requests to the Node.js Remotion render service.
 
     Security: this endpoint used to forward the raw client body to an
@@ -4835,7 +4835,7 @@ async def proxy_render(request: Request, user_id: str = Depends(get_user_id_head
         )
 
 @app.get("/api/render/{render_id}")
-async def proxy_render_status(render_id: str, user_id: str = Depends(get_user_id_header)):
+async def proxy_render_status(render_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy render status polling to the Node.js Remotion render service."""
     import httpx
     try:
@@ -4861,8 +4861,8 @@ class EffectsGenerateRequest(BaseModel):
 @app.post("/api/effects/generate", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def generate_effects_config(
     req: EffectsGenerateRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Generate structured EffectsConfig JSON for Remotion rendering via Gemini AI."""
     final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
@@ -4995,7 +4995,7 @@ async def generate_effects_config(
 
 
 @app.post("/api/subtitle", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
-async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id_header)):
+async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _require_job_ownership(req.job_id, user_id)
     subtitle_required_credits = 0.0
     await _assert_user_has_required_credits(user_id, subtitle_required_credits)
@@ -5263,7 +5263,7 @@ class HookRequest(BaseModel):
 async def reset_caption_style_history(
     job_id: str,
     clip_index: int,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
     if not metadata_path or not data:
@@ -5311,7 +5311,7 @@ async def reset_caption_style_history(
 async def get_caption_style_history_debug(
     job_id: str,
     clip_index: int,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
     if not metadata_path or not data:
@@ -5359,7 +5359,7 @@ async def get_caption_style_history_debug(
     }
 
 @app.post("/api/hook", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
-async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header)):
+async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _require_job_ownership(req.job_id, user_id)
     hook_required_credits = 0.0
 
@@ -6193,7 +6193,7 @@ def _resolve_public_video_url(video_ref: str, request: Request, job_id: str) -> 
     return f"{base_url}/videos/{job_id}/{ref}"
 
 @app.post("/api/social/post", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
-async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: str = Depends(get_user_id_header)):
+async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: Annotated[str, Depends(get_user_id_header)]):
     selected_platforms = _resolve_social_platforms(req.platforms)
     user_id = _resolve_request_user_id(req.user_id, user_id_header)
     publish_priority = await _resolve_user_job_priority(user_id)
@@ -6291,9 +6291,9 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
 
 @app.post("/api/thumbnail/upload", responses={400: {"description": "Bad Request"}})
 async def thumbnail_upload(
-    file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    file: Annotated[Optional[UploadFile], File()] = None,
+    url: Annotated[Optional[str], Form()] = None,
 ):
     """Upload video and start background Whisper transcription immediately."""
     if not url and not file:
@@ -6364,11 +6364,11 @@ async def thumbnail_upload(
 @app.post("/api/thumbnail/analyze", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_analyze(
     request: Request,
-    file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None),
-    session_id: Optional[str] = Form(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    file: Annotated[Optional[UploadFile], File()] = None,
+    url: Annotated[Optional[str], Form()] = None,
+    session_id: Annotated[Optional[str], Form()] = None,
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Analyze a video and suggest viral YouTube titles."""
     # Use .env configuration (ignore header for security)
@@ -6453,8 +6453,8 @@ class ThumbnailTitlesRequest(BaseModel):
 @app.post("/api/thumbnail/titles", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def thumbnail_titles(
     req: ThumbnailTitlesRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Refine title suggestions or accept a manual title."""
     # Use .env configuration (ignore header for security)
@@ -6510,14 +6510,14 @@ async def thumbnail_titles(
 @app.post("/api/thumbnail/generate", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_generate(
     request: Request,
-    session_id: str = Form(...),
-    title: str = Form(...),
-    extra_prompt: str = Form(""),
-    count: int = Form(3),
-    face: Optional[UploadFile] = File(None),
-    background: Optional[UploadFile] = File(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    session_id: Annotated[str, Form()],
+    title: Annotated[str, Form()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    extra_prompt: Annotated[str, Form()] = "",
+    count: Annotated[int, Form()] = 3,
+    face: Annotated[Optional[UploadFile], File()] = None,
+    background: Annotated[Optional[UploadFile], File()] = None,
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
     # Security: session_id is client-supplied and gets joined into a
@@ -6591,8 +6591,8 @@ class ThumbnailDescribeRequest(BaseModel):
 @app.post("/api/thumbnail/describe", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def thumbnail_describe(
     req: ThumbnailDescribeRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Generate a YouTube description with chapters from the transcript."""
     # Use .env configuration (ignore header for security)
@@ -6628,11 +6628,11 @@ async def thumbnail_describe(
 @app.post("/api/thumbnail/publish", responses={404: {"description": "Not Found"}})
 def thumbnail_publish(
     background_tasks: BackgroundTasks,
-    session_id: str = Form(...),
-    title: str = Form(...),
-    description: str = Form(...),
-    thumbnail_url: str = Form(...),
-    user_id: str = Depends(get_user_id_header),
+    session_id: Annotated[str, Form()],
+    title: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    thumbnail_url: Annotated[str, Form()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     """Kick off a background upload to YouTube using the user's connected social account."""
     if session_id not in thumbnail_sessions:
@@ -6737,7 +6737,7 @@ def _frontend_base_url(request: Request) -> str:
 async def create_stripe_checkout_session(
     request: Request,
     payload: StripeCheckoutRequest,
-    user_id: str = Depends(get_user_id_header),   # ✅ ici, dans la signature
+    user_id: Annotated[str, Depends(get_user_id_header)],   # ✅ ici, dans la signature
 ):
     """Create a hosted Stripe Checkout session for a subscription plan."""
     _require_stripe_ready()
@@ -7033,7 +7033,7 @@ async def list_abonnements():
 @app.get("/api/souscription")
 async def get_current_souscription(
     request: Request,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ) -> Optional[Dict[str, Any]]:
     """Get the current active subscription for a user."""
     await _enforce_subscription_retention_policy(user_id)
@@ -7057,8 +7057,8 @@ async def get_current_souscription(
 @app.get("/api/souscription/history", responses={503: {"description": "Service Unavailable"}})
 async def get_souscription_history(
     request: Request,
-    limit: int = Query(50, ge=1, le=200),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ):
     """Return subscription history only (excluding one-off credit purchases)."""
     if not is_supabase_configured():
@@ -7093,7 +7093,7 @@ async def get_souscription_history(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/user/credits", responses={503: {"description": "Service Unavailable"}})
-async def get_user_credits(request: Request, user_id: str = Depends(get_user_id_header)):
+async def get_user_credits(request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Return the credit/storage balance for the authenticated user."""
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
@@ -7156,9 +7156,9 @@ async def get_user_credits(request: Request, user_id: str = Depends(get_user_id_
 @app.get("/api/user/history", responses={503: {"description": "Service Unavailable"}})
 async def get_user_history(
     request: Request,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
     """Return paginated credit/storage history for the authenticated user."""
     if not is_supabase_configured():
@@ -7183,7 +7183,7 @@ class BuyCreditsRequest(BaseModel):
 async def buy_credits_checkout(
     request: Request,
     payload: BuyCreditsRequest,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     """Create a Stripe Checkout session for purchasing additional credits."""
     _require_stripe_ready()
@@ -7255,9 +7255,9 @@ async def buy_credits_checkout(
 
 @app.get("/api/captions", responses={503: {"description": "Service Unavailable"}})
 async def list_captions(
-    user_id: str = Depends(get_user_id_header),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 10,
     q: Optional[str] = None,
     status: Optional[str] = None,
 ):
@@ -7274,7 +7274,7 @@ async def list_captions(
 
 
 @app.get("/api/captions/{caption_id}/media-url", responses={404: {"description": "Not Found"}})
-async def caption_media_url(caption_id: str, user_id: str = Depends(get_user_id_header)):
+async def caption_media_url(caption_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_caption(caption_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail=_CAPTION_NOT_FOUND)
@@ -7283,7 +7283,7 @@ async def caption_media_url(caption_id: str, user_id: str = Depends(get_user_id_
 
 
 @app.delete("/api/captions/{caption_id}", responses={404: {"description": "Not Found"}})
-async def delete_caption(caption_id: str, user_id: str = Depends(get_user_id_header)):
+async def delete_caption(caption_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     deleted = await supabase_soft_delete_caption(caption_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=_CAPTION_NOT_FOUND)
@@ -7291,7 +7291,7 @@ async def delete_caption(caption_id: str, user_id: str = Depends(get_user_id_hea
 
 
 @app.post("/api/captions/{caption_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
-async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
+async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
 
     row = await supabase_get_caption(caption_id, user_id)
@@ -7408,11 +7408,11 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str
 
 @app.get("/api/projects", responses={503: {"description": "Service Unavailable"}})
 async def list_projects(
-	user_id: str = Depends(get_user_id_header),
-	page: int = Query(1, ge=1),
-	page_size: int = Query(20, ge=1, le=100),
-	project_type: Optional[str] = Query(None),
-	status: Optional[str] = Query(None),
+	user_id: Annotated[str, Depends(get_user_id_header)],
+	page: Annotated[int, Query(ge=1)] = 1,
+	page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+	project_type: Annotated[Optional[str], Query()] = None,
+	status: Annotated[Optional[str], Query()] = None,
 	q: Optional[str] = None,
 ):
 	if not is_supabase_configured():
@@ -7435,7 +7435,7 @@ async def list_projects(
 
 
 @app.get("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
-async def get_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
+async def get_project_endpoint(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
@@ -7455,7 +7455,7 @@ class ProjectUpdateRequest(BaseModel):
 async def update_project_endpoint(
 	project_id: str,
 	payload: ProjectUpdateRequest,
-	user_id: str = Depends(get_user_id_header),
+	user_id: Annotated[str, Depends(get_user_id_header)],
 ):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7478,7 +7478,7 @@ async def update_project_endpoint(
 
 
 @app.delete("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
-async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
+async def delete_project_endpoint(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
@@ -7574,7 +7574,7 @@ async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_us
 
 
 @app.get("/api/projects/{project_id}/source-url", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
-async def get_project_source_url(project_id: str, user_id: str = Depends(get_user_id_header)):
+async def get_project_source_url(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
@@ -7597,7 +7597,7 @@ async def get_project_source_url(project_id: str, user_id: str = Depends(get_use
 
 
 @app.get("/api/projects/{project_id}/job", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
-async def get_project_job(project_id: str, user_id: str = Depends(get_user_id_header)):
+async def get_project_job(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
   if not is_supabase_configured():
     raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
@@ -7623,7 +7623,7 @@ async def get_project_job(project_id: str, user_id: str = Depends(get_user_id_he
 
 
 @app.get("/api/projects/{project_id}/reels", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
-async def get_project_reels(project_id: str, user_id: str = Depends(get_user_id_header)):
+async def get_project_reels(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	"""Get all reels for a specific project."""
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7642,7 +7642,7 @@ async def get_project_reels(project_id: str, user_id: str = Depends(get_user_id_
 
 
 @app.get("/api/projects/{project_id}/captions", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
-async def get_project_captions(project_id: str, user_id: str = Depends(get_user_id_header)):
+async def get_project_captions(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	"""Get all captions for a specific project."""
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7658,7 +7658,7 @@ async def get_project_captions(project_id: str, user_id: str = Depends(get_user_
 		"captions": [_normalize_caption_row(caption) for caption in captions],
 		"count": len(captions),
 	}
-async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
+async def list_reels(user_id: Annotated[str, Depends(get_user_id_header)], page: Annotated[int, Query(ge=1)] = 1, page_size: Annotated[int, Query(ge=1, le=100)] = 10, q: Optional[str] = None, status: Optional[str] = None):
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase reels is not configured")
 
@@ -7672,7 +7672,7 @@ async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Que
 
 
 @app.get("/api/reels/{reel_id}/media-url", responses={404: {"description": "Not Found"}})
-async def reel_media_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
+async def reel_media_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
@@ -7681,7 +7681,7 @@ async def reel_media_url(reel_id: str, user_id: str = Depends(get_user_id_header
 
 
 @app.get("/api/reels/{reel_id}/thumbnail-url", responses={404: {"description": "Not Found"}})
-async def reel_thumbnail_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
+async def reel_thumbnail_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
@@ -7690,7 +7690,7 @@ async def reel_thumbnail_url(reel_id: str, user_id: str = Depends(get_user_id_he
 
 
 @app.get("/api/reels/{reel_id}/preview-url", responses={404: {"description": "Not Found"}})
-async def reel_preview_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
+async def reel_preview_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
@@ -7699,7 +7699,7 @@ async def reel_preview_url(reel_id: str, user_id: str = Depends(get_user_id_head
 
 
 @app.delete("/api/reels/{reel_id}", responses={404: {"description": "Not Found"}})
-async def delete_reel(reel_id: str, user_id: str = Depends(get_user_id_header)):
+async def delete_reel(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     deleted = await supabase_soft_delete_reel(reel_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
@@ -7707,7 +7707,7 @@ async def delete_reel(reel_id: str, user_id: str = Depends(get_user_id_header)):
 
 
 @app.post("/api/reels/{reel_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
-async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
+async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
 
     row = await supabase_get_reel(reel_id, user_id)
@@ -8240,7 +8240,7 @@ async def _update_publish_job_status(
 
 
 @app.get("/api/social/accounts")
-async def list_social_accounts(user_id: str = Depends(get_user_id_header)):
+async def list_social_accounts(user_id: Annotated[str, Depends(get_user_id_header)]):
     client = await supabase_get_client()
     response = (
         await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
@@ -8261,7 +8261,7 @@ async def list_social_accounts(user_id: str = Depends(get_user_id_header)):
 
 
 @app.delete("/api/social/accounts/{platform}", responses={404: {"description": "Not Found"}})
-async def disconnect_social_account(platform: str, user_id: str = Depends(get_user_id_header)):
+async def disconnect_social_account(platform: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     key = (platform or "").strip().lower()
     if key not in PLATFORM_CONFIG:
         raise HTTPException(status_code=404, detail=_UNSUPPORTED_PLATFORM)
@@ -8278,15 +8278,15 @@ async def disconnect_social_account(platform: str, user_id: str = Depends(get_us
 
 @app.get("/api/social/publish-jobs", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
 async def list_publish_jobs(
-    user_id: str = Depends(get_user_id_header),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    platform: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    date_filter: Optional[str] = Query(None),  # all, today, week, month
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    platform: Annotated[Optional[str], Query()] = None,
+    status: Annotated[Optional[str], Query()] = None,
+    date_filter: Annotated[Optional[str], Query()] = None,  # all, today, week, month
+    date_from: Annotated[Optional[str], Query()] = None,
+    date_to: Annotated[Optional[str], Query()] = None,
+    search: Annotated[Optional[str], Query()] = None,
 ):
     """
     Récupère les publications sociales de l'utilisateur avec filtres.
@@ -8385,7 +8385,7 @@ async def list_publish_jobs(
 @app.delete("/api/social/publish-jobs/{publish_job_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def delete_publish_job(
     publish_job_id: str,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase social publishing is not configured")
@@ -8454,7 +8454,7 @@ async def select_facebook_page(payload: SelectFacebookPageRequest):
 
 
 @app.get("/api/auth/{platform}/connect")
-def connect(platform: str, request: Request, user_id: str = Depends(get_user_id_header)):
+def connect(platform: str, request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     # Security: `user_id` MUST come from the verified session (get_user_id_header),
     # never from an unauthenticated query parameter -- otherwise an attacker
     # could craft a /connect link carrying their own user_id, get a victim to
