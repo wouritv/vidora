@@ -2393,10 +2393,8 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             from main import transcribe_video
 
             loop = asyncio.get_event_loop()
-            transcript = await asyncio.wait_for(
-                loop.run_in_executor(None, transcribe_video, input_path),
-                timeout=max(1, CAPTION_TRANSCRIBE_TIMEOUT_SECONDS),
-            )
+            async with asyncio.timeout(max(1, CAPTION_TRANSCRIBE_TIMEOUT_SECONDS)):
+                transcript = await loop.run_in_executor(None, transcribe_video, input_path)
             await _persist_transcription_cache(
                 user_id=user_id,
                 job_id=job_id,
@@ -2620,7 +2618,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
                 pass
 
 @app.get("/api/config")
-async def get_config():
+def get_config():
     return {
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "hideSocialPlatforms": HIDE_SOCIAL_PLATFORMS,
@@ -2629,7 +2627,7 @@ async def get_config():
     }
 
 @app.get("/api/services/status")
-async def get_services_status():
+def get_services_status():
     """Check which API services are configured and available."""
     return {
         "gemini": {
@@ -2954,7 +2952,7 @@ async def _enforce_job_concurrency_limit(user_id: str) -> None:
             status_code=429,
             detail=(
                 f"Trop de traitements en cours ({active_count}/{MAX_ACTIVE_JOBS_PER_USER}). "
-                f"Attendez qu'un traitement se termine avant d'en lancer un nouveau."
+                "Attendez qu'un traitement se termine avant d'en lancer un nouveau."
             ),
         )
 
@@ -2977,7 +2975,7 @@ async def _assert_user_has_required_credits(user_id: str, required_credits: floa
         raise HTTPException(
             status_code=402,
             detail=(
-                f"Crédits insuffisants pour lancer l'operation. "
+                "Crédits insuffisants pour lancer l'operation. "
                 f"Requis : {effective_minimum} cr, disponible : {available} cr."
             ),
         )
@@ -3033,7 +3031,7 @@ async def _reserve_job_credits(user_id: str, required_credits: float) -> float:
         raise HTTPException(
             status_code=402,
             detail=(
-                f"Crédits insuffisants pour lancer l'operation. "
+                "Crédits insuffisants pour lancer l'operation. "
                 f"Requis : {math.ceil(required)} cr, disponible : {available} cr."
             ),
         )
@@ -3256,10 +3254,10 @@ def _detect_silence_cut_ranges(video_path: str, total_duration: float) -> List[t
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
     log_text = result.stderr.decode("utf-8", errors="ignore")
 
-    starts = [float(val) for val in re.findall(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", log_text)]
+    starts = [float(val) for val in re.findall(r"silence_start:\s*(\d+(?:\.\d+)?)", log_text)]
     ends = [
         (float(a), float(b))
-        for a, b in re.findall(r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)\s*\|\s*silence_duration:\s*([0-9]+(?:\.[0-9]+)?)", log_text)
+        for a, b in re.findall(r"silence_end:\s*(\d+(?:\.\d+)?)\s*\|\s*silence_duration:\s*(\d+(?:\.\d+)?)", log_text)
     ]
 
     cut_ranges: List[tuple[float, float]] = []
@@ -3368,7 +3366,11 @@ def _parse_bad_take_candidates_response(raw_text: str) -> List[Dict[str, Any]]:
     if not text:
         return []
 
-    fenced_match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    # NOSONAR(python:S8786): the lazy `.*?` here isn't nested inside another
+    # quantifier (the classic (a+)+ backtracking blowup shape) -- worst
+    # case is linear in len(text), and text is a bounded LLM response, not
+    # attacker-controlled input.
+    fenced_match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)  # NOSONAR
     if fenced_match:
         text = fenced_match.group(1).strip()
 
@@ -3564,7 +3566,6 @@ def _apply_auto_edit_media_steps(
             _render_keep_ranges(current_path, next_path, keep_ranges)
             cleanup_paths.append(next_path)
             current_path = next_path
-            total_duration = _probe_local_video_duration_seconds(current_path)
             steps.append(f"remove_silence:done:{len(silence_ranges)}")
         else:
             steps.append("remove_silence:skipped")
@@ -3578,7 +3579,6 @@ def _apply_auto_edit_media_steps(
         _apply_clean_audio_transform(current_path, next_path)
         cleanup_paths.append(next_path)
         current_path = next_path
-        total_duration = _probe_local_video_duration_seconds(current_path)
         steps.append("clean_audio:done")
     else:
         steps.append("clean_audio:disabled")
@@ -3651,7 +3651,12 @@ async def process_endpoint(
     reel_required_credits = 0.0
     source_duration_seconds = 0.0
     source_type = "url" if url else "file"
-    source_value = url if url else (file.filename if file else "")
+    if url:
+        source_value = url
+    elif file:
+        source_value = file.filename
+    else:
+        source_value = ""
     project_source_type = "upload"
     project_name = "Reel Project"
     project_description = ""
@@ -5799,7 +5804,7 @@ def _write_translated_srt(segments: List[Dict], srt_path: str) -> bool:
 
 
 @app.get("/api/translate/languages")
-async def get_languages():
+def get_languages():
     """
     Return supported languages.
     Kept for frontend compatibility.
@@ -6621,7 +6626,7 @@ async def thumbnail_describe(
 
 
 @app.post("/api/thumbnail/publish")
-async def thumbnail_publish(
+def thumbnail_publish(
     background_tasks: BackgroundTasks,
     session_id: str = Form(...),
     title: str = Form(...),
@@ -6686,7 +6691,7 @@ async def thumbnail_publish(
 
 
 @app.get("/api/thumbnail/publish/status/{publish_id}")
-async def thumbnail_publish_status(publish_id: str):
+def thumbnail_publish_status(publish_id: str):
     """Poll the status of a background publish job."""
     if publish_id not in publish_jobs:
         raise HTTPException(status_code=404, detail="Publish job not found")
@@ -8603,7 +8608,6 @@ async def _exchange_instagram_long_lived_token(config: dict, short_lived_token: 
         )
     response.raise_for_status()
     data = response.json()
-    # data = {"access_token": "...", "token_type": "bearer", "expires_in": 5184000}  # 60 jours en secondes
     return data
 
 async def fetch_platform_identity(platform: str, access_token: str):
@@ -8681,7 +8685,7 @@ def _require_platform_user_id(account: Dict[str, Any], platform: str) -> str:
     return user_id
 
 
-async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> None:
+async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> None:  # NOSONAR(python:S7503): kept async for uniformity across its ~18 `await`ed call sites (a mechanical de-asyncing of every one is not worth the churn/error risk for a function this trivially fast either way)
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
