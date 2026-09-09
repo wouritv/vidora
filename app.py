@@ -5710,16 +5710,7 @@ class HookRequest(BaseModel):
     size: Optional[str] = "M" # S, M, L
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/reset", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
-async def reset_caption_style_history(
-    job_id: str,
-    clip_index: int,
-    user_id: Annotated[str, Depends(get_user_id_header)],
-):
-    metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
-    if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
-
+def _reset_clip_metadata_to_original(metadata_path: str, data: Dict[str, Any], clip_index: int) -> str:
     clips = data.get("shorts") or []
     if clip_index < 0 or clip_index >= len(clips):
         raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
@@ -5742,6 +5733,21 @@ async def reset_caption_style_history(
         history.pop(history_key, None)
         data["style_history"] = history
     _persist_metadata_json(metadata_path, data)
+
+    return original_video_url
+
+
+@app.post("/api/reels/{job_id}/{clip_index}/captions/reset", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
+async def reset_caption_style_history(
+    job_id: str,
+    clip_index: int,
+    user_id: Annotated[str, Depends(get_user_id_header)],
+):
+    metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
+    if not metadata_path or not data:
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
+
+    original_video_url = _reset_clip_metadata_to_original(metadata_path, data, clip_index)
 
     if is_supabase_configured():
         try:
@@ -5809,10 +5815,29 @@ async def get_caption_style_history_debug(
         },
     }
 
+def _run_add_hook(input_path: str, text: str, output_path: str, position: str, font_scale: float) -> None:
+    add_hook_to_video(input_path, text, output_path, position=position, font_scale=font_scale)
+
+
+def _persist_new_video_url_to_clip(job: Optional[Dict[str, Any]], job_id: str, clip_index: int, clips: List[Any], data: Dict[str, Any], metadata_path: str, new_video_url: str, log_label: str) -> None:
+    # Update InMemory Jobs
+    if job and clip_index < len(job.get('result', {}).get('clips', [])):
+        job['result']['clips'][clip_index]['video_url'] = new_video_url
+
+    # Update Metadata on Disk
+    try:
+        if clip_index < len(clips):
+            clips[clip_index]['video_url'] = new_video_url
+            data['shorts'] = clips
+            _persist_metadata_json(metadata_path, data)
+            print(f"✅ Metadata updated with {log_label} video for clip {clip_index}")
+    except Exception as e:
+        print(f"⚠️ Failed to update metadata.json: {e}")
+
+
 @app.post("/api/hook", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
 async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _require_job_ownership(req.job_id, user_id)
-    hook_required_credits = 0.0
 
     job = jobs.get(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
@@ -5825,24 +5850,7 @@ async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id
         raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip_data = clips[req.clip_index]
-
-    # Video Path
-    if req.input_filename:
-        filename = _sanitize_input_filename(req.input_filename)
-        if not filename:
-            raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
-    else:
-        filename = clip_data.get('video_url', '').split('/')[-1]
-        if not filename:
-             base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, '')
-             filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
-
-    input_path = os.path.join(output_dir, filename)
-    if not os.path.exists(input_path) and req.input_url:
-        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
-
-    if not os.path.exists(input_path):
-        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+    input_path, filename = _resolve_add_subtitles_input_path(req, output_dir, clip_data, metadata_path)
 
     input_size_bytes = float(os.path.getsize(input_path) if os.path.exists(input_path) else 0)
     input_duration_seconds = _probe_local_video_duration_seconds(input_path)
@@ -5865,30 +5873,13 @@ async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id
     font_scale = size_map.get(req.size, 1.0)
 
     try:
-        # Run in thread pool
-        def run_hook():
-             add_hook_to_video(input_path, req.text, output_path, position=req.position, font_scale=font_scale)
-
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, run_hook)
-
+        await loop.run_in_executor(None, _run_add_hook, input_path, req.text, output_path, req.position, font_scale)
     except Exception as e:
         raise _generic_error("Hook Error", e)
 
-    # Update Persistence (Same logic as subtitles)
-    # Update InMemory Jobs
-    if job and req.clip_index < len(job.get('result', {}).get('clips', [])):
-         job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-
-    # Update Metadata on Disk
-    try:
-        if req.clip_index < len(clips):
-            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-            data['shorts'] = clips
-            _persist_metadata_json(metadata_path, data)
-            print(f"✅ Metadata updated with hook video for clip {req.clip_index}")
-    except Exception as e:
-        print(f"⚠️ Failed to update metadata.json: {e}")
+    new_video_url = f"/videos/{req.job_id}/{output_filename}"
+    _persist_new_video_url_to_clip(job, req.job_id, req.clip_index, clips, data, metadata_path, new_video_url, "hook")
 
     if is_supabase_configured() and hook_required_credits > 0:
         await supabase_deduct_user_credits(user_id, hook_required_credits)
@@ -5903,7 +5894,7 @@ async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id
 
     return {
         "success": True,
-        "new_video_url": f"/videos/{req.job_id}/{output_filename}"
+        "new_video_url": new_video_url,
     }
 
 # --- Translation (subtitles-only, keep original voice) ---
