@@ -8593,6 +8593,24 @@ async def _insert_publish_job(
     return str(rows[0].get("id")) if rows and rows[0].get("id") is not None else None
 
 
+async def _debit_scheduled_publish_credits(user_id: str, task_payload: Dict[str, Any], job_id: str) -> None:
+    if not is_supabase_configured():
+        return
+    done_cost = calculate_credits_for_operation(
+        estimate_publication_cost_usd(platform_count=1, video_size_gb=0.5)
+    )
+    done_credits = done_cost["final_credits"]
+    await supabase_deduct_user_credits(user_id, done_credits)
+    await supabase_insert_user_data_history(
+        user_id=user_id,
+        credit=done_credits,
+        storage=0.0,
+        operation="output",
+        operation_type="publication",
+        operation_id=str(task_payload.get("source_id") or job_id),
+    )
+
+
 async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
     job_id = str(job_row.get("id") or "")
     user_id = str(job_row.get("user_id") or "")
@@ -8628,20 +8646,7 @@ async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
         await _update_publish_job_status(job_id, "done", external_id=external_id, error_message=None)
 
-        if is_supabase_configured():
-            done_cost = calculate_credits_for_operation(
-                estimate_publication_cost_usd(platform_count=1, video_size_gb=0.5)
-            )
-            done_credits = done_cost["final_credits"]
-            await supabase_deduct_user_credits(user_id, done_credits)
-            await supabase_insert_user_data_history(
-                user_id=user_id,
-                credit=done_credits,
-                storage=0.0,
-                operation="output",
-                operation_type="publication",
-                operation_id=str(task_payload.get("source_id") or job_id),
-            )
+        await _debit_scheduled_publish_credits(user_id, task_payload, job_id)
     except Exception as exc:
         await _update_publish_job_status(job_id, "failed", error_message=str(exc))
 
@@ -8731,6 +8736,54 @@ async def disconnect_social_account(platform: str, user_id: Annotated[str, Depen
     return {"deleted": bool(response.data)}
 
 
+def _apply_publish_jobs_date_filter(query, date_filter: Optional[str], date_from: Optional[str], date_to: Optional[str]):
+    if not date_filter or date_filter == "all":
+        return query
+
+    now = datetime.now(timezone.utc)
+    if date_filter == "today":
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        return query.gte("created_at", start_date)
+    if date_filter == "week":
+        week_ago = now - timedelta(days=7)
+        return query.gte("created_at", week_ago.isoformat())
+    if date_filter == "month":
+        month_ago = now - timedelta(days=30)
+        return query.gte("created_at", month_ago.isoformat())
+    if date_filter != "custom":
+        return query
+
+    parsed_start_dt = None
+    parsed_end_dt = None
+    if date_from:
+        try:
+            parsed_start_dt = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+            query = query.gte("created_at", parsed_start_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from format. Expected YYYY-MM-DD")
+    if date_to:
+        try:
+            parsed_end_dt = datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc)
+            query = query.lte("created_at", parsed_end_dt.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_to format. Expected YYYY-MM-DD")
+    if parsed_start_dt and parsed_end_dt and parsed_start_dt.date() > parsed_end_dt.date():
+        raise HTTPException(status_code=400, detail="date_from must be before or equal to date_to")
+    return query
+
+
+def _filter_publish_jobs_by_search(items: List[Dict[str, Any]], total: int, search: Optional[str]):
+    if not (search and search.strip()):
+        return items, total
+    search_lower = search.lower().strip()
+    filtered = [
+        item for item in items
+        if (item.get("external_id", "").lower().find(search_lower) >= 0 or
+            item.get("platform", "").lower().find(search_lower) >= 0)
+    ]
+    return filtered, len(filtered)
+
+
 @app.get("/api/social/publish-jobs", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 500: {"description": "Internal Server Error"}})
 async def list_publish_jobs(
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -8776,34 +8829,7 @@ async def list_publish_jobs(
             query = query.eq("status", status.lower())
 
         # Filtrer par date
-        if date_filter and date_filter != "all":
-            now = datetime.now(timezone.utc)
-            if date_filter == "today":
-                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-                query = query.gte("created_at", start_date)
-            elif date_filter == "week":
-                week_ago = now - timedelta(days=7)
-                query = query.gte("created_at", week_ago.isoformat())
-            elif date_filter == "month":
-                month_ago = now - timedelta(days=30)
-                query = query.gte("created_at", month_ago.isoformat())
-            elif date_filter == "custom":
-                parsed_start_dt = None
-                parsed_end_dt = None
-                if date_from:
-                    try:
-                        parsed_start_dt = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
-                        query = query.gte("created_at", parsed_start_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
-                    except ValueError:
-                        raise HTTPException(status_code=400, detail="Invalid date_from format. Expected YYYY-MM-DD")
-                if date_to:
-                    try:
-                        parsed_end_dt = datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc)
-                        query = query.lte("created_at", parsed_end_dt.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat())
-                    except ValueError:
-                        raise HTTPException(status_code=400, detail="Invalid date_to format. Expected YYYY-MM-DD")
-                if parsed_start_dt and parsed_end_dt and parsed_start_dt.date() > parsed_end_dt.date():
-                    raise HTTPException(status_code=400, detail="date_from must be before or equal to date_to")
+        query = _apply_publish_jobs_date_filter(query, date_filter, date_from, date_to)
 
         # Ordonner par date de création (plus récent en premier)
         query = query.order("created_at", desc=True)
@@ -8816,14 +8842,7 @@ async def list_publish_jobs(
         total = response.count or 0
 
         # Filtrer par recherche si fournie (filtre côté client pour simplifier)
-        if search and search.strip():
-            search_lower = search.lower().strip()
-            items = [
-                item for item in items
-                if (item.get("external_id", "").lower().find(search_lower) >= 0 or
-                    item.get("platform", "").lower().find(search_lower) >= 0)
-            ]
-            total = len(items)
+        items, total = _filter_publish_jobs_by_search(items, total, search)
 
         return {
             "items": items,
