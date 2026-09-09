@@ -1190,7 +1190,7 @@ def test_process_endpoint_requires_source(monkeypatch):
             return {"acknowledged": True}
 
     with pytest.raises(app.HTTPException) as exc:
-        asyncio.run(app.process_endpoint(_Req(), None, None, None, "u1"))
+        asyncio.run(app.process_endpoint(_Req(), "u1", None, None, None))
 
     assert exc.value.status_code == 400
     assert "Must provide URL or File" in str(exc.value.detail)
@@ -1211,7 +1211,7 @@ def test_process_endpoint_requires_ack(monkeypatch):
             return {"url": "https://cdn.example.com/v.mp4", "acknowledged": False}
 
     with pytest.raises(app.HTTPException) as exc:
-        asyncio.run(app.process_endpoint(_Req(), None, None, None, "u1"))
+        asyncio.run(app.process_endpoint(_Req(), "u1", None, None, None))
 
     assert exc.value.status_code == 400
     assert "must confirm" in str(exc.value.detail).lower()
@@ -1233,7 +1233,7 @@ def test_process_endpoint_blocks_youtube_when_disabled(monkeypatch):
             return {"url": "https://youtube.com/watch?v=abc", "acknowledged": True}
 
     with pytest.raises(app.HTTPException) as exc:
-        asyncio.run(app.process_endpoint(_Req(), None, None, None, "u1"))
+        asyncio.run(app.process_endpoint(_Req(), "u1", None, None, None))
 
     assert exc.value.status_code == 403
 

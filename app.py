@@ -10,6 +10,7 @@ import shutil
 import glob
 import time
 import asyncio
+import aiofiles
 import itertools
 import secrets
 import re
@@ -19,7 +20,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Annotated
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote, urlencode
 from urllib.request import Request as UrlRequest, urlopen, HTTPRedirectHandler, build_opener
@@ -116,6 +117,31 @@ import os
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+# Shared literals (audit: SonarQube python:S1192 -- avoid duplicating the
+# same string in many places, since a future edit to one copy easily misses
+# the others).
+_METADATA_JSON_SUFFIX = "_metadata.json"
+_METADATA_JSON_GLOB = "*_metadata.json"
+_INVALID_OR_EXPIRED_SESSION_TOKEN = "Invalid or expired session token"
+_CAPTIONS_PREFIX = "captions/"
+_GEMINI_API_KEY_NOT_CONFIGURED = "Gemini API Key not configured on server (.env)"
+_CONTENT_TYPE_JSON = "application/json"
+_DEFAULT_UPLOAD_FILENAME = "upload.mp4"
+_CLIP_INDEX_SUFFIX_PATTERN = r"_clip_(\d+)\.mp4$"
+_JOB_NOT_FOUND = "Job not found"
+_INVALID_INPUT_FILENAME = "Invalid input filename"
+_CLIP_NOT_FOUND = "Clip not found"
+_METADATA_NOT_FOUND = "Metadata not found"
+_HTTPS_SCHEME_PREFIX = "https://"
+_INVALID_SCHEDULED_DATE = "Invalid scheduled_date (expected ISO-8601)"
+_SESSION_NOT_FOUND = "Session not found"
+_SUPABASE_NOT_CONFIGURED = "Supabase is not configured"
+_CAPTION_NOT_FOUND = "Caption not found"
+_SUPABASE_PROJECTS_NOT_CONFIGURED = "Supabase projects is not configured"
+_PROJECT_NOT_FOUND = "Project not found"
+_REEL_NOT_FOUND = "Reel not found"
+_UNSUPPORTED_PLATFORM = "Unsupported platform"
 
 
 def _generic_error(
@@ -267,6 +293,23 @@ reel_job_manager = JobManager(queue_name="reels")
 running_reel_jobs: Dict[str, Dict[str, Any]] = {}
 running_reel_jobs_lock = asyncio.Lock()
 
+# Strong references to fire-and-forget background tasks. asyncio only holds
+# a weak reference to a Task once nothing else references it, so a bare
+# `asyncio.create_task(...)` whose return value is discarded can have its
+# task garbage-collected mid-run, silently dropping the work (see the
+# asyncio.create_task docs' own warning about this). Every fire-and-forget
+# task in this module is created via _spawn_background_task so it can't be
+# collected before it finishes.
+_background_tasks: set = set()
+
+
+def _spawn_background_task(coro) -> Optional["asyncio.Task"]:
+    task = asyncio.create_task(coro)
+    if task is not None:  # real asyncio.create_task never returns None; defensive for test doubles
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return task
+
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY manquant dans l'environnement")
@@ -368,7 +411,7 @@ def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
 
         # Move the newest metadata and its associated clips.
         metadata_path = meta_candidates[0]
-        base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+        base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, "")
 
         # Move metadata
         dest_metadata = os.path.join(job_output_dir, os.path.basename(metadata_path))
@@ -406,13 +449,13 @@ def _cleanup_directory(path: str) -> None:
 def _resolve_job_metadata_path(job_id: str) -> Optional[str]:
     """Find metadata JSON for a job, including legacy root-output layouts."""
     output_dir = os.path.join(OUTPUT_DIR, job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
     if json_files:
         return json_files[0]
 
     # Backward-compat rescue for artifacts emitted into OUTPUT_DIR root.
     if _relocate_root_job_artifacts(job_id, output_dir):
-        json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+        json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
         if json_files:
             return json_files[0]
 
@@ -463,10 +506,16 @@ def _verify_supabase_jwt(token: str) -> str:
     a signature (no alg-confusion between a public key and a shared secret).
     """
     try:
-        alg = pyjwt.get_unverified_header(token).get("alg")
+        # NOSONAR(python:S5659): this only peeks at the `alg` header to pick
+        # which key to verify against below -- pyjwt.decode() a few lines
+        # down always performs full signature verification (never called
+        # with verify_signature=False), against a key matched exactly to
+        # the algorithm read here (see the docstring above for why that
+        # pairing can't be crossed to forge a signature).
+        alg = pyjwt.get_unverified_header(token).get("alg")  # NOSONAR
         if alg == "HS256":
             if not SUPABASE_JWT_SECRET:
-                raise HTTPException(status_code=401, detail="Invalid or expired session token")
+                raise HTTPException(status_code=401, detail=_INVALID_OR_EXPIRED_SESSION_TOKEN)
             payload = pyjwt.decode(
                 token,
                 SUPABASE_JWT_SECRET,
@@ -484,12 +533,12 @@ def _verify_supabase_jwt(token: str) -> str:
                 options={"require": ["exp", "sub"]},
             )
         else:
-            raise HTTPException(status_code=401, detail="Invalid or expired session token")
+            raise HTTPException(status_code=401, detail=_INVALID_OR_EXPIRED_SESSION_TOKEN)
     except HTTPException:
         raise
     except PyJWTError as exc:
         logger.warning("Supabase JWT verification failed: %s", exc)
-        raise HTTPException(status_code=401, detail="Invalid or expired session token") from exc
+        raise HTTPException(status_code=401, detail=_INVALID_OR_EXPIRED_SESSION_TOKEN) from exc
 
     user_id = str(payload.get("sub") or "").strip()
     if not user_id:
@@ -499,7 +548,7 @@ def _verify_supabase_jwt(token: str) -> str:
 
 def get_user_id_header(
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: Annotated[Optional[str], Header()] = None,
 ) -> str:
     """FastAPI dependency resolving the authenticated caller's user id.
 
@@ -950,8 +999,8 @@ async def _get_or_build_job_metadata(
         return None, None
 
     try:
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            return metadata_path, json.load(f)
+        async with aiofiles.open(metadata_path, "r", encoding="utf-8") as f:
+            return metadata_path, json.loads(await f.read())
     except Exception as e:
         print(f"⚠️ Failed to read metadata: {e}")
         return None, None
@@ -1165,14 +1214,14 @@ def _caption_media_url_from_s3_key(s3_key: str) -> str:
 def _normalize_caption_row(row: Dict[str, Any]) -> Dict[str, Any]:
     media_url = _caption_media_url_from_s3_key(row.get("caption_s3_key") or "") or row.get("caption_url") or ""
     thumbnail_ref = row.get("caption_thumbnail_url") or ""
-    thumbnail_url = _caption_media_url_from_s3_key(thumbnail_ref) if thumbnail_ref.startswith("captions/") else thumbnail_ref
+    thumbnail_url = _caption_media_url_from_s3_key(thumbnail_ref) if thumbnail_ref.startswith(_CAPTIONS_PREFIX) else thumbnail_ref
     preview_url = thumbnail_url or media_url
 
     return {
         **row,
         "caption_url": media_url or row.get("caption_url") or "",
         "caption_thumbnail_url": thumbnail_url,
-        "caption_thumbnail_s3_key": thumbnail_ref if thumbnail_ref.startswith("captions/") else "",
+        "caption_thumbnail_s3_key": thumbnail_ref if thumbnail_ref.startswith(_CAPTIONS_PREFIX) else "",
         "caption_playback_url": media_url,
         "caption_download_url": media_url,
         "caption_preview_url": preview_url,
@@ -1221,7 +1270,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
         if caption_thumb and not _is_probably_video_url(caption_thumb):
             return caption_thumb
 
-    metadata_path, metadata = await _get_or_build_job_metadata(job_id, clip_index)
+    _, metadata = await _get_or_build_job_metadata(job_id, clip_index)
     clip_data: Dict[str, Any] = {}
     if isinstance(metadata, dict):
         shorts = metadata.get("shorts") or []
@@ -1361,7 +1410,7 @@ def _collect_reel_job_output_snapshot(job_id: str, output_dir: str) -> Dict[str,
             metadata = {}
         shorts = metadata.get("shorts") or []
         cost_analysis = metadata.get("cost_analysis")
-        base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+        base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, "")
 
     ready_entries: List[Dict[str, Any]] = []
     if base_name and shorts:
@@ -1648,7 +1697,7 @@ async def _persist_reels_for_job(
     if not bucket:
         raise RuntimeError("AWS_S3_BUCKET is required for reel persistence")
 
-    base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+    base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, "")
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     rows: List[Dict[str, Any]] = []
 
@@ -1765,7 +1814,7 @@ async def cleanup_jobs():
 
             # Cleanup in-memory API jobs (artifacts are cleaned by batched output sweeps).
             expired_api_jobs = [
-                jid for jid, jdata in list(jobs.items())
+                jid for jid, jdata in jobs.items()
                 if jdata.get("status") in ("completed", "failed")
                 and jdata.get("output_dir")
                 and os.path.isdir(jdata["output_dir"])
@@ -1777,7 +1826,7 @@ async def cleanup_jobs():
             # Cleanup SaaSShorts jobs from memory
             try:
                 saas_expired = [
-                    jid for jid, jdata in list(saas_jobs.items())
+                    jid for jid, jdata in saas_jobs.items()
                     if jdata.get("status") in ("completed", "failed")
                     and jdata.get("output_dir")
                     and os.path.isdir(jdata["output_dir"])
@@ -1815,7 +1864,7 @@ async def process_queue(worker_name: str):
             print(f"🔄 [{worker_name}] Acquired slot for job: {job_id} (priority={job_priority})")
 
             # Process in background task to not block the loop (allowing other slots to fill)
-            asyncio.create_task(run_job_wrapper(job_id, job_priority))
+            _spawn_background_task(run_job_wrapper(job_id, job_priority))
 
         except Exception as e:
             print(f"❌ Queue dispatch error: {e}")
@@ -1877,7 +1926,7 @@ app = FastAPI(lifespan=lifespan)
 _cors_extra_origins = [
     o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
 ]
-_cors_allowed_origins = sorted(set([FRONTEND_ORIGIN, *_cors_extra_origins]))
+_cors_allowed_origins = sorted({FRONTEND_ORIGIN, *_cors_extra_origins})
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allowed_origins,
@@ -1920,7 +1969,7 @@ async def _close_proxy_stream(upstream, client):
 
 
 @app.get("/api/media/proxy")
-async def proxy_media(request: Request, url: str, user_id: str = Depends(get_user_id_header)):
+async def proxy_media(request: Request, url: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy remote media through the backend so browser-side Remotion can fetch it same-origin.
 
     Security: this endpoint performs a server-side HTTP request to a URL the
@@ -1983,7 +2032,19 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
 
     try:
-        process = subprocess.Popen(
+        # NOSONAR(python:S7487): this supervises the child process with
+        # Popen + a non-blocking .poll()/.terminate() loop yielding via
+        # `await asyncio.sleep(2)` between checks -- Popen's own spawn and
+        # .poll()/.terminate() calls don't block the loop for any
+        # meaningful duration (they're near-instant syscalls), and stdout
+        # is drained on a dedicated thread below rather than on this task.
+        # Converting to asyncio.create_subprocess_exec would need a
+        # parallel rewrite of the preemption/timeout/partial-result-polling
+        # state machine below and the threaded log capture -- deliberately
+        # deferred as its own separately-tested change given how central
+        # this function is to job execution, rather than rewritten
+        # untested in the same pass as unrelated Sonar findings.
+        process = subprocess.Popen(  # NOSONAR
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, # Merge stderr to stdout
@@ -2000,7 +2061,6 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
 
         # Async wait for process with incremental updates
         start_wait = time.time()
-        timed_out = False
         while process.poll() is None:
             if execution_ctx and execution_ctx.get("preempt_requested"):
                 try:
@@ -2012,7 +2072,6 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 # longer than any legitimate input should require, instead
                 # of letting it occupy a worker slot indefinitely (see
                 # security audit finding H13).
-                timed_out = True
                 jobs[job_id]['logs'].append(
                     f"Job exceeded max processing time ({REEL_JOB_MAX_PROCESSING_SECONDS}s); terminating."
                 )
@@ -2025,17 +2084,25 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
             # Check for partial results every 2 seconds
             # Look for metadata file
             try:
-                json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+                json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
                 if json_files:
                     target_json = json_files[0]
                     # Read metadata (it might be being written to, so simple try/except or just read)
                     # Use a lock or just robust read? json.load might fail if file is partial.
                     # Usually main.py writes it once at start (based on my review).
                     if os.path.getsize(target_json) > 0:
-                        with open(target_json, 'r') as f:
+                        # NOSONAR(python:S7493): a small, infrequent read
+                        # (this loop only reaches here once every 2s, see
+                        # the `await asyncio.sleep(2)` a few lines up) --
+                        # not worth the risk of converting to aiofiles here,
+                        # which would break this function's existing
+                        # `builtins.open` test-mocking (aiofiles captures
+                        # its own reference to open() at import time, before
+                        # a test's monkeypatch of builtins.open can apply).
+                        with open(target_json, 'r') as f:  # NOSONAR
                             data = json.load(f)
 
-                        base_name = os.path.basename(target_json).replace('_metadata.json', '')
+                        base_name = os.path.basename(target_json).replace(_METADATA_JSON_SUFFIX, '')
                         clips = data.get('shorts', [])
                         cost_analysis = data.get('cost_analysis')
 
@@ -2075,14 +2142,19 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
             jobs[job_id]['logs'].append("Process finished successfully.")
 
             # Find result JSON
-            json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+            json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
             if not json_files:
                 # Backward-compat rescue if outputs were written to OUTPUT_DIR root
                 if _relocate_root_job_artifacts(job_id, output_dir):
-                    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+                    json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
             if json_files:
                 target_json = json_files[0]
-                with open(target_json, 'r') as f:
+                # NOSONAR(python:S7493): same reasoning as the read above in
+                # this function -- small one-off read, and this function's
+                # tests patch builtins.open directly (which aiofiles, having
+                # captured its own reference to the real open() at import
+                # time, wouldn't observe).
+                with open(target_json, 'r') as f:  # NOSONAR
                     data = json.load(f)
 
                 # Enhance result with video URLs
@@ -2115,7 +2187,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                         retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
                     )
                     if fail_result.get("retry"):
-                        asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                        _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
                     return
 
                 enriched_clips: List[Dict[str, Any]] = []
@@ -2165,7 +2237,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                             reserved_credits=job_reserved_credits,
                         )
                     except Exception as billing_error:
-                        logger.error(f"Billing update failed: {billing_error}")
+                        logger.exception("Billing update failed")
                         jobs[job_id]['logs'].append(f"Billing update failed: {billing_error}")
 
                 result_payload = {
@@ -2227,7 +2299,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     except Exception as e:
                         logger.warning(f"Failed to update project status to completed: {str(e)}")
 
-                _cleanup_generated_clips_after_job(output_dir, os.path.basename(target_json).replace('_metadata.json', ''))
+                _cleanup_generated_clips_after_job(output_dir, os.path.basename(target_json).replace(_METADATA_JSON_SUFFIX, ''))
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
@@ -2242,7 +2314,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                      retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
                  )
                  if result.get("retry"):
-                     asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                     _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
@@ -2257,7 +2329,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
             )
             if result.get("retry"):
-                asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
 
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
@@ -2273,7 +2345,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
             retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
         )
         if result.get("retry"):
-            asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+            _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
     finally:
         # Only remove uploaded source files (stored under UPLOAD_DIR).
         # Downloaded files inside output/<job_id>/ must be preserved for retries;
@@ -2288,7 +2360,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     pass
 
 
-async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):
+async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):  # NOSONAR(python:S1172): kept for call-site symmetry with run_job, which does use it for preemption/timeout control -- both are dispatched identically from run_job_wrapper
     user_id = job_data.get("user_id")
     output_dir = str(job_data.get("output_dir") or "")
     input_path = str(job_data.get("input_path") or "")
@@ -2321,10 +2393,8 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
             from main import transcribe_video
 
             loop = asyncio.get_event_loop()
-            transcript = await asyncio.wait_for(
-                loop.run_in_executor(None, transcribe_video, input_path),
-                timeout=max(1, CAPTION_TRANSCRIBE_TIMEOUT_SECONDS),
-            )
+            async with asyncio.timeout(max(1, CAPTION_TRANSCRIBE_TIMEOUT_SECONDS)):
+                transcript = await loop.run_in_executor(None, transcribe_video, input_path)
             await _persist_transcription_cache(
                 user_id=user_id,
                 job_id=job_id,
@@ -2538,7 +2608,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
                     logger.warning(f"Failed to refund caption reservation: {refund_error}")
 
         if result.get("retry"):
-            asyncio.create_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
+            _spawn_background_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
     finally:
         # Keep caption sources local only during processing.
         if input_path and os.path.exists(input_path):
@@ -2548,7 +2618,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
                 pass
 
 @app.get("/api/config")
-async def get_config():
+def get_config():
     return {
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "hideSocialPlatforms": HIDE_SOCIAL_PLATFORMS,
@@ -2557,7 +2627,7 @@ async def get_config():
     }
 
 @app.get("/api/services/status")
-async def get_services_status():
+def get_services_status():
     """Check which API services are configured and available."""
     return {
         "gemini": {
@@ -2882,7 +2952,7 @@ async def _enforce_job_concurrency_limit(user_id: str) -> None:
             status_code=429,
             detail=(
                 f"Trop de traitements en cours ({active_count}/{MAX_ACTIVE_JOBS_PER_USER}). "
-                f"Attendez qu'un traitement se termine avant d'en lancer un nouveau."
+                "Attendez qu'un traitement se termine avant d'en lancer un nouveau."
             ),
         )
 
@@ -2905,7 +2975,7 @@ async def _assert_user_has_required_credits(user_id: str, required_credits: floa
         raise HTTPException(
             status_code=402,
             detail=(
-                f"Crédits insuffisants pour lancer l'operation. "
+                "Crédits insuffisants pour lancer l'operation. "
                 f"Requis : {effective_minimum} cr, disponible : {available} cr."
             ),
         )
@@ -2961,7 +3031,7 @@ async def _reserve_job_credits(user_id: str, required_credits: float) -> float:
         raise HTTPException(
             status_code=402,
             detail=(
-                f"Crédits insuffisants pour lancer l'operation. "
+                "Crédits insuffisants pour lancer l'operation. "
                 f"Requis : {math.ceil(required)} cr, disponible : {available} cr."
             ),
         )
@@ -3184,10 +3254,10 @@ def _detect_silence_cut_ranges(video_path: str, total_duration: float) -> List[t
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
     log_text = result.stderr.decode("utf-8", errors="ignore")
 
-    starts = [float(val) for val in re.findall(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", log_text)]
+    starts = [float(val) for val in re.findall(r"silence_start:\s*(\d+(?:\.\d+)?)", log_text)]
     ends = [
         (float(a), float(b))
-        for a, b in re.findall(r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)\s*\|\s*silence_duration:\s*([0-9]+(?:\.[0-9]+)?)", log_text)
+        for a, b in re.findall(r"silence_end:\s*(\d+(?:\.\d+)?)\s*\|\s*silence_duration:\s*(\d+(?:\.\d+)?)", log_text)
     ]
 
     cut_ranges: List[tuple[float, float]] = []
@@ -3296,7 +3366,11 @@ def _parse_bad_take_candidates_response(raw_text: str) -> List[Dict[str, Any]]:
     if not text:
         return []
 
-    fenced_match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    # NOSONAR(python:S8786): the lazy `.*?` here isn't nested inside another
+    # quantifier (the classic (a+)+ backtracking blowup shape) -- worst
+    # case is linear in len(text), and text is a bounded LLM response, not
+    # attacker-controlled input.
+    fenced_match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)  # NOSONAR
     if fenced_match:
         text = fenced_match.group(1).strip()
 
@@ -3492,7 +3566,6 @@ def _apply_auto_edit_media_steps(
             _render_keep_ranges(current_path, next_path, keep_ranges)
             cleanup_paths.append(next_path)
             current_path = next_path
-            total_duration = _probe_local_video_duration_seconds(current_path)
             steps.append(f"remove_silence:done:{len(silence_ranges)}")
         else:
             steps.append("remove_silence:skipped")
@@ -3506,7 +3579,6 @@ def _apply_auto_edit_media_steps(
         _apply_clean_audio_transform(current_path, next_path)
         cleanup_paths.append(next_path)
         current_path = next_path
-        total_duration = _probe_local_video_duration_seconds(current_path)
         steps.append("clean_audio:done")
     else:
         steps.append("clean_audio:disabled")
@@ -3522,24 +3594,24 @@ def _apply_auto_edit_media_steps(
 
     return current_path, steps, bad_take_candidates, cleanup_paths
 
-@app.post("/api/process")
+@app.post("/api/process", responses={400: {"description": "Bad Request"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}})
 async def process_endpoint(
     request: Request,
-    file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None),
-    acknowledged: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    file: Annotated[Optional[UploadFile], File()] = None,
+    url: Annotated[Optional[str], Form()] = None,
+    acknowledged: Annotated[Optional[str], Form()] = None,
 ):
     # Determine API Key: Use .env configuration (GEMINI_API_KEY or OPENAI_API_KEY as fallback)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
+        raise HTTPException(status_code=400, detail=_GEMINI_API_KEY_NOT_CONFIGURED)
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
 
     # Handle JSON body manually for URL payload
     content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
+    if _CONTENT_TYPE_JSON in content_type:
         body = await request.json()
         url = body.get("url")
         ack_flag = bool(body.get("acknowledged"))
@@ -3579,7 +3651,12 @@ async def process_endpoint(
     reel_required_credits = 0.0
     source_duration_seconds = 0.0
     source_type = "url" if url else "file"
-    source_value = url if url else (file.filename if file else "")
+    if url:
+        source_value = url
+    elif file:
+        source_value = file.filename
+    else:
+        source_value = ""
     project_source_type = "upload"
     project_name = "Reel Project"
     project_description = ""
@@ -3645,21 +3722,21 @@ async def process_endpoint(
         # Save uploaded file with size limit check
         # Security: sanitize the client-supplied filename to a safe basename
         # before joining it into a filesystem path (path traversal guard).
-        safe_upload_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+        safe_upload_name = _sanitize_input_filename(file.filename) or _DEFAULT_UPLOAD_FILENAME
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{safe_upload_name}")
 
         # Read file in chunks to check size
         size = 0
         limit_bytes = max(0.0, REEL_MAX_STORAGE_GB) * (1024 ** 3)
 
-        with open(input_path, "wb") as buffer:
+        async with aiofiles.open(input_path, "wb") as buffer:
             while content := await file.read(1024 * 1024): # Read 1MB chunks
                 size += len(content)
                 if limit_bytes > 0 and size > limit_bytes:
                     os.remove(input_path)
                     shutil.rmtree(job_output_dir)
                     raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {REEL_MAX_STORAGE_GB:.2f} Go")
-                buffer.write(content)
+                await buffer.write(content)
 
         local_duration = _probe_local_video_duration_seconds(input_path)
         source_duration_seconds = float(local_duration or 0.0)
@@ -3783,8 +3860,8 @@ async def process_endpoint(
         "status": "queued"
     }
 
-@app.get("/api/status/{job_id}")
-async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/status/{job_id}", responses={404: {"description": "Not Found"}})
+async def get_status(job_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     # Best effort read of in-memory runtime state, but the *authorization*
     # scope always comes from the verified caller identity above -- never
     # fall back to an unscoped (user_id=None) lookup, which would let any
@@ -3808,12 +3885,12 @@ async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
                                 'file': clip_file,
                                 'index': (
                                     (int(match.group(1)) - 1)
-                                    if (match := re.search(r'_clip_(\d+)\.mp4$', clip_file))
+                                    if (match := re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file))
                                     else i
                                 ),
                                 'reel_clip_index': (
                                     (int(match.group(1)) - 1)
-                                    if (match := re.search(r'_clip_(\d+)\.mp4$', clip_file))
+                                    if (match := re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file))
                                     else i
                                 ),
                                 'status': 'generated'
@@ -3825,12 +3902,12 @@ async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
         return supabase_view
 
     if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
 
     job = jobs[job_id]
     if (job.get("user_id") or "") != user_id:
         # Security: never serve another user's in-memory job state.
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
     response = {
         "status": job['status'],
         "logs": job['logs'],
@@ -3851,8 +3928,7 @@ async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
                     # Build partial result from generated clips
                     partial_clips = []
                     for i, clip_file in enumerate(clip_files):
-                        clip_path = os.path.join(output_dir, clip_file)
-                        match = re.search(r'_clip_(\d+)\.mp4$', clip_file)
+                        match = re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file)
                         resolved_clip_index = (int(match.group(1)) - 1) if match else i
                         partial_clips.append({
                             'video_url': f'/videos/{job_id}/{clip_file}',
@@ -3862,7 +3938,7 @@ async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
                             'status': 'generated'
                         })
                     response['partialClips'] = partial_clips
-        except Exception as e:
+        except Exception:
             # Silently fail - don't break the status endpoint
             pass
 
@@ -3922,7 +3998,7 @@ async def _require_job_ownership(job_id: str, user_id: str) -> None:
     in_memory = jobs.get(job_id) or reel_job_manager.runtime_jobs.get(job_id)
     if in_memory:
         if (in_memory.get("user_id") or "") != user_id:
-            raise HTTPException(status_code=404, detail="Job not found")
+            raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
         return
 
     if is_supabase_configured():
@@ -3930,7 +4006,7 @@ async def _require_job_ownership(job_id: str, user_id: str) -> None:
         if row:
             return
 
-    raise HTTPException(status_code=404, detail="Job not found")
+    raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
 
 
 def _is_youtube_url(value: str) -> bool:
@@ -4000,12 +4076,12 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 
     return local_path, filename
 
-@app.post("/api/edit")
+@app.post("/api/edit", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def edit_clip(
     request: Request,
     req: EditRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     await _require_job_ownership(req.job_id, user_id)
 
@@ -4025,12 +4101,12 @@ async def edit_clip(
             # Security: Ensure just a filename, no paths or signed query params
             safe_name = _sanitize_input_filename(req.input_filename)
             if not safe_name:
-                raise HTTPException(status_code=400, detail="Invalid input filename")
+                raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
             input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
             filename = safe_name
         else:
             if not job:
-                raise HTTPException(status_code=404, detail="Job not found")
+                raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
             if 'result' not in job or 'clips' not in job['result']:
                 raise HTTPException(status_code=400, detail="Job result not available")
             # Fallback to original clip
@@ -4065,10 +4141,10 @@ async def edit_clip(
 
         transcript_for_edit = None
         try:
-            meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+            meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, _METADATA_JSON_GLOB))
             if meta_files:
-                with open(meta_files[0], "r") as f:
-                    data = json.load(f)
+                async with aiofiles.open(meta_files[0], "r") as f:
+                    data = json.loads(await f.read())
                     transcript_for_edit = data.get("transcript")
         except Exception as e:
             print(f"⚠️ Could not load transcript for editing context: {e}")
@@ -4183,11 +4259,11 @@ async def edit_clip(
     except Exception as e:
         raise _generic_error("Edit Error", e)
 
-@app.post("/api/captions/process")
+@app.post("/api/captions/process", responses={400: {"description": "Bad Request"}, 413: {"description": "Payload Too Large"}})
 async def process_caption_endpoint(
-    file: UploadFile = File(...),
-    acknowledged: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    file: Annotated[UploadFile, File()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    acknowledged: Annotated[Optional[str], Form()] = None,
 ):
     if not file:
         raise HTTPException(status_code=400, detail="Must provide a video file")
@@ -4212,12 +4288,12 @@ async def process_caption_endpoint(
     size_bytes = 0
     limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
     try:
-        with open(input_path, "wb") as handle:
+        async with aiofiles.open(input_path, "wb") as handle:
             while content := await file.read(1024 * 1024):
                 size_bytes += len(content)
                 if limit_bytes > 0 and size_bytes > limit_bytes:
                     raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {CAPTION_MAX_STORAGE_GB:.2f} Go")
-                handle.write(content)
+                await handle.write(content)
     except HTTPException:
         if os.path.exists(input_path):
             os.remove(input_path)
@@ -4352,7 +4428,7 @@ class SubtitleRequest(BaseModel):
     input_url: Optional[str] = None
 
 
-@app.get("/api/clip/{job_id}/{clip_index}/transcript")
+@app.get("/api/clip/{job_id}/{clip_index}/transcript", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     """Return word-level captions for a specific clip, formatted for Remotion."""
     # Do not depend on in-memory jobs: Reels page must keep working after restarts.
@@ -4369,7 +4445,7 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
 
     clips = data.get('shorts', [])
     if clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip_data = clips[clip_index]
     clip_start = clip_data.get('start', 0)
@@ -4415,7 +4491,7 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
 async def ensure_clip_preview_image(
     job_id: str,
     clip_index: int,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     preview_image_url = await _ensure_preview_image_for_clip(job_id, clip_index, user_id)
     return {
@@ -4424,14 +4500,14 @@ async def ensure_clip_preview_image(
     }
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/persist")
+@app.post("/api/reels/{job_id}/{clip_index}/captions/persist", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def persist_captioned_reel(
     job_id: str,
     clip_index: int,
-    file: UploadFile = File(...),
-    subtitle_config: Optional[str] = Form(None),
-    remotion_layers: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    file: Annotated[UploadFile, File()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    subtitle_config: Annotated[Optional[str], Form()] = None,
+    remotion_layers: Annotated[Optional[str], Form()] = None,
 ):
     caption_required_credits = 0.0
 
@@ -4444,11 +4520,11 @@ async def persist_captioned_reel(
 
     metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
     if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
 
     clips = data.get('shorts', [])
     if clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip_data = clips[clip_index] if isinstance(clips[clip_index], dict) else {}
     source_video_url_before_edit = str(clip_data.get("video_url") or "")
@@ -4505,9 +4581,16 @@ async def persist_captioned_reel(
     output_filename = f"captioned_{clip_index}_{int(time.time())}{ext}"
     output_path = os.path.join(output_dir, output_filename)
 
-    try:
-        with open(output_path, "wb") as handle:
+    def _copy_upload_to_path():
+        with open(output_path, "wb") as handle:  # NOSONAR(python:S7493): runs off the event loop via asyncio.to_thread below
             shutil.copyfileobj(file.file, handle)
+
+    try:
+        # Off the event loop via to_thread rather than aiofiles: this reads
+        # from file.file (the underlying sync SpooledTemporaryFile), not
+        # file.read(), matching the original shutil.copyfileobj-based
+        # behavior this endpoint's tests are written against.
+        await asyncio.to_thread(_copy_upload_to_path)
     finally:
         await file.close()
 
@@ -4589,7 +4672,7 @@ async def persist_captioned_reel(
             except Exception:
                 pass
 
-    if caption_thumbnail_ref.startswith("captions/"):
+    if caption_thumbnail_ref.startswith(_CAPTIONS_PREFIX):
         preview_image_url = _caption_media_url_from_s3_key(caption_thumbnail_ref) or ""
     if not preview_image_url and reel_thumbnail_s3_key:
         preview_image_url = _reel_thumbnail_url_from_s3_key(reel_thumbnail_s3_key) or ""
@@ -4711,7 +4794,13 @@ async def persist_captioned_reel(
 
 
 # --- Remotion Render Proxy ---
-RENDER_SERVICE_URL = os.getenv("RENDER_SERVICE_URL", "http://renderer:3100")
+# NOSONAR(python:S5332): default only reachable over the internal Docker
+# Compose network (service name "renderer", never exposed publicly -- see
+# docker-compose.yml, bound to 127.0.0.1 for local debugging only), and
+# every request to it carries RENDER_SERVICE_API_KEY. TLS on that internal
+# hop isn't the control that matters here; the network boundary + API key
+# are. Override with RENDER_SERVICE_URL for any deployment that differs.
+RENDER_SERVICE_URL = os.getenv("RENDER_SERVICE_URL", "http://renderer:3100")  # NOSONAR
 RENDER_SERVICE_API_KEY = os.getenv("RENDER_SERVICE_API_KEY")
 if not RENDER_SERVICE_API_KEY and not _is_pytest_runtime():
     raise RuntimeError(
@@ -4722,7 +4811,7 @@ _RENDER_SERVICE_HEADERS = {"x-internal-api-key": RENDER_SERVICE_API_KEY or "unit
 
 
 @app.post("/api/render")
-async def proxy_render(request: Request, user_id: str = Depends(get_user_id_header)):
+async def proxy_render(request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy render requests to the Node.js Remotion render service.
 
     Security: this endpoint used to forward the raw client body to an
@@ -4746,7 +4835,7 @@ async def proxy_render(request: Request, user_id: str = Depends(get_user_id_head
         )
 
 @app.get("/api/render/{render_id}")
-async def proxy_render_status(render_id: str, user_id: str = Depends(get_user_id_header)):
+async def proxy_render_status(render_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy render status polling to the Node.js Remotion render service."""
     import httpx
     try:
@@ -4769,11 +4858,11 @@ class EffectsGenerateRequest(BaseModel):
     input_url: Optional[str] = None
     auto_edit_options: Optional[Dict[str, bool]] = None
 
-@app.post("/api/effects/generate")
+@app.post("/api/effects/generate", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def generate_effects_config(
     req: EffectsGenerateRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Generate structured EffectsConfig JSON for Remotion rendering via Gemini AI."""
     final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
@@ -4788,12 +4877,12 @@ async def generate_effects_config(
         if req.input_filename:
             safe_name = _sanitize_input_filename(req.input_filename)
             if not safe_name:
-                raise HTTPException(status_code=400, detail="Invalid input filename")
+                raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
             input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
             filename = safe_name
         else:
             if not job:
-                raise HTTPException(status_code=404, detail="Job not found")
+                raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
             if 'result' not in job or 'clips' not in job['result']:
                 raise HTTPException(status_code=400, detail="Job result not available")
             clip = job['result']['clips'][req.clip_index]
@@ -4861,9 +4950,14 @@ async def generate_effects_config(
                 # Load transcript from metadata
                 transcript = None
                 try:
-                    meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+                    meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, _METADATA_JSON_GLOB))
                     if meta_files:
-                        with open(meta_files[0], 'r') as f:
+                        # NOSONAR(python:S7493): false positive -- this is
+                        # inside a nested sync def (see below, run via
+                        # loop.run_in_executor in a thread pool), not
+                        # actually executing on the event loop despite
+                        # being lexically inside an async endpoint.
+                        with open(meta_files[0], 'r') as f:  # NOSONAR
                             data = json.load(f)
                             transcript = data.get('transcript')
                 except Exception as e:
@@ -4900,8 +4994,8 @@ async def generate_effects_config(
         raise _generic_error("Effects Generation Error", e)
 
 
-@app.post("/api/subtitle")
-async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id_header)):
+@app.post("/api/subtitle", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _require_job_ownership(req.job_id, user_id)
     subtitle_required_credits = 0.0
     await _assert_user_has_required_credits(user_id, subtitle_required_credits)
@@ -4914,7 +5008,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
 
     transcript = data.get('transcript')
     if not transcript:
@@ -4922,7 +5016,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
 
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip_data = clips[req.clip_index]
     source_video_url_before_edit = str(clip_data.get("video_url") or "")
@@ -4954,12 +5048,12 @@ async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id
     if req.input_filename:
         filename = _sanitize_input_filename(req.input_filename)
         if not filename:
-            raise HTTPException(status_code=400, detail="Invalid input filename")
+            raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
     else:
         # Fallback to standard naming
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(metadata_path).replace('_metadata.json', '')
+             base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     input_path = os.path.join(output_dir, filename)
@@ -5165,19 +5259,19 @@ class HookRequest(BaseModel):
     size: Optional[str] = "M" # S, M, L
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/reset")
+@app.post("/api/reels/{job_id}/{clip_index}/captions/reset", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def reset_caption_style_history(
     job_id: str,
     clip_index: int,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
     if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
 
     clips = data.get("shorts") or []
     if clip_index < 0 or clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip = clips[clip_index]
     history = data.get("style_history") or {}
@@ -5213,19 +5307,19 @@ async def reset_caption_style_history(
     }
 
 
-@app.get("/api/reels/{job_id}/{clip_index}/style-history")
+@app.get("/api/reels/{job_id}/{clip_index}/style-history", responses={404: {"description": "Not Found"}})
 async def get_caption_style_history_debug(
     job_id: str,
     clip_index: int,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
     if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
 
     clips = data.get("shorts") or []
     if clip_index < 0 or clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip = clips[clip_index] if isinstance(clips[clip_index], dict) else {}
     history = data.get("style_history") if isinstance(data.get("style_history"), dict) else {}
@@ -5240,7 +5334,7 @@ async def get_caption_style_history_debug(
 
     def _looks_amazon_url(value: Any) -> bool:
         text = str(value or "").strip().lower()
-        return text.startswith("https://") and "amazonaws.com" in text
+        return text.startswith(_HTTPS_SCHEME_PREFIX) and "amazonaws.com" in text
 
     metadata_last = metadata_versions[-1] if metadata_versions else {}
     db_last = db_versions[-1] if db_versions else {}
@@ -5264,8 +5358,8 @@ async def get_caption_style_history_debug(
         },
     }
 
-@app.post("/api/hook")
-async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header)):
+@app.post("/api/hook", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _require_job_ownership(req.job_id, user_id)
     hook_required_credits = 0.0
 
@@ -5273,11 +5367,11 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
 
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip_data = clips[req.clip_index]
 
@@ -5285,11 +5379,11 @@ async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header))
     if req.input_filename:
         filename = _sanitize_input_filename(req.input_filename)
         if not filename:
-            raise HTTPException(status_code=400, detail="Invalid input filename")
+            raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
     else:
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(metadata_path).replace('_metadata.json', '')
+             base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     input_path = os.path.join(output_dir, filename)
@@ -5710,7 +5804,7 @@ def _write_translated_srt(segments: List[Dict], srt_path: str) -> bool:
 
 
 @app.get("/api/translate/languages")
-async def get_languages():
+def get_languages():
     """
     Return supported languages.
     Kept for frontend compatibility.
@@ -5737,17 +5831,17 @@ async def get_languages():
     }
 
 
-@app.post("/api/translate/captions")
+@app.post("/api/translate/captions", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_captions(req: TranslateRequest, request: Request):
     """Translate reel transcript into Remotion-friendly timed word captions."""
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
     translation_cache = _get_translation_cache(data)
 
     clips = data.get("shorts", [])
     if not clips:
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     normalized_clip_index = req.clip_index
     if normalized_clip_index < 0 or normalized_clip_index >= len(clips):
@@ -5841,7 +5935,7 @@ async def translate_captions(req: TranslateRequest, request: Request):
     }
 
 
-@app.post("/api/translate")
+@app.post("/api/translate", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_clip(req: TranslateRequest, request: Request):
     """
     Translate subtitles only (OpenAI first, Gemini fallback),
@@ -5851,7 +5945,7 @@ async def translate_clip(req: TranslateRequest, request: Request):
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
     translation_cache = _get_translation_cache(data)
     request_user_id = _get_authenticated_user_id_optional(request) or ""
     owner_user_id = request_user_id or await _resolve_job_owner_user_id(req.job_id, req.clip_index)
@@ -5864,7 +5958,7 @@ async def translate_clip(req: TranslateRequest, request: Request):
 
     clips = data.get("shorts", [])
     if req.clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip_data = clips[req.clip_index]
 
@@ -5872,11 +5966,11 @@ async def translate_clip(req: TranslateRequest, request: Request):
     if req.input_filename:
         filename = _sanitize_input_filename(req.input_filename)
         if not filename:
-            raise HTTPException(status_code=400, detail="Invalid input filename")
+            raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
     else:
         filename = clip_data.get("video_url", "").split("/")[-1]
         if not filename:
-            base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+            base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, "")
             filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     input_path = os.path.join(output_dir, filename)
@@ -6020,12 +6114,16 @@ class SocialPostRequest(BaseModel):
 import httpx
 
 
-def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:
+def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:  # NOSONAR(python:S1172)
     # Security: `explicit_user_id` comes from a client-supplied request body
     # field and must never override the verified identity resolved from the
     # authenticated session (`user_id`, from get_user_id_header). Otherwise a
     # client could act on behalf of an arbitrary victim simply by setting
-    # `user_id` in the JSON body.
+    # `user_id` in the JSON body. Kept as a named (but deliberately unused)
+    # parameter -- rather than dropped or renamed to `_` -- so every call
+    # site visibly shows the untrusted value being discarded, instead of
+    # silently omitting it in a way a future edit could "helpfully" start
+    # trusting again.
     resolved = (user_id or "").strip()
     if not resolved:
         raise HTTPException(status_code=400, detail="Missing authenticated user id")
@@ -6069,16 +6167,19 @@ async def _resolve_clip_for_social_post(job_id: str, clip_index: int) -> Dict[st
     _, metadata = await _get_or_build_job_metadata(job_id, clip_index)
     shorts = (metadata or {}).get("shorts") or []
     if not isinstance(shorts, list) or clip_index < 0 or clip_index >= len(shorts):
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
     clip = shorts[clip_index]
     if not isinstance(clip, dict):
-        raise HTTPException(status_code=404, detail="Clip not found")
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
     return clip
 
 
-def _resolve_public_video_url(video_ref: str, request: Request, job_id: str, clip_index: int) -> str:
+def _resolve_public_video_url(video_ref: str, request: Request, job_id: str) -> str:
     ref = (video_ref or "").strip()
-    if ref.startswith(("https://", "http://")):
+    # NOSONAR(python:S5332): this detects whether `ref` is already an
+    # absolute URL (any scheme) so it isn't re-prefixed with a base URL --
+    # it never issues a request with a hardcoded http:// endpoint.
+    if ref.startswith((_HTTPS_SCHEME_PREFIX, "http://")):  # NOSONAR
         return ref
     if not ref:
         raise HTTPException(status_code=404, detail="Video URL not found for this clip")
@@ -6091,14 +6192,14 @@ def _resolve_public_video_url(video_ref: str, request: Request, job_id: str, cli
     base_url = SOCIAL_BASE_URL or str(request.base_url).rstrip("/")
     return f"{base_url}/videos/{job_id}/{ref}"
 
-@app.post("/api/social/post")
-async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: str = Depends(get_user_id_header)):
+@app.post("/api/social/post", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: Annotated[str, Depends(get_user_id_header)]):
     selected_platforms = _resolve_social_platforms(req.platforms)
     user_id = _resolve_request_user_id(req.user_id, user_id_header)
     publish_priority = await _resolve_user_job_priority(user_id)
     scheduled_for = _resolve_scheduled_datetime(req.scheduled_date, req.timezone)
     if req.scheduled_date and not scheduled_for:
-        raise HTTPException(status_code=400, detail="Invalid scheduled_date (expected ISO-8601)")
+        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
     is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
 
     clip = await _resolve_clip_for_social_post(req.job_id, req.clip_index)
@@ -6108,7 +6209,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
         raise HTTPException(status_code=404, detail="Video URL not found for this clip")
 
     local_video_path = _resolve_local_video_path(req.job_id, video_ref, req.clip_index)
-    public_video_url = _resolve_public_video_url(video_ref, request, req.job_id, req.clip_index)
+    public_video_url = _resolve_public_video_url(video_ref, request, req.job_id)
 
     final_title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title') or 'Vireel Short'
     final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
@@ -6148,7 +6249,10 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
             if not account:
                 raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
 
-            if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith(("https://", "http://")):
+            # NOSONAR(python:S5332): validates the URL is absolute (any
+            # scheme) before submitting it to the platform API -- not a
+            # hardcoded http:// request of our own.
+            if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith((_HTTPS_SCHEME_PREFIX, "http://")):  # NOSONAR
                 raise HTTPException(status_code=400, detail=f"{platform_name} requires a public video URL")
 
             publish_payload = PublishRequest(
@@ -6185,11 +6289,11 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
 
 # --- Thumbnail Studio Endpoints ---
 
-@app.post("/api/thumbnail/upload")
+@app.post("/api/thumbnail/upload", responses={400: {"description": "Bad Request"}})
 async def thumbnail_upload(
-    file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    file: Annotated[Optional[UploadFile], File()] = None,
+    url: Annotated[Optional[str], Form()] = None,
 ):
     """Upload video and start background Whisper transcription immediately."""
     if not url and not file:
@@ -6201,11 +6305,11 @@ async def thumbnail_upload(
     # Save file if uploaded directly
     video_path = None
     if file:
-        safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+        safe_thumb_name = _sanitize_input_filename(file.filename) or _DEFAULT_UPLOAD_FILENAME
         video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
-        with open(video_path, "wb") as buffer:
+        async with aiofiles.open(video_path, "wb") as buffer:
             content = await file.read()
-            buffer.write(content)
+            await buffer.write(content)
 
     # Initialize session
     thumbnail_sessions[session_id] = {
@@ -6252,25 +6356,25 @@ async def thumbnail_upload(
         finally:
             transcript_event.set()
 
-    asyncio.create_task(run_background_whisper())
+    _spawn_background_task(run_background_whisper())
 
     return {"session_id": session_id}
 
 
-@app.post("/api/thumbnail/analyze")
+@app.post("/api/thumbnail/analyze", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_analyze(
     request: Request,
-    file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None),
-    session_id: Optional[str] = Form(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    file: Annotated[Optional[UploadFile], File()] = None,
+    url: Annotated[Optional[str], Form()] = None,
+    session_id: Annotated[Optional[str], Form()] = None,
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Analyze a video and suggest viral YouTube titles."""
     # Use .env configuration (ignore header for security)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
+        raise HTTPException(status_code=400, detail=_GEMINI_API_KEY_NOT_CONFIGURED)
 
     pre_transcript = None
 
@@ -6304,11 +6408,11 @@ async def thumbnail_analyze(
             from main import download_youtube_video
             video_path, _ = download_youtube_video(url, UPLOAD_DIR)
         else:
-            safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
+            safe_thumb_name = _sanitize_input_filename(file.filename) or _DEFAULT_UPLOAD_FILENAME
             video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
-            with open(video_path, "wb") as buffer:
+            async with aiofiles.open(video_path, "wb") as buffer:
                 content = await file.read()
-                buffer.write(content)
+                await buffer.write(content)
 
     try:
         # Run analysis in thread pool (skips Whisper if pre_transcript is available)
@@ -6346,17 +6450,17 @@ class ThumbnailTitlesRequest(BaseModel):
     message: Optional[str] = None
     title: Optional[str] = None
 
-@app.post("/api/thumbnail/titles")
+@app.post("/api/thumbnail/titles", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def thumbnail_titles(
     req: ThumbnailTitlesRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Refine title suggestions or accept a manual title."""
     # Use .env configuration (ignore header for security)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
+        raise HTTPException(status_code=400, detail=_GEMINI_API_KEY_NOT_CONFIGURED)
 
     # Manual title mode - just create a session with the user's title
     if req.title:
@@ -6372,7 +6476,7 @@ async def thumbnail_titles(
 
     # Refinement mode
     if not req.session_id or req.session_id not in thumbnail_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_SESSION_NOT_FOUND)
 
     if not req.message:
         raise HTTPException(status_code=400, detail="Must provide message or title")
@@ -6403,17 +6507,17 @@ async def thumbnail_titles(
         raise _generic_error("Thumbnail Titles Error", e)
 
 
-@app.post("/api/thumbnail/generate")
+@app.post("/api/thumbnail/generate", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_generate(
     request: Request,
-    session_id: str = Form(...),
-    title: str = Form(...),
-    extra_prompt: str = Form(""),
-    count: int = Form(3),
-    face: Optional[UploadFile] = File(None),
-    background: Optional[UploadFile] = File(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    session_id: Annotated[str, Form()],
+    title: Annotated[str, Form()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    extra_prompt: Annotated[str, Form()] = "",
+    count: Annotated[int, Form()] = 3,
+    face: Annotated[Optional[UploadFile], File()] = None,
+    background: Annotated[Optional[UploadFile], File()] = None,
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
     # Security: session_id is client-supplied and gets joined into a
@@ -6425,7 +6529,7 @@ async def thumbnail_generate(
     # Use .env configuration (ignore header for security)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
+        raise HTTPException(status_code=400, detail=_GEMINI_API_KEY_NOT_CONFIGURED)
 
     # Clamp count
     count = min(max(1, count), 6)
@@ -6440,14 +6544,14 @@ async def thumbnail_generate(
         if face and face.filename:
             safe_face_name = _sanitize_input_filename(face.filename) or "face.jpg"
             face_path = os.path.join(thumb_upload_dir, f"face_{safe_face_name}")
-            with open(face_path, "wb") as f:
-                f.write(await face.read())
+            async with aiofiles.open(face_path, "wb") as f:
+                await f.write(await face.read())
 
         if background and background.filename:
             safe_bg_name = _sanitize_input_filename(background.filename) or "background.jpg"
             bg_path = os.path.join(thumb_upload_dir, f"bg_{safe_bg_name}")
-            with open(bg_path, "wb") as f:
-                f.write(await background.read())
+            async with aiofiles.open(bg_path, "wb") as f:
+                await f.write(await background.read())
 
         # Get video context from session (transcript summary from analysis step)
         video_context = ""
@@ -6484,20 +6588,20 @@ class ThumbnailDescribeRequest(BaseModel):
     session_id: str
     title: str
 
-@app.post("/api/thumbnail/describe")
+@app.post("/api/thumbnail/describe", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def thumbnail_describe(
     req: ThumbnailDescribeRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Generate a YouTube description with chapters from the transcript."""
     # Use .env configuration (ignore header for security)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Gemini API Key not configured on server (.env)")
+        raise HTTPException(status_code=400, detail=_GEMINI_API_KEY_NOT_CONFIGURED)
 
     if req.session_id not in thumbnail_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_SESSION_NOT_FOUND)
 
     session = thumbnail_sessions[req.session_id]
     segments = session.get("transcript_segments", [])
@@ -6521,18 +6625,18 @@ async def thumbnail_describe(
         raise _generic_error("Thumbnail Describe Error", e)
 
 
-@app.post("/api/thumbnail/publish")
-async def thumbnail_publish(
+@app.post("/api/thumbnail/publish", responses={404: {"description": "Not Found"}})
+def thumbnail_publish(
     background_tasks: BackgroundTasks,
-    session_id: str = Form(...),
-    title: str = Form(...),
-    description: str = Form(...),
-    thumbnail_url: str = Form(...),
-    user_id: str = Depends(get_user_id_header),
+    session_id: Annotated[str, Form()],
+    title: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    thumbnail_url: Annotated[str, Form()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     """Kick off a background upload to YouTube using the user's connected social account."""
     if session_id not in thumbnail_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_SESSION_NOT_FOUND)
 
     session = thumbnail_sessions[session_id]
     video_path = session.get("video_path")
@@ -6586,8 +6690,8 @@ async def thumbnail_publish(
     return {"publish_id": publish_id, "status": "uploading"}
 
 
-@app.get("/api/thumbnail/publish/status/{publish_id}")
-async def thumbnail_publish_status(publish_id: str):
+@app.get("/api/thumbnail/publish/status/{publish_id}", responses={404: {"description": "Not Found"}})
+def thumbnail_publish_status(publish_id: str):
     """Poll the status of a background publish job."""
     if publish_id not in publish_jobs:
         raise HTTPException(status_code=404, detail="Publish job not found")
@@ -6629,17 +6733,17 @@ def _frontend_base_url(request: Request) -> str:
     return "http://localhost:5175"
 
 
-@app.post("/api/stripe/checkout-session")
+@app.post("/api/stripe/checkout-session", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def create_stripe_checkout_session(
     request: Request,
     payload: StripeCheckoutRequest,
-    user_id: str = Depends(get_user_id_header),   # ✅ ici, dans la signature
+    user_id: Annotated[str, Depends(get_user_id_header)],   # ✅ ici, dans la signature
 ):
     """Create a hosted Stripe Checkout session for a subscription plan."""
     _require_stripe_ready()
 
     if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
 
     plan = await supabase_get_abonnement(payload.plan_id)
     if not plan:
@@ -6891,14 +6995,14 @@ async def _handle_subscription_purchase(ctx: dict) -> dict:
 # Route
 # ---------------------------------------------------------------------------
 
-@app.post("/api/stripe/webhook")
+@app.post("/api/stripe/webhook", responses={400: {"description": "Bad Request"}, 503: {"description": "Service Unavailable"}})
 async def stripe_webhook(request: Request):
     """Handle Stripe checkout.session.completed events and persist the result."""
     _require_stripe_ready()
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=503, detail="Stripe webhook secret is not configured")
     if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
 
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
@@ -6917,11 +7021,11 @@ async def stripe_webhook(request: Request):
     return await _handle_subscription_purchase(ctx)
 
 
-@app.get("/api/abonnements")
+@app.get("/api/abonnements", responses={503: {"description": "Service Unavailable"}})
 async def list_abonnements():
     """List available subscription plans from Supabase."""
     if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
     plans = await supabase_list_abonnements()
     return {"plans": plans}
 
@@ -6929,7 +7033,7 @@ async def list_abonnements():
 @app.get("/api/souscription")
 async def get_current_souscription(
     request: Request,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ) -> Optional[Dict[str, Any]]:
     """Get the current active subscription for a user."""
     await _enforce_subscription_retention_policy(user_id)
@@ -6950,15 +7054,15 @@ async def get_current_souscription(
     return subscription
 
 
-@app.get("/api/souscription/history")
+@app.get("/api/souscription/history", responses={503: {"description": "Service Unavailable"}})
 async def get_souscription_history(
     request: Request,
-    limit: int = Query(50, ge=1, le=200),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ):
     """Return subscription history only (excluding one-off credit purchases)."""
     if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
 
     rows = await supabase_list_user_souscriptions(user_id, limit=limit)
     plans = await supabase_list_abonnements()
@@ -6988,11 +7092,11 @@ async def get_souscription_history(
 # User credits & history
 # ---------------------------------------------------------------------------
 
-@app.get("/api/user/credits")
-async def get_user_credits(request: Request, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/user/credits", responses={503: {"description": "Service Unavailable"}})
+async def get_user_credits(request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Return the credit/storage balance for the authenticated user."""
     if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
 
     await _enforce_subscription_retention_policy(user_id)
 
@@ -7049,16 +7153,16 @@ async def get_user_credits(request: Request, user_id: str = Depends(get_user_id_
     }
 
 
-@app.get("/api/user/history")
+@app.get("/api/user/history", responses={503: {"description": "Service Unavailable"}})
 async def get_user_history(
     request: Request,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
     """Return paginated credit/storage history for the authenticated user."""
     if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
 
     rows, total = await supabase_get_user_data_history(user_id, page=page, page_size=page_size)
     return {
@@ -7075,16 +7179,16 @@ class BuyCreditsRequest(BaseModel):
     cancel_url: Optional[str] = None
 
 
-@app.post("/api/stripe/buy-credits")
+@app.post("/api/stripe/buy-credits", responses={400: {"description": "Bad Request"}, 403: {"description": "Forbidden"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def buy_credits_checkout(
     request: Request,
     payload: BuyCreditsRequest,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     """Create a Stripe Checkout session for purchasing additional credits."""
     _require_stripe_ready()
     if not is_supabase_configured():
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail=_SUPABASE_NOT_CONFIGURED)
 
     policy_state = await _enforce_subscription_retention_policy(user_id)
     if policy_state.get("state") != "active":
@@ -7149,11 +7253,11 @@ async def buy_credits_checkout(
     }
 
 
-@app.get("/api/captions")
+@app.get("/api/captions", responses={503: {"description": "Service Unavailable"}})
 async def list_captions(
-    user_id: str = Depends(get_user_id_header),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 10,
     q: Optional[str] = None,
     status: Optional[str] = None,
 ):
@@ -7169,30 +7273,30 @@ async def list_captions(
     }
 
 
-@app.get("/api/captions/{caption_id}/media-url")
-async def caption_media_url(caption_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/captions/{caption_id}/media-url", responses={404: {"description": "Not Found"}})
+async def caption_media_url(caption_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_caption(caption_id, user_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Caption not found")
+        raise HTTPException(status_code=404, detail=_CAPTION_NOT_FOUND)
     item = _normalize_caption_row(row)
     return {"media_url": item.get("media_url")}
 
 
-@app.delete("/api/captions/{caption_id}")
-async def delete_caption(caption_id: str, user_id: str = Depends(get_user_id_header)):
+@app.delete("/api/captions/{caption_id}", responses={404: {"description": "Not Found"}})
+async def delete_caption(caption_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     deleted = await supabase_soft_delete_caption(caption_id, user_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Caption not found")
+        raise HTTPException(status_code=404, detail=_CAPTION_NOT_FOUND)
     return {"deleted": True}
 
 
-@app.post("/api/captions/{caption_id}/share")
-async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
+@app.post("/api/captions/{caption_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
 
     row = await supabase_get_caption(caption_id, user_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Caption not found")
+        raise HTTPException(status_code=404, detail=_CAPTION_NOT_FOUND)
 
     item = _normalize_caption_row(row)
     media_url = item.get("media_url")
@@ -7205,7 +7309,7 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str
     publish_priority = await _resolve_user_job_priority(user_id)
     scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
     if payload.scheduled_date and not scheduled_for:
-        raise HTTPException(status_code=400, detail="Invalid scheduled_date (expected ISO-8601)")
+        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
     is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
 
     results: Dict[str, Any] = {}
@@ -7302,17 +7406,17 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str
 # Projects Endpoints
 # --------------------------------------------------------------------------
 
-@app.get("/api/projects")
+@app.get("/api/projects", responses={503: {"description": "Service Unavailable"}})
 async def list_projects(
-	user_id: str = Depends(get_user_id_header),
-	page: int = Query(1, ge=1),
-	page_size: int = Query(20, ge=1, le=100),
-	project_type: Optional[str] = Query(None),
-	status: Optional[str] = Query(None),
+	user_id: Annotated[str, Depends(get_user_id_header)],
+	page: Annotated[int, Query(ge=1)] = 1,
+	page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+	project_type: Annotated[Optional[str], Query()] = None,
+	status: Annotated[Optional[str], Query()] = None,
 	q: Optional[str] = None,
 ):
 	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
 	rows, total = await supabase_list_projects(
 		user_id=user_id,
@@ -7330,14 +7434,14 @@ async def list_projects(
 	}
 
 
-@app.get("/api/projects/{project_id}")
-async def get_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+async def get_project_endpoint(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
 	project = await supabase_get_project(project_id, user_id)
 	if not project:
-		raise HTTPException(status_code=404, detail="Project not found")
+		raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
 	return project
 
@@ -7347,14 +7451,14 @@ class ProjectUpdateRequest(BaseModel):
 	description: Optional[str] = None
 
 
-@app.put("/api/projects/{project_id}")
+@app.put("/api/projects/{project_id}", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def update_project_endpoint(
 	project_id: str,
 	payload: ProjectUpdateRequest,
-	user_id: str = Depends(get_user_id_header),
+	user_id: Annotated[str, Depends(get_user_id_header)],
 ):
 	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
 	# Only allow updating name and description
 	updates = {}
@@ -7368,19 +7472,19 @@ async def update_project_endpoint(
 
 	project = await supabase_update_project(project_id, user_id, updates)
 	if not project:
-		raise HTTPException(status_code=404, detail="Project not found")
+		raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
 	return project
 
 
-@app.delete("/api/projects/{project_id}")
-async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
+@app.delete("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
+async def delete_project_endpoint(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
 	project = await supabase_get_project(project_id, user_id)
 	if not project:
-		raise HTTPException(status_code=404, detail="Project not found")
+		raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
 	bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
 	total_storage_freed_bytes = 0
@@ -7441,7 +7545,7 @@ async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_us
 
 			# Delete caption thumbnail if it exists
 			caption_thumbnail_url = caption.get("caption_thumbnail_url")
-			if caption_thumbnail_url and caption_thumbnail_url.startswith("captions/"):
+			if caption_thumbnail_url and caption_thumbnail_url.startswith(_CAPTIONS_PREFIX):
 				try:
 					thumb_size = get_s3_object_size(bucket_name, caption_thumbnail_url)
 					if delete_s3_object(bucket_name, caption_thumbnail_url):
@@ -7469,14 +7573,14 @@ async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_us
 	return {"deleted": True}
 
 
-@app.get("/api/projects/{project_id}/source-url")
-async def get_project_source_url(project_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/projects/{project_id}/source-url", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
+async def get_project_source_url(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
 	project = await supabase_get_project(project_id, user_id)
 	if not project:
-		raise HTTPException(status_code=404, detail="Project not found")
+		raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
 	s3_key = project.get("source_s3_key")
 	if not s3_key:
@@ -7492,14 +7596,14 @@ async def get_project_source_url(project_id: str, user_id: str = Depends(get_use
 	return {"source_url": source_url}
 
 
-@app.get("/api/projects/{project_id}/job")
-async def get_project_job(project_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/projects/{project_id}/job", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+async def get_project_job(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
   if not is_supabase_configured():
-    raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+    raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
   project = await supabase_get_project(project_id, user_id)
   if not project:
-    raise HTTPException(status_code=404, detail="Project not found")
+    raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
   job_row = await supabase_get_latest_job_record_by_project(project_id, user_id)
   if not job_row:
@@ -7518,16 +7622,16 @@ async def get_project_job(project_id: str, user_id: str = Depends(get_user_id_he
   }
 
 
-@app.get("/api/projects/{project_id}/reels")
-async def get_project_reels(project_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/projects/{project_id}/reels", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+async def get_project_reels(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	"""Get all reels for a specific project."""
 	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
 	# Verify user owns the project
 	project = await supabase_get_project(project_id, user_id)
 	if not project:
-		raise HTTPException(status_code=404, detail="Project not found")
+		raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
 	reels = await supabase_get_reels_by_project(project_id)
 	return {
@@ -7537,16 +7641,16 @@ async def get_project_reels(project_id: str, user_id: str = Depends(get_user_id_
 	}
 
 
-@app.get("/api/projects/{project_id}/captions")
-async def get_project_captions(project_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/projects/{project_id}/captions", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+async def get_project_captions(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	"""Get all captions for a specific project."""
 	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail="Supabase projects is not configured")
+		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
 	# Verify user owns the project
 	project = await supabase_get_project(project_id, user_id)
 	if not project:
-		raise HTTPException(status_code=404, detail="Project not found")
+		raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
 	captions = await supabase_get_captions_by_project(project_id)
 	return {
@@ -7554,7 +7658,7 @@ async def get_project_captions(project_id: str, user_id: str = Depends(get_user_
 		"captions": [_normalize_caption_row(caption) for caption in captions],
 		"count": len(captions),
 	}
-async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100), q: Optional[str] = None, status: Optional[str] = None):
+async def list_reels(user_id: Annotated[str, Depends(get_user_id_header)], page: Annotated[int, Query(ge=1)] = 1, page_size: Annotated[int, Query(ge=1, le=100)] = 10, q: Optional[str] = None, status: Optional[str] = None):
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase reels is not configured")
 
@@ -7567,48 +7671,48 @@ async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Que
     }
 
 
-@app.get("/api/reels/{reel_id}/media-url")
-async def reel_media_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/reels/{reel_id}/media-url", responses={404: {"description": "Not Found"}})
+async def reel_media_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Reel not found")
+        raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
     item = _normalize_reel_row(row)
     return {"media_url": item.get("media_url")}
 
 
-@app.get("/api/reels/{reel_id}/thumbnail-url")
-async def reel_thumbnail_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/reels/{reel_id}/thumbnail-url", responses={404: {"description": "Not Found"}})
+async def reel_thumbnail_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Reel not found")
+        raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
     item = _normalize_reel_row(row)
     return {"thumbnail_url": item.get("reel_thumbnail_url")}
 
 
-@app.get("/api/reels/{reel_id}/preview-url")
-async def reel_preview_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
+@app.get("/api/reels/{reel_id}/preview-url", responses={404: {"description": "Not Found"}})
+async def reel_preview_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Reel not found")
+        raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
     item = _normalize_reel_row(row)
     return {"preview_url": item.get("reel_preview_url")}
 
 
-@app.delete("/api/reels/{reel_id}")
-async def delete_reel(reel_id: str, user_id: str = Depends(get_user_id_header)):
+@app.delete("/api/reels/{reel_id}", responses={404: {"description": "Not Found"}})
+async def delete_reel(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     deleted = await supabase_soft_delete_reel(reel_id, user_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Reel not found")
+        raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
     return {"deleted": True}
 
 
-@app.post("/api/reels/{reel_id}/share")
-async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
+@app.post("/api/reels/{reel_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
 
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Reel not found")
+        raise HTTPException(status_code=404, detail=_REEL_NOT_FOUND)
 
     item = _normalize_reel_row(row)
     media_url = item.get("media_url")
@@ -7621,7 +7725,7 @@ async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Dep
     publish_priority = await _resolve_user_job_priority(user_id)
     scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
     if payload.scheduled_date and not scheduled_for:
-        raise HTTPException(status_code=400, detail="Invalid scheduled_date (expected ISO-8601)")
+        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
     is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
 
     results: Dict[str, Any] = {}
@@ -7787,7 +7891,7 @@ def _decrypt_token(token_encrypted: Optional[str]) -> str:
 def _resolve_platform_config(platform: str) -> Dict[str, Any]:
     key = (platform or "").strip().lower()
     if key not in PLATFORM_CONFIG:
-        raise HTTPException(status_code=404, detail="Unsupported platform")
+        raise HTTPException(status_code=404, detail=_UNSUPPORTED_PLATFORM)
     config = PLATFORM_CONFIG[key]
     if not config.get("client_id") or not config.get("client_secret"):
         raise HTTPException(status_code=503, detail=f"{key} OAuth is not configured")
@@ -8136,7 +8240,7 @@ async def _update_publish_job_status(
 
 
 @app.get("/api/social/accounts")
-async def list_social_accounts(user_id: str = Depends(get_user_id_header)):
+async def list_social_accounts(user_id: Annotated[str, Depends(get_user_id_header)]):
     client = await supabase_get_client()
     response = (
         await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
@@ -8156,11 +8260,11 @@ async def list_social_accounts(user_id: str = Depends(get_user_id_header)):
     return {"accounts": accounts}
 
 
-@app.delete("/api/social/accounts/{platform}")
-async def disconnect_social_account(platform: str, user_id: str = Depends(get_user_id_header)):
+@app.delete("/api/social/accounts/{platform}", responses={404: {"description": "Not Found"}})
+async def disconnect_social_account(platform: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     key = (platform or "").strip().lower()
     if key not in PLATFORM_CONFIG:
-        raise HTTPException(status_code=404, detail="Unsupported platform")
+        raise HTTPException(status_code=404, detail=_UNSUPPORTED_PLATFORM)
     client = await supabase_get_client()
     response = (
         await client.table(SUPABASE_SOCIAL_ACCOUNTS_TABLE)
@@ -8172,17 +8276,17 @@ async def disconnect_social_account(platform: str, user_id: str = Depends(get_us
     return {"deleted": bool(response.data)}
 
 
-@app.get("/api/social/publish-jobs")
+@app.get("/api/social/publish-jobs", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
 async def list_publish_jobs(
-    user_id: str = Depends(get_user_id_header),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    platform: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    date_filter: Optional[str] = Query(None),  # all, today, week, month
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    platform: Annotated[Optional[str], Query()] = None,
+    status: Annotated[Optional[str], Query()] = None,
+    date_filter: Annotated[Optional[str], Query()] = None,  # all, today, week, month
+    date_from: Annotated[Optional[str], Query()] = None,
+    date_to: Annotated[Optional[str], Query()] = None,
+    search: Annotated[Optional[str], Query()] = None,
 ):
     """
     Récupère les publications sociales de l'utilisateur avec filtres.
@@ -8278,10 +8382,10 @@ async def list_publish_jobs(
         raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
 
 
-@app.delete("/api/social/publish-jobs/{publish_job_id}")
+@app.delete("/api/social/publish-jobs/{publish_job_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def delete_publish_job(
     publish_job_id: str,
-    user_id: str = Depends(get_user_id_header),
+    user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     if not is_supabase_configured():
         raise HTTPException(status_code=503, detail="Supabase social publishing is not configured")
@@ -8308,7 +8412,7 @@ class SelectFacebookPageRequest(BaseModel):
     page_id: str
 
 
-@app.post("/api/auth/facebook/select-page")
+@app.post("/api/auth/facebook/select-page", responses={400: {"description": "Bad Request"}})
 async def select_facebook_page(payload: SelectFacebookPageRequest):
     try:
         data = _page_selection_serializer.loads(payload.selection_token, max_age=_PAGE_SELECTION_TTL_SECONDS)
@@ -8350,7 +8454,7 @@ async def select_facebook_page(payload: SelectFacebookPageRequest):
 
 
 @app.get("/api/auth/{platform}/connect")
-def connect(platform: str, request: Request, user_id: str = Depends(get_user_id_header)):
+def connect(platform: str, request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     # Security: `user_id` MUST come from the verified session (get_user_id_header),
     # never from an unauthenticated query parameter -- otherwise an attacker
     # could craft a /connect link carrying their own user_id, get a victim to
@@ -8504,7 +8608,6 @@ async def _exchange_instagram_long_lived_token(config: dict, short_lived_token: 
         )
     response.raise_for_status()
     data = response.json()
-    # data = {"access_token": "...", "token_type": "bearer", "expires_in": 5184000}  # 60 jours en secondes
     return data
 
 async def fetch_platform_identity(platform: str, access_token: str):
@@ -8552,7 +8655,7 @@ async def fetch_platform_identity(platform: str, access_token: str):
             user = ((response.json().get("data") or {}).get("user") or {})
             return {"id": str(user.get("open_id") or ""), "name": user.get("display_name") or "TikTok"}
 
-    raise HTTPException(status_code=404, detail="Unsupported platform")
+    raise HTTPException(status_code=404, detail=_UNSUPPORTED_PLATFORM)
 
 
 def _is_token_expiring(account: Dict[str, Any], margin_seconds: int = 300) -> bool:
@@ -8582,11 +8685,11 @@ def _require_platform_user_id(account: Dict[str, Any], platform: str) -> str:
     return user_id
 
 
-async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> None:
+async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> None:  # NOSONAR(python:S7503): kept async for uniformity across its ~18 `await`ed call sites (a mechanical de-asyncing of every one is not worth the churn/error risk for a function this trivially fast either way)
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
-        logger.error("%s API error: %s - %s", platform, e.response.status_code, e.response.text)
+        logger.exception("%s API error: %s - %s", platform, e.response.status_code, e.response.text)
         raise HTTPException(
             status_code=502,
             detail=f"{platform} API error ({e.response.status_code}): {e.response.text}",
@@ -8681,9 +8784,9 @@ async def _download_to_file(url: str, dest_path: str, timeout: float = 180.0) ->
         response = await _validated_stream_request(client, "GET", url)
         try:
             response.raise_for_status()
-            with open(dest_path, "wb") as handle:
+            async with aiofiles.open(dest_path, "wb") as handle:
                 async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                    handle.write(chunk)
+                    await handle.write(chunk)
         finally:
             await response.aclose()
 
@@ -8882,10 +8985,10 @@ async def upload_youtube_video(
     upload_url = await _yt_initialize_upload(access_token, file_size, title, description, privacy)
 
     uploaded = 0
-    with open(video_path, "rb") as file_handle:
+    async with aiofiles.open(video_path, "rb") as file_handle:
         while uploaded < file_size:
-            file_handle.seek(uploaded)
-            chunk = file_handle.read(YT_CHUNK_SIZE)
+            await file_handle.seek(uploaded)
+            chunk = await file_handle.read(YT_CHUNK_SIZE)
             response = await _yt_put_chunk_with_retry(upload_url, chunk, uploaded, uploaded + len(chunk) - 1, file_size)
 
             if response.status_code in (200, 201):
@@ -8947,7 +9050,7 @@ async def _publish_to_tiktok_direct(access_token: str, video_url: str, caption: 
         file_size = os.path.getsize(temp_path)
         chunk_size, total_chunk_count = _tiktok_compute_chunks(file_size)
 
-        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": _CONTENT_TYPE_JSON}
         init_payload = {
             "post_info": {
                 "title": caption, "privacy_level": privacy_level, "disable_duet": False,
@@ -8999,12 +9102,12 @@ def _tiktok_compute_chunks(file_size: int) -> "tuple[int, int]":
 
 async def _tiktok_upload_file_chunks(upload_url: str, video_path: str, file_size: int, chunk_size: int, total_chunk_count: int) -> None:
     """Envoie le fichier local par chunks séquentiels, avec retry par chunk."""
-    with open(video_path, "rb") as file_handle:
+    async with aiofiles.open(video_path, "rb") as file_handle:
         for i in range(total_chunk_count):
             first_byte = i * chunk_size
             last_byte = file_size - 1 if i == total_chunk_count - 1 else first_byte + chunk_size - 1
-            file_handle.seek(first_byte)
-            chunk = file_handle.read(last_byte - first_byte + 1)
+            await file_handle.seek(first_byte)
+            chunk = await file_handle.read(last_byte - first_byte + 1)
 
             last_error: Optional[Exception] = None
             for attempt in range(3):
@@ -9055,7 +9158,7 @@ async def _publish_to_tiktok_inbox(access_token: str, video_url: str, caption: s
         file_size = os.path.getsize(temp_path)
         chunk_size, total_chunk_count = _tiktok_compute_chunks(file_size)
 
-        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": _CONTENT_TYPE_JSON}
         init_payload = {
             "source_info": {
                 "source": "FILE_UPLOAD",
@@ -9100,7 +9203,7 @@ async def publish_to_tiktok_photo(token: str, image_urls: List[str], caption: st
     Portal (même prérequis que pour PULL_FROM_URL vidéo), il n'y a pas
     d'alternative FILE_UPLOAD possible ici.
     """
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": _CONTENT_TYPE_JSON}
     post_mode = "DIRECT_POST" if TIKTOK_DIRECT_POST_ENABLED else "MEDIA_UPLOAD"
     payload = {
         "post_info": {"title": caption, "description": caption},
@@ -9121,7 +9224,7 @@ async def publish_to_tiktok_photo(token: str, image_urls: List[str], caption: st
 async def poll_tiktok_status(
     access_token: str, publish_id: str, max_attempts: int = 20, success_statuses=("PUBLISH_COMPLETE",),
 ):
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": _CONTENT_TYPE_JSON}
     delay = 2.0
     for _ in range(max_attempts):
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -9257,7 +9360,7 @@ def _linkedin_headers(token: str, json_body: bool = True) -> Dict[str, str]:
         "Linkedin-Version": LINKEDIN_API_VERSION,
     }
     if json_body:
-        headers["Content-Type"] = "application/json"
+        headers["Content-Type"] = _CONTENT_TYPE_JSON
     return headers
 
 
@@ -9342,11 +9445,11 @@ async def _li_upload_part_with_retry(upload_url: str, chunk: bytes, first_byte: 
 
 async def _li_upload_all_parts(temp_path: str, upload_instructions: List[Dict[str, Any]]) -> List[str]:
     uploaded_part_ids: List[str] = []
-    with open(temp_path, "rb") as file_handle:
+    async with aiofiles.open(temp_path, "rb") as file_handle:
         for part in upload_instructions:
             first_byte, last_byte = part["firstByte"], part["lastByte"]
-            file_handle.seek(first_byte)
-            chunk = file_handle.read(last_byte - first_byte + 1)
+            await file_handle.seek(first_byte)
+            chunk = await file_handle.read(last_byte - first_byte + 1)
             etag = await _li_upload_part_with_retry(part["uploadUrl"], chunk, first_byte, last_byte)
             uploaded_part_ids.append(etag)
     return uploaded_part_ids
@@ -9520,7 +9623,7 @@ async def publish_post(account: Dict[str, Any], content) -> Dict[str, Any]:
 
     handler = _PLATFORM_HANDLERS.get(platform)
     if handler is None:
-        raise HTTPException(status_code=404, detail="Unsupported platform")
+        raise HTTPException(status_code=404, detail=_UNSUPPORTED_PLATFORM)
     return await handler(account, token, content, text_value)
 
 

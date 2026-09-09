@@ -9,6 +9,7 @@ EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
 # pathological input can't hang a worker indefinitely (audit finding H13).
 FFPROBE_TIMEOUT_SECONDS = int(os.environ.get("FFPROBE_TIMEOUT_SECONDS", "60"))
 FFMPEG_STEP_TIMEOUT_SECONDS = int(os.environ.get("FFMPEG_STEP_TIMEOUT_SECONDS", str(2 * 3600)))
+_LOCALE_UTF8 = "C.UTF-8"
 import re
 import subprocess
 import time
@@ -43,7 +44,7 @@ class VideoEditor:
                 print("✅ Video processed and ready.")
                 return file_upload
             elif file_info.state == "FAILED":
-                raise Exception("Video processing failed by Gemini.")
+                raise RuntimeError("Video processing failed by Gemini.")
             time.sleep(2)
 
     def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None):
@@ -295,10 +296,10 @@ class VideoEditor:
 
         # Order matters: handle >= / <= before > / <
         patterns: list[tuple[re.Pattern[str], str]] = [
-            (re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*>=\s*(-?\d+(?:\.\d+)?)"), r"gte(\1,\2)"),
-            (re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*<=\s*(-?\d+(?:\.\d+)?)"), r"lte(\1,\2)"),
-            (re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*>\s*(-?\d+(?:\.\d+)?)"), r"gt(\1,\2)"),
-            (re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*<\s*(-?\d+(?:\.\d+)?)"), r"lt(\1,\2)"),
+            (re.compile(r"(?<!\w)([A-Za-z_]\w*)\s*>=\s*(-?\d+(?:\.\d+)?)"), r"gte(\1,\2)"),
+            (re.compile(r"(?<!\w)([A-Za-z_]\w*)\s*<=\s*(-?\d+(?:\.\d+)?)"), r"lte(\1,\2)"),
+            (re.compile(r"(?<!\w)([A-Za-z_]\w*)\s*>\s*(-?\d+(?:\.\d+)?)"), r"gt(\1,\2)"),
+            (re.compile(r"(?<!\w)([A-Za-z_]\w*)\s*<\s*(-?\d+(?:\.\d+)?)"), r"lt(\1,\2)"),
         ]
         for pat, repl in patterns:
             s = pat.sub(repl, s)
@@ -324,7 +325,11 @@ class VideoEditor:
                 return str(int(round(rounded)))
             return f"{rounded:.3f}".rstrip("0").rstrip(".")
 
-        s = re.sub(r"\d+\.\d{6,}", _round_float_token, s)
+        # NOSONAR(python:S8786): no nested/overlapping quantifiers here
+        # (\d+ and \d{6,} match disjoint character positions separated by a
+        # literal '.') -- not actually susceptible to catastrophic
+        # backtracking despite the heuristic flag.
+        s = re.sub(r"\d+\.\d{6,}", _round_float_token, s)  # NOSONAR
 
         return s
 
@@ -342,7 +347,7 @@ class VideoEditor:
         try:
             probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', input_path]
             res_out = subprocess.check_output(
-                probe_cmd, env={**os.environ, "LANG": "C.UTF-8"}, timeout=FFPROBE_TIMEOUT_SECONDS
+                probe_cmd, env={**os.environ, "LANG": _LOCALE_UTF8}, timeout=FFPROBE_TIMEOUT_SECONDS
             ).decode().strip()
             w, h = map(int, res_out.split('x'))
         except Exception as e:
@@ -384,8 +389,8 @@ class VideoEditor:
         env = os.environ.copy()
         # On some minimal docker images, we need to ensure we use a UTF-8 locale
         # Try C.UTF-8 first, fallback to en_US.UTF-8 if available, but C.UTF-8 is usually safer for minimal
-        env["LANG"] = "C.UTF-8"
-        env["LC_ALL"] = "C.UTF-8"
+        env["LANG"] = _LOCALE_UTF8
+        env["LC_ALL"] = _LOCALE_UTF8
         
         try:
             # We must encode arguments if filesystem is ascii but we have unicode chars
@@ -402,7 +407,7 @@ class VideoEditor:
                 else:
                     cmd_bytes.append(arg)
             
-            result = subprocess.run(
+            subprocess.run(
                 cmd_bytes, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
             )
@@ -418,6 +423,3 @@ class VideoEditor:
             except Exception:
                 pass
             raise e
-
-if __name__ == "__main__":
-    pass
