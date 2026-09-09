@@ -7966,100 +7966,93 @@ async def update_project_endpoint(
 	return project
 
 
+def _delete_s3_and_get_freed_bytes(bucket_name: str, s3_key: str, label: str) -> int:
+    try:
+        size = get_s3_object_size(bucket_name, s3_key)
+        if delete_s3_object(bucket_name, s3_key):
+            logger.info(f"Deleted {label}: {s3_key} ({size} bytes)")
+            return size
+    except Exception as e:
+        logger.warning(f"Failed to delete {label} {s3_key}: {str(e)}")
+    return 0
+
+
+def _delete_project_source_s3_file(project: Dict[str, Any], bucket_name: str) -> int:
+    source_s3_key = project.get("source_s3_key")
+    if not source_s3_key:
+        return 0
+    return _delete_s3_and_get_freed_bytes(bucket_name, source_s3_key, "project source S3 file")
+
+
+async def _delete_project_reels_s3_files(project_id: str, bucket_name: str) -> int:
+    freed = 0
+    try:
+        reels = await supabase_get_reels_by_project(project_id)
+        for reel in reels:
+            reel_s3_key = reel.get("reel_s3_key")
+            if reel_s3_key:
+                freed += _delete_s3_and_get_freed_bytes(bucket_name, reel_s3_key, "reel S3 file")
+
+            reel_thumbnail_url = reel.get("reel_thumbnail_url") or reel.get("reel_thumbnail_s3_key")
+            if reel_thumbnail_url and reel_thumbnail_url.startswith("reels/"):
+                freed += _delete_s3_and_get_freed_bytes(bucket_name, reel_thumbnail_url, "reel thumbnail S3 file")
+    except Exception as e:
+        logger.warning(f"Failed to retrieve or delete reels for project {project_id}: {str(e)}")
+    return freed
+
+
+async def _delete_project_captions_s3_files(project_id: str, bucket_name: str) -> int:
+    freed = 0
+    try:
+        captions = await supabase_get_captions_by_project(project_id)
+        for caption in captions:
+            caption_s3_key = caption.get("caption_s3_key")
+            if caption_s3_key:
+                freed += _delete_s3_and_get_freed_bytes(bucket_name, caption_s3_key, "caption S3 file")
+
+            caption_thumbnail_url = caption.get("caption_thumbnail_url")
+            if caption_thumbnail_url and caption_thumbnail_url.startswith(_CAPTIONS_PREFIX):
+                freed += _delete_s3_and_get_freed_bytes(bucket_name, caption_thumbnail_url, "caption thumbnail S3 file")
+    except Exception as e:
+        logger.warning(f"Failed to retrieve or delete captions for project {project_id}: {str(e)}")
+    return freed
+
+
+async def _free_user_storage_after_project_deletion(user_id: str, total_storage_freed_bytes: int) -> None:
+    if total_storage_freed_bytes <= 0:
+        return
+    storage_freed_gb = -total_storage_freed_bytes / (1024 ** 3)  # Negative value to free up space
+    try:
+        await supabase_deduct_user_credits(user_id, 0.0, storage_delta=storage_freed_gb)
+        logger.info(f"Freed {abs(storage_freed_gb):.6f} GB for user {user_id}")
+    except Exception as e:
+        logger.warning(f"Failed to update user storage quota after project deletion: {str(e)}")
+
+
 @app.delete("/api/projects/{project_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
 async def delete_project_endpoint(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
-	if not is_supabase_configured():
-		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
+    if not is_supabase_configured():
+        raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
 
-	project = await supabase_get_project(project_id, user_id)
-	if not project:
-		raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
+    project = await supabase_get_project(project_id, user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=_PROJECT_NOT_FOUND)
 
-	bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
-	total_storage_freed_bytes = 0
+    bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+    total_storage_freed_bytes = 0
+    total_storage_freed_bytes += _delete_project_source_s3_file(project, bucket_name)
+    total_storage_freed_bytes += await _delete_project_reels_s3_files(project_id, bucket_name)
+    total_storage_freed_bytes += await _delete_project_captions_s3_files(project_id, bucket_name)
 
-	# Delete source S3 file and free up storage
-	source_s3_key = project.get("source_s3_key")
-	if source_s3_key:
-		try:
-			source_size = get_s3_object_size(bucket_name, source_s3_key)
-			if delete_s3_object(bucket_name, source_s3_key):
-				total_storage_freed_bytes += source_size
-				logger.info(f"Deleted project source S3 file: {source_s3_key} ({source_size} bytes)")
-		except Exception as e:
-			logger.warning(f"Failed to delete project source S3 file {source_s3_key}: {str(e)}")
+    # Delete database records
+    deleted = await supabase_soft_delete_project(project_id, user_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="Failed to delete project")
 
-	# Get and delete all reels associated with the project
-	try:
-		reels = await supabase_get_reels_by_project(project_id)
-		for reel in reels:
-			# Delete reel media file
-			reel_s3_key = reel.get("reel_s3_key")
-			if reel_s3_key:
-				try:
-					reel_size = get_s3_object_size(bucket_name, reel_s3_key)
-					if delete_s3_object(bucket_name, reel_s3_key):
-						total_storage_freed_bytes += reel_size
-						logger.info(f"Deleted reel S3 file: {reel_s3_key} ({reel_size} bytes)")
-				except Exception as e:
-					logger.warning(f"Failed to delete reel S3 file {reel_s3_key}: {str(e)}")
+    # Free up user's storage quota (negative storage_delta = free up space)
+    await _free_user_storage_after_project_deletion(user_id, total_storage_freed_bytes)
 
-			# Delete reel thumbnail if it's an S3 key
-			reel_thumbnail_url = reel.get("reel_thumbnail_url") or reel.get("reel_thumbnail_s3_key")
-			if reel_thumbnail_url and reel_thumbnail_url.startswith("reels/"):
-				try:
-					thumb_size = get_s3_object_size(bucket_name, reel_thumbnail_url)
-					if delete_s3_object(bucket_name, reel_thumbnail_url):
-						total_storage_freed_bytes += thumb_size
-						logger.info(f"Deleted reel thumbnail S3 file: {reel_thumbnail_url} ({thumb_size} bytes)")
-				except Exception as e:
-					logger.warning(f"Failed to delete reel thumbnail S3 file {reel_thumbnail_url}: {str(e)}")
-	except Exception as e:
-		logger.warning(f"Failed to retrieve or delete reels for project {project_id}: {str(e)}")
-
-	# Get and delete all captions associated with the project
-	try:
-		captions = await supabase_get_captions_by_project(project_id)
-		for caption in captions:
-			# Delete caption media file
-			caption_s3_key = caption.get("caption_s3_key")
-			if caption_s3_key:
-				try:
-					caption_size = get_s3_object_size(bucket_name, caption_s3_key)
-					if delete_s3_object(bucket_name, caption_s3_key):
-						total_storage_freed_bytes += caption_size
-						logger.info(f"Deleted caption S3 file: {caption_s3_key} ({caption_size} bytes)")
-				except Exception as e:
-					logger.warning(f"Failed to delete caption S3 file {caption_s3_key}: {str(e)}")
-
-			# Delete caption thumbnail if it exists
-			caption_thumbnail_url = caption.get("caption_thumbnail_url")
-			if caption_thumbnail_url and caption_thumbnail_url.startswith(_CAPTIONS_PREFIX):
-				try:
-					thumb_size = get_s3_object_size(bucket_name, caption_thumbnail_url)
-					if delete_s3_object(bucket_name, caption_thumbnail_url):
-						total_storage_freed_bytes += thumb_size
-						logger.info(f"Deleted caption thumbnail S3 file: {caption_thumbnail_url} ({thumb_size} bytes)")
-				except Exception as e:
-					logger.warning(f"Failed to delete caption thumbnail S3 file {caption_thumbnail_url}: {str(e)}")
-	except Exception as e:
-		logger.warning(f"Failed to retrieve or delete captions for project {project_id}: {str(e)}")
-
-	# Delete database records
-	deleted = await supabase_soft_delete_project(project_id, user_id)
-	if not deleted:
-		raise HTTPException(status_code=500, detail="Failed to delete project")
-
-	# Free up user's storage quota (negative storage_delta = free up space)
-	if total_storage_freed_bytes > 0:
-		storage_freed_gb = -total_storage_freed_bytes / (1024 ** 3)  # Negative value to free up space
-		try:
-			await supabase_deduct_user_credits(user_id, 0.0, storage_delta=storage_freed_gb)
-			logger.info(f"Freed {abs(storage_freed_gb):.6f} GB for user {user_id}")
-		except Exception as e:
-			logger.warning(f"Failed to update user storage quota after project deletion: {str(e)}")
-
-	return {"deleted": True}
+    return {"deleted": True}
 
 
 @app.get("/api/projects/{project_id}/source-url", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
