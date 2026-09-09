@@ -36,10 +36,15 @@ from jwt import PyJWTError
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
-try:
-    import stripe
-except ImportError:  # pragma: no cover - optional at import time
-    stripe = None
+def _import_stripe():
+    try:
+        import stripe as stripe_module
+        return stripe_module
+    except ImportError:  # pragma: no cover - optional at import time
+        return None
+
+
+stripe = _import_stripe()
 from s3_uploader import (
     upload_file_to_s3,
     generate_presigned_url,
@@ -275,8 +280,12 @@ PLATFORM_CONFIG = {
     },
 }
 
-if stripe and STRIPE_SECRET_KEY:
-    stripe.api_key = STRIPE_SECRET_KEY
+def _configure_stripe() -> None:
+    if stripe and STRIPE_SECRET_KEY:
+        stripe.api_key = STRIPE_SECRET_KEY
+
+
+_configure_stripe()
 
 # Application State
 job_queue: asyncio.PriorityQueue[tuple[int, int, str]] = asyncio.PriorityQueue()
@@ -310,9 +319,14 @@ def _spawn_background_task(coro) -> Optional["asyncio.Task"]:
         task.add_done_callback(_background_tasks.discard)
     return task
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY manquant dans l'environnement")
+def _load_secret_key() -> str:
+    secret_key = os.getenv("SECRET_KEY")
+    if not secret_key:
+        raise RuntimeError("SECRET_KEY manquant dans l'environnement")
+    return secret_key
+
+
+SECRET_KEY = _load_secret_key()
 
 _oauth_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
@@ -325,12 +339,18 @@ _oauth_serializer = URLSafeTimedSerializer(SECRET_KEY)
 # SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY and only used for HS256.
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 SUPABASE_URL_FOR_JWKS = (os.getenv("SUPABASE_URL") or "").rstrip("/")
-if not SUPABASE_JWT_SECRET and not SUPABASE_URL_FOR_JWKS:
-    raise RuntimeError(
-        "Ni SUPABASE_JWT_SECRET ni SUPABASE_URL ne sont definis -- l'un des deux "
-        "est requis pour verifier les tokens de session Supabase (sans cela, "
-        "aucune requete ne peut etre authentifiee de maniere fiable)."
-    )
+
+
+def _validate_supabase_jwt_config() -> None:
+    if not SUPABASE_JWT_SECRET and not SUPABASE_URL_FOR_JWKS:
+        raise RuntimeError(
+            "Ni SUPABASE_JWT_SECRET ni SUPABASE_URL ne sont definis -- l'un des deux "
+            "est requis pour verifier les tokens de session Supabase (sans cela, "
+            "aucune requete ne peut etre authentifiee de maniere fiable)."
+        )
+
+
+_validate_supabase_jwt_config()
 
 _supabase_jwks_client: Optional["pyjwt.PyJWKClient"] = None
 
@@ -354,41 +374,56 @@ router = APIRouter()
 def _is_pytest_runtime() -> bool:
     return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
 
-FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN")
-if not FRONTEND_ORIGIN:
+def _load_frontend_origin() -> str:
+    origin = os.environ.get("FRONTEND_ORIGIN")
+    if origin:
+        return origin
     if _is_pytest_runtime():
         # Test fallback: explicit non-wildcard origin keeps postMessage target strict.
-        FRONTEND_ORIGIN = "http://localhost"
-        logger.warning("FRONTEND_ORIGIN not set; using test fallback '%s'", FRONTEND_ORIGIN)
-    else:
-        raise RuntimeError(
-            "FRONTEND_ORIGIN must be set (exact frontend origin, e.g. 'https://app.vireel.com') "
-            "-- postMessage must never target '*' when carrying selection data."
-        )
+        origin = "http://localhost"
+        logger.warning("FRONTEND_ORIGIN not set; using test fallback '%s'", origin)
+        return origin
+    raise RuntimeError(
+        "FRONTEND_ORIGIN must be set (exact frontend origin, e.g. 'https://app.vireel.com') "
+        "-- postMessage must never target '*' when carrying selection data."
+    )
+
+
+FRONTEND_ORIGIN = _load_frontend_origin()
 
 _PAGE_SELECTION_TTL_SECONDS = 600  # 10 minutes pour que l'utilisateur choisisse une page
 
-_ENCRYPTION_KEY_RAW = os.environ.get("ENCRYPTION_KEY", "")
-if not _ENCRYPTION_KEY_RAW or len(_ENCRYPTION_KEY_RAW) < 16:
+def _load_encryption_key_raw() -> str:
+    raw = os.environ.get("ENCRYPTION_KEY", "")
+    if raw and len(raw) >= 16:
+        return raw
     if _is_pytest_runtime():
-        _ENCRYPTION_KEY_RAW = _ENCRYPTION_KEY_RAW or "unit-test-encryption-key-not-for-prod"
+        raw = raw or "unit-test-encryption-key-not-for-prod"
         logger.warning("ENCRYPTION_KEY missing/too short; using test fallback")
-    else:
-        raise RuntimeError(
-            "ENCRYPTION_KEY manquant ou trop court (16 caracteres minimum) -- "
-            "requis pour chiffrer les tokens OAuth (YouTube/TikTok/...) stockes "
-            "en base. L'application refuse de demarrer plutot que de stocker "
-            "des tokens en clair ou faiblement proteges."
-        )
+        return raw
+    raise RuntimeError(
+        "ENCRYPTION_KEY manquant ou trop court (16 caracteres minimum) -- "
+        "requis pour chiffrer les tokens OAuth (YouTube/TikTok/...) stockes "
+        "en base. L'application refuse de demarrer plutot que de stocker "
+        "des tokens en clair ou faiblement proteges."
+    )
 
-_oauth_state_secret = os.environ.get("OAUTH_STATE_SECRET")
-if not _oauth_state_secret:
+
+_ENCRYPTION_KEY_RAW = _load_encryption_key_raw()
+
+def _load_oauth_state_secret() -> str:
+    secret = os.environ.get("OAUTH_STATE_SECRET")
+    if secret:
+        return secret
     # Keep startup resilient: reuse SECRET_KEY when a dedicated OAuth state secret is absent.
-    _oauth_state_secret = SECRET_KEY
     if _is_pytest_runtime():
         logger.warning("OAUTH_STATE_SECRET not set; using SECRET_KEY as test fallback")
     else:
         logger.warning("OAUTH_STATE_SECRET not set; using SECRET_KEY fallback")
+    return SECRET_KEY
+
+
+_oauth_state_secret = _load_oauth_state_secret()
 
 _page_selection_serializer = URLSafeTimedSerializer(
     _oauth_state_secret,  # réutilise ta clé secrète OAuth existante
@@ -1237,14 +1272,7 @@ def _is_probably_video_url(value: str) -> bool:
     return path.endswith((".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi"))
 
 
-async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: str) -> str:
-    if not is_supabase_configured() or not user_id:
-        return ""
-
-    bucket = os.environ.get("AWS_S3_BUCKET", "")
-    if not bucket:
-        return ""
-
+async def _fetch_reel_and_caption_rows_for_preview(job_id: str, clip_index: int, user_id: str):
     reel_row: Optional[Dict[str, Any]] = None
     caption_row: Optional[Dict[str, Any]] = None
 
@@ -1260,6 +1288,10 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
     except Exception:
         caption_row = None
 
+    return reel_row, caption_row
+
+
+def _existing_preview_thumbnail_from_rows(reel_row: Optional[Dict[str, Any]], caption_row: Optional[Dict[str, Any]]) -> str:
     if reel_row:
         reel_thumb = _normalize_reel_row(reel_row).get("reel_thumbnail_url") or ""
         if reel_thumb and not _is_probably_video_url(reel_thumb):
@@ -1270,13 +1302,23 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
         if caption_thumb and not _is_probably_video_url(caption_thumb):
             return caption_thumb
 
+    return ""
+
+
+async def _clip_data_from_job_metadata(job_id: str, clip_index: int) -> Dict[str, Any]:
     _, metadata = await _get_or_build_job_metadata(job_id, clip_index)
-    clip_data: Dict[str, Any] = {}
     if isinstance(metadata, dict):
         shorts = metadata.get("shorts") or []
         if 0 <= int(clip_index) < len(shorts) and isinstance(shorts[int(clip_index)], dict):
-            clip_data = shorts[int(clip_index)]
+            return shorts[int(clip_index)]
+    return {}
 
+
+def _build_preview_source_candidates(
+    reel_row: Optional[Dict[str, Any]],
+    caption_row: Optional[Dict[str, Any]],
+    clip_data: Dict[str, Any],
+) -> List[str]:
     source_candidates: List[str] = []
     if reel_row:
         source_candidates.extend([
@@ -1293,14 +1335,17 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
         str(clip_data.get("original_video_url") or ""),
     ])
 
-    local_video_path = ""
-    downloaded_video_path = ""
     deduped_candidates: List[str] = []
     for candidate in source_candidates:
         c = str(candidate or "").strip()
         if c and c not in deduped_candidates:
             deduped_candidates.append(c)
+    return deduped_candidates
 
+
+def _resolve_local_video_path_for_preview(deduped_candidates: List[str], job_id: str):
+    local_video_path = ""
+    downloaded_video_path = ""
     for candidate in deduped_candidates:
         parsed = urlparse(candidate)
         if candidate.startswith("/videos/"):
@@ -1318,15 +1363,20 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
                 break
             except Exception:
                 continue
+    return local_video_path, downloaded_video_path
 
-    if not local_video_path or not os.path.exists(local_video_path):
-        return ""
 
+async def _generate_and_upload_preview_thumbnail(
+    thumb_local: str,
+    downloaded_video_path: str,
+    bucket: str,
+    job_id: str,
+    clip_index: int,
+    user_id: str,
+    reel_row: Optional[Dict[str, Any]],
+    caption_row: Optional[Dict[str, Any]],
+) -> str:
     preview_url = ""
-    thumb_local = _generate_reel_thumbnail_from_video(local_video_path, OUTPUT_DIR, job_id, int(clip_index))
-    if not thumb_local or not os.path.exists(thumb_local):
-        return ""
-
     try:
         reel_thumb_key = f"reels/{user_id}/{job_id}/thumbnail_{int(clip_index)}.jpg"
         caption_thumb_key = f"captions/{user_id}/{job_id}/thumbnail_{int(clip_index)}_fallback.jpg"
@@ -1367,10 +1417,16 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
                 os.remove(downloaded_video_path)
         except Exception:
             pass
+    return preview_url
 
-    if preview_url:
-        return preview_url
 
+async def _fallback_preview_from_refetch(
+    job_id: str,
+    clip_index: int,
+    user_id: str,
+    reel_row: Optional[Dict[str, Any]],
+    caption_row: Optional[Dict[str, Any]],
+) -> str:
     if reel_row:
         refreshed = _normalize_reel_row(await supabase_get_reel_by_job_clip(job_id, int(clip_index), user_id=user_id) or {})
         fallback_reel_thumb = str(refreshed.get("reel_thumbnail_url") or "")
@@ -1381,8 +1437,41 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
         fallback_caption_thumb = str(refreshed_caption.get("caption_thumbnail_url") or "")
         if fallback_caption_thumb and not _is_probably_video_url(fallback_caption_thumb):
             return fallback_caption_thumb
-
     return ""
+
+
+async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: str) -> str:
+    if not is_supabase_configured() or not user_id:
+        return ""
+
+    bucket = os.environ.get("AWS_S3_BUCKET", "")
+    if not bucket:
+        return ""
+
+    reel_row, caption_row = await _fetch_reel_and_caption_rows_for_preview(job_id, clip_index, user_id)
+
+    existing = _existing_preview_thumbnail_from_rows(reel_row, caption_row)
+    if existing:
+        return existing
+
+    clip_data = await _clip_data_from_job_metadata(job_id, clip_index)
+    deduped_candidates = _build_preview_source_candidates(reel_row, caption_row, clip_data)
+    local_video_path, downloaded_video_path = _resolve_local_video_path_for_preview(deduped_candidates, job_id)
+
+    if not local_video_path or not os.path.exists(local_video_path):
+        return ""
+
+    thumb_local = _generate_reel_thumbnail_from_video(local_video_path, OUTPUT_DIR, job_id, int(clip_index))
+    if not thumb_local or not os.path.exists(thumb_local):
+        return ""
+
+    preview_url = await _generate_and_upload_preview_thumbnail(
+        thumb_local, downloaded_video_path, bucket, job_id, clip_index, user_id, reel_row, caption_row,
+    )
+    if preview_url:
+        return preview_url
+
+    return await _fallback_preview_from_refetch(job_id, clip_index, user_id, reel_row, caption_row)
 
 
 def _job_uses_remote_source(job_data: Optional[Dict[str, Any]]) -> bool:
@@ -1395,7 +1484,7 @@ def _job_uses_remote_source(job_data: Optional[Dict[str, Any]]) -> bool:
     return source_type == "url"
 
 
-def _collect_reel_job_output_snapshot(job_id: str, output_dir: str) -> Dict[str, Any]:
+def _load_reel_job_metadata_snapshot(job_id: str):
     metadata_path = _resolve_job_metadata_path(job_id)
     metadata: Dict[str, Any] = {}
     shorts: List[Dict[str, Any]] = []
@@ -1412,45 +1501,69 @@ def _collect_reel_job_output_snapshot(job_id: str, output_dir: str) -> Dict[str,
         cost_analysis = metadata.get("cost_analysis")
         base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, "")
 
+    return metadata_path, shorts, cost_analysis, base_name
+
+
+def _ready_clip_entries_from_shorts(base_name: str, shorts: List[Dict[str, Any]], output_dir: str) -> List[Dict[str, Any]]:
     ready_entries: List[Dict[str, Any]] = []
-    if base_name and shorts:
-        for index, clip in enumerate(shorts, start=1):
-            clip_filename = f"{base_name}_clip_{index}.mp4"
-            clip_path = os.path.join(output_dir, clip_filename)
-            if not os.path.exists(clip_path) or os.path.getsize(clip_path) <= 0:
-                continue
-            ready_entries.append(
-                {
-                    "filename": clip_filename,
-                    "path": clip_path,
-                    "size_bytes": int(os.path.getsize(clip_path) or 0),
-                    "clip": dict(clip or {}),
-                }
-            )
-
-    if not ready_entries and os.path.isdir(output_dir):
-        fallback_files = sorted(
-            file_name
-            for file_name in os.listdir(output_dir)
-            if file_name.endswith(".mp4") and not file_name.startswith("temp_")
+    if not (base_name and shorts):
+        return ready_entries
+    for index, clip in enumerate(shorts, start=1):
+        clip_filename = f"{base_name}_clip_{index}.mp4"
+        clip_path = os.path.join(output_dir, clip_filename)
+        if not os.path.exists(clip_path) or os.path.getsize(clip_path) <= 0:
+            continue
+        ready_entries.append(
+            {
+                "filename": clip_filename,
+                "path": clip_path,
+                "size_bytes": int(os.path.getsize(clip_path) or 0),
+                "clip": dict(clip or {}),
+            }
         )
-        for file_name in fallback_files:
-            clip_path = os.path.join(output_dir, file_name)
-            ready_entries.append(
-                {
-                    "filename": file_name,
-                    "path": clip_path,
-                    "size_bytes": int(os.path.getsize(clip_path) or 0),
-                    "clip": {},
-                }
-            )
+    return ready_entries
 
+
+def _ready_clip_entries_fallback_scan(output_dir: str) -> List[Dict[str, Any]]:
+    ready_entries: List[Dict[str, Any]] = []
+    if not os.path.isdir(output_dir):
+        return ready_entries
+    fallback_files = sorted(
+        file_name
+        for file_name in os.listdir(output_dir)
+        if file_name.endswith(".mp4") and not file_name.startswith("temp_")
+    )
+    for file_name in fallback_files:
+        clip_path = os.path.join(output_dir, file_name)
+        ready_entries.append(
+            {
+                "filename": file_name,
+                "path": clip_path,
+                "size_bytes": int(os.path.getsize(clip_path) or 0),
+                "clip": {},
+            }
+        )
+    return ready_entries
+
+
+def _partial_clips_from_ready_entries(job_id: str, ready_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     partial_clips: List[Dict[str, Any]] = []
     for idx, entry in enumerate(ready_entries, start=1):
         clip_payload = dict(entry.get("clip") or {})
         clip_payload["video_url"] = f"/videos/{job_id}/{entry['filename']}"
         clip_payload.setdefault("title", f"Clip {idx}")
         partial_clips.append(clip_payload)
+    return partial_clips
+
+
+def _collect_reel_job_output_snapshot(job_id: str, output_dir: str) -> Dict[str, Any]:
+    metadata_path, shorts, cost_analysis, base_name = _load_reel_job_metadata_snapshot(job_id)
+
+    ready_entries = _ready_clip_entries_from_shorts(base_name, shorts, output_dir)
+    if not ready_entries:
+        ready_entries = _ready_clip_entries_fallback_scan(output_dir)
+
+    partial_clips = _partial_clips_from_ready_entries(job_id, ready_entries)
 
     expected_clips = len(shorts) if shorts else len(ready_entries)
     total_size_bytes = sum(int(entry.get("size_bytes") or 0) for entry in ready_entries)
@@ -1509,6 +1622,47 @@ def _estimate_reel_job_consumption(
     }
 
 
+async def _settle_partial_reel_job_billing(
+    job_id: str,
+    user_id: Optional[str],
+    job_data: Optional[Dict[str, Any]],
+    fail_result: Dict[str, Any],
+    consumption: Dict[str, Any],
+) -> bool:
+    debit_applied = False
+    reserved_credits = float((job_data or {}).get("reel_required_credits") or 0.0)
+    # Settle on any terminal (non-retryable) failure whenever there's a
+    # partial charge to bill OR a reservation to refund -- otherwise a job
+    # that fails before any billable progress (actual_credit == 0) would
+    # never release its reservation back to the user.
+    if not fail_result.get("retry") and user_id and (consumption["actual_credit"] > 0 or reserved_credits > 0):
+        try:
+            debit_applied = await reel_job_manager.debit_credits_for_job(
+                job_id=job_id,
+                user_id=user_id,
+                credits=consumption["actual_credit"],
+                storage_delta=0.0,
+                operation_type="generation_reel",
+                reserved_credits=reserved_credits,
+            )
+        except Exception as billing_error:
+            jobs[job_id]["logs"].append(f"Partial billing failed: {billing_error}")
+    return debit_applied
+
+
+async def _mark_reel_job_project_failed(job_data: Optional[Dict[str, Any]], user_id: Optional[str]) -> None:
+    if not (is_supabase_configured() and job_data):
+        return
+    project_id = job_data.get("project_id")
+    if not project_id:
+        return
+    try:
+        await supabase_update_project_status(project_id, "failed", user_id=user_id)
+        logger.info(f"Project {project_id} marked as failed")
+    except Exception as e:
+        logger.warning(f"Failed to update project status to failed: {str(e)}")
+
+
 async def _finalize_failed_reel_job(
     *,
     job_id: str,
@@ -1553,24 +1707,7 @@ async def _finalize_failed_reel_job(
         cost_breakdown=consumption["cost_breakdown"],
     )
 
-    debit_applied = False
-    reserved_credits = float((job_data or {}).get("reel_required_credits") or 0.0)
-    # Settle on any terminal (non-retryable) failure whenever there's a
-    # partial charge to bill OR a reservation to refund -- otherwise a job
-    # that fails before any billable progress (actual_credit == 0) would
-    # never release its reservation back to the user.
-    if not fail_result.get("retry") and user_id and (consumption["actual_credit"] > 0 or reserved_credits > 0):
-        try:
-            debit_applied = await reel_job_manager.debit_credits_for_job(
-                job_id=job_id,
-                user_id=user_id,
-                credits=consumption["actual_credit"],
-                storage_delta=0.0,
-                operation_type="generation_reel",
-                reserved_credits=reserved_credits,
-            )
-        except Exception as billing_error:
-            jobs[job_id]["logs"].append(f"Partial billing failed: {billing_error}")
+    debit_applied = await _settle_partial_reel_job_billing(job_id, user_id, job_data, fail_result, consumption)
 
     result_data["billing"]["debit_applied"] = bool(debit_applied)
     await supabase_update_job_record(
@@ -1585,15 +1722,7 @@ async def _finalize_failed_reel_job(
         jobs[job_id]["result"] = result_data
     jobs[job_id]["status"] = fail_result.get("status") or "failed"
 
-    # Update project status to failed if associated with a project
-    if is_supabase_configured() and job_data:
-        project_id = job_data.get("project_id")
-        if project_id:
-            try:
-                await supabase_update_project_status(project_id, "failed", user_id=user_id)
-                logger.info(f"Project {project_id} marked as failed")
-            except Exception as e:
-                logger.warning(f"Failed to update project status to failed: {str(e)}")
+    await _mark_reel_job_project_failed(job_data, user_id)
 
     return fail_result
 
@@ -1679,6 +1808,105 @@ def _normalize_reel_row(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _upload_reel_clip_thumbnail(clip: Dict[str, Any], clip_path: str, output_dir: str, job_id: str, clip_index: int, user_id: str, bucket: str) -> str:
+    source_thumbnail = _generate_reel_thumbnail_from_video(clip_path, output_dir, job_id, clip_index)
+    generated_thumbnail_locally = bool(source_thumbnail)
+    if not source_thumbnail:
+        source_thumbnail = clip.get("thumbnail_url") or ""
+
+    print("🖼️ Uploading thumbnail for clip", clip_index + 1, "from source:", source_thumbnail)
+
+    thumbnail_s3_key = ""
+    if source_thumbnail and os.path.exists(source_thumbnail):
+        thumbnail_s3_key = f"reels/{user_id}/{job_id}/thumbnail_{clip_index}.jpg"
+        uploaded_thumb = upload_file_to_s3(source_thumbnail, bucket, thumbnail_s3_key)
+        if not uploaded_thumb:
+            raise RuntimeError(f"Failed to upload thumbnail to S3: {thumbnail_s3_key}")
+
+    if generated_thumbnail_locally and source_thumbnail:
+        try:
+            if os.path.exists(source_thumbnail):
+                os.remove(source_thumbnail)
+        except Exception:
+            pass
+
+    return thumbnail_s3_key
+
+
+def _compute_clip_duration_seconds(clip: Dict[str, Any]) -> int:
+    duration = clip.get("duration")
+    if duration is not None:
+        return duration
+    try:
+        start = float(clip.get("start", 0) or 0)
+        end = float(clip.get("end", 0) or 0)
+        return max(0, int(round(end - start)))
+    except Exception:
+        return 0
+
+
+async def _build_reel_row_for_clip(
+    job_id: str,
+    user_id: str,
+    output_dir: str,
+    bucket: str,
+    base_name: str,
+    clip: Dict[str, Any],
+    i: int,
+    now_iso: str,
+    uses_youtube_source: bool,
+    project_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    clip_filename = f"{base_name}_clip_{i}.mp4"
+    clip_path = os.path.join(output_dir, clip_filename)
+    if not os.path.exists(clip_path):
+        return None
+
+    s3_key = f"reels/{user_id}/{job_id}/{clip_filename}"
+    uploaded = upload_file_to_s3(clip_path, bucket, s3_key)
+    if not uploaded:
+        raise RuntimeError(f"Failed to upload clip to S3: {clip_filename}")
+    clip_size_bytes = int(os.path.getsize(clip_path) or 0)
+
+    media_url = _reel_media_url_from_s3_key(s3_key)
+    thumbnail_s3_key = _upload_reel_clip_thumbnail(clip, clip_path, output_dir, job_id, i - 1, user_id, bucket)
+
+    duration = _compute_clip_duration_seconds(clip)
+    reel_cost_breakdown = _estimate_reel_cost_breakdown(
+        duration_seconds=float(duration or 0),
+        size_bytes=float(clip_size_bytes),
+        uses_youtube_source=uses_youtube_source,
+    )
+
+    reel_row = {
+        "reel_url": media_url,
+        "reel_thumbnail_url": thumbnail_s3_key if thumbnail_s3_key else "",
+        "reel_title": clip.get("title") or clip.get("video_title_for_youtube_short") or f"Clip {i}",
+        "reel_description": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or "",
+        "reel_duration": max(30, int(duration or 0)),
+        "reel_created_at": now_iso,
+        "reel_updated_at": now_iso,
+        "reel_user_id": user_id,
+        "reel_status": "termine",
+        "reel_size_bytes": clip_size_bytes,
+        "reel_s3_key": s3_key,
+        "reel_job_id": job_id,
+        "reel_clip_index": i - 1,
+        "billing_details": _build_billing_details(
+            "generation_reel",
+            reel_cost_breakdown,
+            actual_storage_gb=_bytes_to_gb(clip_size_bytes),
+            extra={"clip_index": i - 1},
+        ),
+        "total_cost_usd": 0,
+    }
+
+    if project_id:
+        reel_row["project_id"] = project_id
+
+    return reel_row
+
+
 async def _persist_reels_for_job(
     job_id: str,
     user_id: str,
@@ -1702,86 +1930,11 @@ async def _persist_reels_for_job(
     rows: List[Dict[str, Any]] = []
 
     for i, clip in enumerate(clips, start=1):
-        clip_filename = f"{base_name}_clip_{i}.mp4"
-        clip_path = os.path.join(output_dir, clip_filename)
-        if not os.path.exists(clip_path):
-            continue
-
-        s3_key = f"reels/{user_id}/{job_id}/{clip_filename}"
-        uploaded = upload_file_to_s3(clip_path, bucket, s3_key)
-        if not uploaded:
-            raise RuntimeError(f"Failed to upload clip to S3: {clip_filename}")
-        clip_size_bytes = int(os.path.getsize(clip_path) or 0)
-
-        media_url = _reel_media_url_from_s3_key(s3_key)
-        source_thumbnail = _generate_reel_thumbnail_from_video(
-            clip_path,
-            output_dir,
-            job_id,
-            i - 1,
+        reel_row = await _build_reel_row_for_clip(
+            job_id, user_id, output_dir, bucket, base_name, clip, i, now_iso, uses_youtube_source, project_id,
         )
-        generated_thumbnail_locally = bool(source_thumbnail)
-        if not source_thumbnail:
-            source_thumbnail = clip.get("thumbnail_url") or ""
-
-        print("🖼️ Uploading thumbnail for clip", i, "from source:", source_thumbnail)
-
-        thumbnail_s3_key = ""
-        if source_thumbnail and os.path.exists(source_thumbnail):
-            thumbnail_s3_key = f"reels/{user_id}/{job_id}/thumbnail_{i - 1}.jpg"
-            uploaded_thumb = upload_file_to_s3(source_thumbnail, bucket, thumbnail_s3_key)
-            if not uploaded_thumb:
-                raise RuntimeError(f"Failed to upload thumbnail to S3: {thumbnail_s3_key}")
-
-        duration = clip.get("duration")
-        if duration is None:
-            try:
-                start = float(clip.get("start", 0) or 0)
-                end = float(clip.get("end", 0) or 0)
-                duration = max(0, int(round(end - start)))
-            except Exception:
-                duration = 0
-        reel_cost_breakdown = _estimate_reel_cost_breakdown(
-            duration_seconds=float(duration or 0),
-            size_bytes=float(clip_size_bytes),
-            uses_youtube_source=uses_youtube_source,
-        )
-
-        reel_row = {
-            "reel_url": media_url,
-            "reel_thumbnail_url": thumbnail_s3_key if thumbnail_s3_key else "",
-            "reel_title": clip.get("title") or clip.get("video_title_for_youtube_short") or f"Clip {i}",
-            "reel_description": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or "",
-            "reel_duration": max(30, int(duration or 0)),
-            "reel_created_at": now_iso,
-            "reel_updated_at": now_iso,
-            "reel_user_id": user_id,
-            "reel_status": "termine",
-            "reel_size_bytes": clip_size_bytes,
-            "reel_s3_key": s3_key,
-            "reel_job_id": job_id,
-            "reel_clip_index": i - 1,
-            "billing_details": _build_billing_details(
-                "generation_reel",
-                reel_cost_breakdown,
-                actual_storage_gb=_bytes_to_gb(clip_size_bytes),
-                extra={"clip_index": i - 1},
-            ),
-            "total_cost_usd": 0,
-        }
-
-        # Add project_id if provided
-        if project_id:
-            reel_row["project_id"] = project_id
-
-        rows.append(reel_row)
-
-        if generated_thumbnail_locally and source_thumbnail:
-            try:
-                if os.path.exists(source_thumbnail):
-                    os.remove(source_thumbnail)
-            except Exception:
-                pass
+        if reel_row:
+            rows.append(reel_row)
 
     if not rows:
         raise RuntimeError("No generated clips were available for Supabase persistence")
@@ -1796,6 +1949,40 @@ async def _persist_reels_for_job(
             logger.warning(f"Failed to increment project output count: {str(e)}")
 
     return [_normalize_reel_row(row) for row in saved_rows]
+
+def _is_job_expired(jdata: Dict[str, Any], now: float) -> bool:
+    return bool(
+        jdata.get("status") in ("completed", "failed")
+        and jdata.get("output_dir")
+        and os.path.isdir(jdata["output_dir"])
+        and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
+    )
+
+
+def _cleanup_expired_in_memory_jobs(now: float) -> None:
+    # Cleanup in-memory API jobs (artifacts are cleaned by batched output sweeps).
+    expired_api_jobs = [jid for jid, jdata in jobs.items() if _is_job_expired(jdata, now)]
+    for jid in expired_api_jobs:
+        del jobs[jid]
+
+    # Cleanup SaaSShorts jobs from memory
+    try:
+        saas_expired = [jid for jid, jdata in saas_jobs.items() if _is_job_expired(jdata, now)]
+        for jid in saas_expired:
+            del saas_jobs[jid]
+    except NameError:
+        pass
+
+
+def _cleanup_expired_uploads(now: float) -> None:
+    for filename in os.listdir(UPLOAD_DIR):
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        try:
+            if now - os.path.getmtime(file_path) > JOB_RETENTION_SECONDS:
+                os.remove(file_path)
+        except Exception:
+            pass
+
 
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
@@ -1812,38 +1999,8 @@ async def cleanup_jobs():
                 print(f"🧹 Output sweep completed (removed {removed_count} entries).")
                 last_output_sweep = now
 
-            # Cleanup in-memory API jobs (artifacts are cleaned by batched output sweeps).
-            expired_api_jobs = [
-                jid for jid, jdata in jobs.items()
-                if jdata.get("status") in ("completed", "failed")
-                and jdata.get("output_dir")
-                and os.path.isdir(jdata["output_dir"])
-                and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
-            ]
-            for jid in expired_api_jobs:
-                del jobs[jid]
-
-            # Cleanup SaaSShorts jobs from memory
-            try:
-                saas_expired = [
-                    jid for jid, jdata in saas_jobs.items()
-                    if jdata.get("status") in ("completed", "failed")
-                    and jdata.get("output_dir")
-                    and os.path.isdir(jdata["output_dir"])
-                    and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
-                ]
-                for jid in saas_expired:
-                    del saas_jobs[jid]
-            except NameError:
-                pass
-
-            # Cleanup Uploads
-            for filename in os.listdir(UPLOAD_DIR):
-                file_path = os.path.join(UPLOAD_DIR, filename)
-                try:
-                    if now - os.path.getmtime(file_path) > JOB_RETENTION_SECONDS:
-                         os.remove(file_path)
-                except Exception: pass
+            _cleanup_expired_in_memory_jobs(now)
+            _cleanup_expired_uploads(now)
 
         except Exception as e:
             print(f"⚠️ Cleanup error: {e}")
