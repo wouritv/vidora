@@ -113,7 +113,7 @@ def test_normalize_subtitle_text_case_upper_and_lower(tmp_path):
 def test_burn_subtitles_builds_command_and_returns_true(monkeypatch):
     captured = {}
 
-    def fake_run(cmd, stdout=None, stderr=None):
+    def fake_run(cmd, stdout=None, stderr=None, **kwargs):
         captured["cmd"] = cmd
         class _Result:
             returncode = 0
@@ -130,7 +130,7 @@ def test_burn_subtitles_builds_command_and_returns_true(monkeypatch):
 
 
 def test_burn_subtitles_raises_on_ffmpeg_error(monkeypatch):
-    def fake_run(cmd, stdout=None, stderr=None):
+    def fake_run(cmd, stdout=None, stderr=None, **kwargs):
         class _Result:
             returncode = 1
             stderr = b"boom"

@@ -29,6 +29,7 @@ def _import_app_with_stubs(monkeypatch):
     """Import app with necessary mocks."""
     monkeypatch.setenv("SECRET_KEY", "unit-test-secret")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "unit-test-supabase-jwt-secret")
     _install_supabase_stubs(monkeypatch)
 
     python_multipart_mod = types.ModuleType("python_multipart")
@@ -102,6 +103,7 @@ def _import_app_with_stubs(monkeypatch):
         "set_user_data_balance", "deduct_user_credits", "insert_user_data_history",
         "get_user_data_history", "get_latest_user_paid_subscription",
         "update_souscription_row", "list_user_souscriptions", "update_job_record",
+        "count_active_jobs_for_user",
         "get_latest_job_record_by_project", "get_transcription_by_job_clip",
         "upsert_transcription", "update_transcription_translations_cache",
         "insert_style_edit_version", "list_style_edit_versions",
