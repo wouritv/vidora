@@ -976,7 +976,7 @@ def _build_ytdlp_opts(use_cookies: bool, job_cookies_path, proxy_session_id):
                 'player_skip': ['webpage', 'configs'],
                 'formats': ['missing_pot'],
             },
-            # NOSONAR(python:S5332): "pot-provider" only resolves on the
+            # Sonar false positive (S5332): "pot-provider" only resolves on the
             # internal Docker Compose network (see docker-compose.yml),
             # never exposed publicly -- TLS on that internal hop isn't the
             # control that matters here.
@@ -1258,7 +1258,6 @@ def _process_frames_to_temp_video(
     output_height,
     scene_boundaries,
     scene_strategies,
-    tracked_boxes_per_scene,
     cameraman,
     speaker_tracker,
     original_width,
@@ -1385,7 +1384,6 @@ def process_video_to_vertical(input_video, final_output_video):
         output_height,
         scene_boundaries,
         scene_strategies,
-        tracked_boxes_per_scene,
         cameraman,
         speaker_tracker,
         original_width,

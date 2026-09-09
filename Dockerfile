@@ -64,8 +64,11 @@ USER appuser
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # Copie du code en dernier : c'est le layer qui change le plus souvent,
-# le placer en fin de fichier maximise la réutilisation du cache pour tout le reste
-COPY --chown=appuser:appuser . .
+# le placer en fin de fichier maximise la réutilisation du cache pour tout le reste.
+# Sonar false positive (S6470): .dockerignore excludes cookies.txt/*.pem/*.key/
+# *.p12/*.pfx/*credentials*/*secret* (see that file) so this recursive copy
+# cannot pull secret material into the image.
+COPY --chown=appuser:appuser . .  # NOSONAR
 
 EXPOSE 8000
 

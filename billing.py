@@ -81,9 +81,9 @@ def estimate_reel_cost_usd(
     video_size_gb: float = 0.5,
     uses_youtube_download: bool = False,
     youtube_download_gb: float = 0.0,
-    uses_openai: bool = True,
+    uses_openai: bool = True,  # NOSONAR(S1172) kept for API/call-site stability across ~15 callers that already pass real per-job values; OpenAI/Gemini cost is intentionally billed from exact token usage at runtime instead (see below), not estimated here
     uses_assembly: bool = False,
-    uses_gemini: bool = False,
+    uses_gemini: bool = False,  # NOSONAR(S1172) see uses_openai above
 ) -> Dict[str, Any]:
     """Estimate the USD cost of a reel generation operation.
 
@@ -127,8 +127,8 @@ def estimate_caption_cost_usd(
     duration_minutes: float = 5.0,
     video_size_gb: float = 0.5,
     uses_assembly: bool = True,
-    uses_openai: bool = True,
-    uses_gemini: bool = False,
+    uses_openai: bool = True,  # NOSONAR(S1172) see estimate_reel_cost_usd above -- same rationale
+    uses_gemini: bool = False,  # NOSONAR(S1172) see estimate_reel_cost_usd above -- same rationale
 ) -> Dict[str, Any]:
     """Estimate the USD cost of a caption generation operation."""
     s3_usd = (

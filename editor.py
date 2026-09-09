@@ -325,7 +325,7 @@ class VideoEditor:
                 return str(int(round(rounded)))
             return f"{rounded:.3f}".rstrip("0").rstrip(".")
 
-        # NOSONAR(python:S8786): no nested/overlapping quantifiers here
+        # Sonar false positive (S8786): no nested/overlapping quantifiers here
         # (\d+ and \d{6,} match disjoint character positions separated by a
         # literal '.') -- not actually susceptible to catastrophic
         # backtracking despite the heuristic flag.

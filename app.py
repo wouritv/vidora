@@ -305,7 +305,7 @@ _background_tasks: set = set()
 
 def _spawn_background_task(coro) -> Optional["asyncio.Task"]:
     task = asyncio.create_task(coro)
-    if task is not None:  # real asyncio.create_task never returns None; defensive for test doubles
+    if task is not None:  # NOSONAR(S5727) real asyncio.create_task never returns None, but some tests monkeypatch it to return None to skip background dispatch -- this guard is what keeps that test double from crashing on .add_done_callback
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
     return task
@@ -506,7 +506,7 @@ def _verify_supabase_jwt(token: str) -> str:
     a signature (no alg-confusion between a public key and a shared secret).
     """
     try:
-        # NOSONAR(python:S5659): this only peeks at the `alg` header to pick
+        # Sonar false positive (S5659): this only peeks at the `alg` header to pick
         # which key to verify against below -- pyjwt.decode() a few lines
         # down always performs full signature verification (never called
         # with verify_signature=False), against a key matched exactly to
@@ -1968,7 +1968,7 @@ async def _close_proxy_stream(upstream, client):
         await client.aclose()
 
 
-@app.get("/api/media/proxy")
+@app.get("/api/media/proxy", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}})
 async def proxy_media(request: Request, url: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy remote media through the backend so browser-side Remotion can fetch it same-origin.
 
@@ -2032,7 +2032,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
 
     try:
-        # NOSONAR(python:S7487): this supervises the child process with
+        # Sonar false positive (S7487): this supervises the child process with
         # Popen + a non-blocking .poll()/.terminate() loop yielding via
         # `await asyncio.sleep(2)` between checks -- Popen's own spawn and
         # .poll()/.terminate() calls don't block the loop for any
@@ -2061,10 +2061,10 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
 
         # Async wait for process with incremental updates
         start_wait = time.time()
-        while process.poll() is None:
+        while process.poll() is None:  # NOSONAR(S7487) same rationale as the Popen() call above
             if execution_ctx and execution_ctx.get("preempt_requested"):
                 try:
-                    process.terminate()
+                    process.terminate()  # NOSONAR(S7487) same rationale as the Popen() call above
                 except Exception:
                     pass
             elif time.time() - start_wait > REEL_JOB_MAX_PROCESSING_SECONDS:
@@ -2076,7 +2076,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     f"Job exceeded max processing time ({REEL_JOB_MAX_PROCESSING_SECONDS}s); terminating."
                 )
                 try:
-                    process.terminate()
+                    process.terminate()  # NOSONAR(S7487) same rationale as the Popen() call above
                 except Exception:
                     pass
             await asyncio.sleep(2)
@@ -2091,7 +2091,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     # Use a lock or just robust read? json.load might fail if file is partial.
                     # Usually main.py writes it once at start (based on my review).
                     if os.path.getsize(target_json) > 0:
-                        # NOSONAR(python:S7493): a small, infrequent read
+                        # Sonar false positive (S7493): a small, infrequent read
                         # (this loop only reaches here once every 2s, see
                         # the `await asyncio.sleep(2)` a few lines up) --
                         # not worth the risk of converting to aiofiles here,
@@ -2149,7 +2149,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     json_files = glob.glob(os.path.join(output_dir, _METADATA_JSON_GLOB))
             if json_files:
                 target_json = json_files[0]
-                # NOSONAR(python:S7493): same reasoning as the read above in
+                # Sonar false positive (S7493): same reasoning as the read above in
                 # this function -- small one-off read, and this function's
                 # tests patch builtins.open directly (which aiofiles, having
                 # captured its own reference to the real open() at import
@@ -2360,7 +2360,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     pass
 
 
-async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):  # NOSONAR(python:S1172): kept for call-site symmetry with run_job, which does use it for preemption/timeout control -- both are dispatched identically from run_job_wrapper
+async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):  # NOSONAR(S1172) kept for call-site symmetry with run_job, which does use it for preemption/timeout control -- both are dispatched identically from run_job_wrapper
     user_id = job_data.get("user_id")
     output_dir = str(job_data.get("output_dir") or "")
     input_path = str(job_data.get("input_path") or "")
@@ -3366,7 +3366,7 @@ def _parse_bad_take_candidates_response(raw_text: str) -> List[Dict[str, Any]]:
     if not text:
         return []
 
-    # NOSONAR(python:S8786): the lazy `.*?` here isn't nested inside another
+    # Sonar false positive (S8786): the lazy `.*?` here isn't nested inside another
     # quantifier (the classic (a+)+ backtracking blowup shape) -- worst
     # case is linear in len(text), and text is a bounded LLM response, not
     # attacker-controlled input.
@@ -3594,7 +3594,7 @@ def _apply_auto_edit_media_steps(
 
     return current_path, steps, bad_take_candidates, cleanup_paths
 
-@app.post("/api/process", responses={400: {"description": "Bad Request"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}})
+@app.post("/api/process", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
 async def process_endpoint(
     request: Request,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -3860,7 +3860,7 @@ async def process_endpoint(
         "status": "queued"
     }
 
-@app.get("/api/status/{job_id}", responses={404: {"description": "Not Found"}})
+@app.get("/api/status/{job_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def get_status(job_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     # Best effort read of in-memory runtime state, but the *authorization*
     # scope always comes from the verified caller identity above -- never
@@ -3947,7 +3947,6 @@ async def get_status(job_id: str, user_id: Annotated[str, Depends(get_user_id_he
 from editor import VideoEditor
 from subtitles import generate_srt, burn_subtitles, generate_srt_from_video, SubtitleStyleOptions
 from hooks import add_hook_to_video
-#from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
 
 class EditRequest(BaseModel):
@@ -4076,7 +4075,7 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 
     return local_path, filename
 
-@app.post("/api/edit", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/edit", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
 async def edit_clip(
     request: Request,
     req: EditRequest,
@@ -4259,7 +4258,7 @@ async def edit_clip(
     except Exception as e:
         raise _generic_error("Edit Error", e)
 
-@app.post("/api/captions/process", responses={400: {"description": "Bad Request"}, 413: {"description": "Payload Too Large"}})
+@app.post("/api/captions/process", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
 async def process_caption_endpoint(
     file: Annotated[UploadFile, File()],
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -4428,7 +4427,7 @@ class SubtitleRequest(BaseModel):
     input_url: Optional[str] = None
 
 
-@app.get("/api/clip/{job_id}/{clip_index}/transcript", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.get("/api/clip/{job_id}/{clip_index}/transcript", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     """Return word-level captions for a specific clip, formatted for Remotion."""
     # Do not depend on in-memory jobs: Reels page must keep working after restarts.
@@ -4487,7 +4486,7 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     }
 
 
-@app.get("/api/clip/{job_id}/{clip_index}/preview-image/ensure")
+@app.get("/api/clip/{job_id}/{clip_index}/preview-image/ensure", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}})
 async def ensure_clip_preview_image(
     job_id: str,
     clip_index: int,
@@ -4500,7 +4499,7 @@ async def ensure_clip_preview_image(
     }
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/persist", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
+@app.post("/api/reels/{job_id}/{clip_index}/captions/persist", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def persist_captioned_reel(
     job_id: str,
     clip_index: int,
@@ -4582,7 +4581,7 @@ async def persist_captioned_reel(
     output_path = os.path.join(output_dir, output_filename)
 
     def _copy_upload_to_path():
-        with open(output_path, "wb") as handle:  # NOSONAR(python:S7493): runs off the event loop via asyncio.to_thread below
+        with open(output_path, "wb") as handle:  # NOSONAR(S7493) runs off the event loop via asyncio.to_thread below
             shutil.copyfileobj(file.file, handle)
 
     try:
@@ -4794,7 +4793,7 @@ async def persist_captioned_reel(
 
 
 # --- Remotion Render Proxy ---
-# NOSONAR(python:S5332): default only reachable over the internal Docker
+# Sonar false positive (S5332): default only reachable over the internal Docker
 # Compose network (service name "renderer", never exposed publicly -- see
 # docker-compose.yml, bound to 127.0.0.1 for local debugging only), and
 # every request to it carries RENDER_SERVICE_API_KEY. TLS on that internal
@@ -4810,7 +4809,7 @@ if not RENDER_SERVICE_API_KEY and not _is_pytest_runtime():
 _RENDER_SERVICE_HEADERS = {"x-internal-api-key": RENDER_SERVICE_API_KEY or "unit-test-render-key"}
 
 
-@app.post("/api/render")
+@app.post("/api/render", responses={401: {"description": "Unauthorized"}})
 async def proxy_render(request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy render requests to the Node.js Remotion render service.
 
@@ -4834,7 +4833,7 @@ async def proxy_render(request: Request, user_id: Annotated[str, Depends(get_use
             detail="Le service de rendu est indisponible.",
         )
 
-@app.get("/api/render/{render_id}")
+@app.get("/api/render/{render_id}", responses={401: {"description": "Unauthorized"}})
 async def proxy_render_status(render_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Proxy render status polling to the Node.js Remotion render service."""
     import httpx
@@ -4858,7 +4857,7 @@ class EffectsGenerateRequest(BaseModel):
     input_url: Optional[str] = None
     auto_edit_options: Optional[Dict[str, bool]] = None
 
-@app.post("/api/effects/generate", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
+@app.post("/api/effects/generate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def generate_effects_config(
     req: EffectsGenerateRequest,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -4952,7 +4951,7 @@ async def generate_effects_config(
                 try:
                     meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, _METADATA_JSON_GLOB))
                     if meta_files:
-                        # NOSONAR(python:S7493): false positive -- this is
+                        # Sonar false positive (S7493): this is
                         # inside a nested sync def (see below, run via
                         # loop.run_in_executor in a thread pool), not
                         # actually executing on the event loop despite
@@ -4994,7 +4993,7 @@ async def generate_effects_config(
         raise _generic_error("Effects Generation Error", e)
 
 
-@app.post("/api/subtitle", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/subtitle", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
 async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _require_job_ownership(req.job_id, user_id)
     subtitle_required_credits = 0.0
@@ -5082,7 +5081,7 @@ async def add_subtitles(req: SubtitleRequest, user_id: Annotated[str, Depends(ge
         words_per_line = max(2, min(8, int(req.words_per_line or 4)))
 
         if is_dubbed:
-            print(f"🎙️ Dubbed video detected, transcribing audio for subtitles...")
+            print("🎙️ Dubbed video detected, transcribing audio for subtitles...")
             def run_transcribe_srt():
                 return generate_srt_from_video(input_path, srt_path, max_words_per_line=words_per_line)
 
@@ -5259,7 +5258,7 @@ class HookRequest(BaseModel):
     size: Optional[str] = "M" # S, M, L
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/reset", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/reels/{job_id}/{clip_index}/captions/reset", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def reset_caption_style_history(
     job_id: str,
     clip_index: int,
@@ -5307,7 +5306,7 @@ async def reset_caption_style_history(
     }
 
 
-@app.get("/api/reels/{job_id}/{clip_index}/style-history", responses={404: {"description": "Not Found"}})
+@app.get("/api/reels/{job_id}/{clip_index}/style-history", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def get_caption_style_history_debug(
     job_id: str,
     clip_index: int,
@@ -5358,7 +5357,7 @@ async def get_caption_style_history_debug(
         },
     }
 
-@app.post("/api/hook", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/hook", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
 async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _require_job_ownership(req.job_id, user_id)
     hook_required_credits = 0.0
@@ -5831,7 +5830,7 @@ def get_languages():
     }
 
 
-@app.post("/api/translate/captions", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
+@app.post("/api/translate/captions", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_captions(req: TranslateRequest, request: Request):
     """Translate reel transcript into Remotion-friendly timed word captions."""
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
@@ -5935,7 +5934,7 @@ async def translate_captions(req: TranslateRequest, request: Request):
     }
 
 
-@app.post("/api/translate", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
+@app.post("/api/translate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_clip(req: TranslateRequest, request: Request):
     """
     Translate subtitles only (OpenAI first, Gemini fallback),
@@ -6114,7 +6113,7 @@ class SocialPostRequest(BaseModel):
 import httpx
 
 
-def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:  # NOSONAR(python:S1172)
+def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:  # NOSONAR(S1172)
     # Security: `explicit_user_id` comes from a client-supplied request body
     # field and must never override the verified identity resolved from the
     # authenticated session (`user_id`, from get_user_id_header). Otherwise a
@@ -6176,7 +6175,7 @@ async def _resolve_clip_for_social_post(job_id: str, clip_index: int) -> Dict[st
 
 def _resolve_public_video_url(video_ref: str, request: Request, job_id: str) -> str:
     ref = (video_ref or "").strip()
-    # NOSONAR(python:S5332): this detects whether `ref` is already an
+    # Sonar false positive (S5332): this detects whether `ref` is already an
     # absolute URL (any scheme) so it isn't re-prefixed with a base URL --
     # it never issues a request with a hardcoded http:// endpoint.
     if ref.startswith((_HTTPS_SCHEME_PREFIX, "http://")):  # NOSONAR
@@ -6192,7 +6191,7 @@ def _resolve_public_video_url(video_ref: str, request: Request, job_id: str) -> 
     base_url = SOCIAL_BASE_URL or str(request.base_url).rstrip("/")
     return f"{base_url}/videos/{job_id}/{ref}"
 
-@app.post("/api/social/post", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/social/post", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: Annotated[str, Depends(get_user_id_header)]):
     selected_platforms = _resolve_social_platforms(req.platforms)
     user_id = _resolve_request_user_id(req.user_id, user_id_header)
@@ -6249,7 +6248,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
             if not account:
                 raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
 
-            # NOSONAR(python:S5332): validates the URL is absolute (any
+            # Sonar false positive (S5332): validates the URL is absolute (any
             # scheme) before submitting it to the platform API -- not a
             # hardcoded http:// request of our own.
             if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith((_HTTPS_SCHEME_PREFIX, "http://")):  # NOSONAR
@@ -6289,7 +6288,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
 
 # --- Thumbnail Studio Endpoints ---
 
-@app.post("/api/thumbnail/upload", responses={400: {"description": "Bad Request"}})
+@app.post("/api/thumbnail/upload", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}})
 async def thumbnail_upload(
     user_id: Annotated[str, Depends(get_user_id_header)],
     file: Annotated[Optional[UploadFile], File()] = None,
@@ -6361,7 +6360,7 @@ async def thumbnail_upload(
     return {"session_id": session_id}
 
 
-@app.post("/api/thumbnail/analyze", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
+@app.post("/api/thumbnail/analyze", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_analyze(
     request: Request,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -6385,7 +6384,7 @@ async def thumbnail_analyze(
         # Wait for background Whisper to complete
         transcript_event = session.get("transcript_event")
         if transcript_event:
-            print(f"⏳ [Thumbnail] Waiting for background Whisper to finish...")
+            print("⏳ [Thumbnail] Waiting for background Whisper to finish...")
             await transcript_event.wait()
 
         if session.get("transcript_error"):
@@ -6450,7 +6449,7 @@ class ThumbnailTitlesRequest(BaseModel):
     message: Optional[str] = None
     title: Optional[str] = None
 
-@app.post("/api/thumbnail/titles", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/thumbnail/titles", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def thumbnail_titles(
     req: ThumbnailTitlesRequest,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -6507,7 +6506,7 @@ async def thumbnail_titles(
         raise _generic_error("Thumbnail Titles Error", e)
 
 
-@app.post("/api/thumbnail/generate", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
+@app.post("/api/thumbnail/generate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_generate(
     request: Request,
     session_id: Annotated[str, Form()],
@@ -6588,7 +6587,7 @@ class ThumbnailDescribeRequest(BaseModel):
     session_id: str
     title: str
 
-@app.post("/api/thumbnail/describe", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/thumbnail/describe", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def thumbnail_describe(
     req: ThumbnailDescribeRequest,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -6625,7 +6624,7 @@ async def thumbnail_describe(
         raise _generic_error("Thumbnail Describe Error", e)
 
 
-@app.post("/api/thumbnail/publish", responses={404: {"description": "Not Found"}})
+@app.post("/api/thumbnail/publish", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 def thumbnail_publish(
     background_tasks: BackgroundTasks,
     session_id: Annotated[str, Form()],
@@ -6733,7 +6732,7 @@ def _frontend_base_url(request: Request) -> str:
     return "http://localhost:5175"
 
 
-@app.post("/api/stripe/checkout-session", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
+@app.post("/api/stripe/checkout-session", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def create_stripe_checkout_session(
     request: Request,
     payload: StripeCheckoutRequest,
@@ -7030,7 +7029,7 @@ async def list_abonnements():
     return {"plans": plans}
 
 
-@app.get("/api/souscription")
+@app.get("/api/souscription", responses={401: {"description": "Unauthorized"}})
 async def get_current_souscription(
     request: Request,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -7054,7 +7053,7 @@ async def get_current_souscription(
     return subscription
 
 
-@app.get("/api/souscription/history", responses={503: {"description": "Service Unavailable"}})
+@app.get("/api/souscription/history", responses={401: {"description": "Unauthorized"}, 503: {"description": "Service Unavailable"}})
 async def get_souscription_history(
     request: Request,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -7092,7 +7091,7 @@ async def get_souscription_history(
 # User credits & history
 # ---------------------------------------------------------------------------
 
-@app.get("/api/user/credits", responses={503: {"description": "Service Unavailable"}})
+@app.get("/api/user/credits", responses={401: {"description": "Unauthorized"}, 503: {"description": "Service Unavailable"}})
 async def get_user_credits(request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Return the credit/storage balance for the authenticated user."""
     if not is_supabase_configured():
@@ -7153,7 +7152,7 @@ async def get_user_credits(request: Request, user_id: Annotated[str, Depends(get
     }
 
 
-@app.get("/api/user/history", responses={503: {"description": "Service Unavailable"}})
+@app.get("/api/user/history", responses={401: {"description": "Unauthorized"}, 503: {"description": "Service Unavailable"}})
 async def get_user_history(
     request: Request,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -7179,7 +7178,7 @@ class BuyCreditsRequest(BaseModel):
     cancel_url: Optional[str] = None
 
 
-@app.post("/api/stripe/buy-credits", responses={400: {"description": "Bad Request"}, 403: {"description": "Forbidden"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
+@app.post("/api/stripe/buy-credits", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 403: {"description": "Forbidden"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def buy_credits_checkout(
     request: Request,
     payload: BuyCreditsRequest,
@@ -7253,7 +7252,7 @@ async def buy_credits_checkout(
     }
 
 
-@app.get("/api/captions", responses={503: {"description": "Service Unavailable"}})
+@app.get("/api/captions", responses={401: {"description": "Unauthorized"}, 503: {"description": "Service Unavailable"}})
 async def list_captions(
     user_id: Annotated[str, Depends(get_user_id_header)],
     page: Annotated[int, Query(ge=1)] = 1,
@@ -7273,7 +7272,7 @@ async def list_captions(
     }
 
 
-@app.get("/api/captions/{caption_id}/media-url", responses={404: {"description": "Not Found"}})
+@app.get("/api/captions/{caption_id}/media-url", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def caption_media_url(caption_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_caption(caption_id, user_id)
     if not row:
@@ -7282,7 +7281,7 @@ async def caption_media_url(caption_id: str, user_id: Annotated[str, Depends(get
     return {"media_url": item.get("media_url")}
 
 
-@app.delete("/api/captions/{caption_id}", responses={404: {"description": "Not Found"}})
+@app.delete("/api/captions/{caption_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def delete_caption(caption_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     deleted = await supabase_soft_delete_caption(caption_id, user_id)
     if not deleted:
@@ -7290,7 +7289,7 @@ async def delete_caption(caption_id: str, user_id: Annotated[str, Depends(get_us
     return {"deleted": True}
 
 
-@app.post("/api/captions/{caption_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/captions/{caption_id}/share", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
 
@@ -7406,7 +7405,7 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: Ann
 # Projects Endpoints
 # --------------------------------------------------------------------------
 
-@app.get("/api/projects", responses={503: {"description": "Service Unavailable"}})
+@app.get("/api/projects", responses={401: {"description": "Unauthorized"}, 503: {"description": "Service Unavailable"}})
 async def list_projects(
 	user_id: Annotated[str, Depends(get_user_id_header)],
 	page: Annotated[int, Query(ge=1)] = 1,
@@ -7434,7 +7433,7 @@ async def list_projects(
 	}
 
 
-@app.get("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+@app.get("/api/projects/{project_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_endpoint(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7451,7 +7450,7 @@ class ProjectUpdateRequest(BaseModel):
 	description: Optional[str] = None
 
 
-@app.put("/api/projects/{project_id}", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+@app.put("/api/projects/{project_id}", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def update_project_endpoint(
 	project_id: str,
 	payload: ProjectUpdateRequest,
@@ -7477,7 +7476,7 @@ async def update_project_endpoint(
 	return project
 
 
-@app.delete("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
+@app.delete("/api/projects/{project_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
 async def delete_project_endpoint(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7573,7 +7572,7 @@ async def delete_project_endpoint(project_id: str, user_id: Annotated[str, Depen
 	return {"deleted": True}
 
 
-@app.get("/api/projects/{project_id}/source-url", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
+@app.get("/api/projects/{project_id}/source-url", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
 async def get_project_source_url(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7596,7 +7595,7 @@ async def get_project_source_url(project_id: str, user_id: Annotated[str, Depend
 	return {"source_url": source_url}
 
 
-@app.get("/api/projects/{project_id}/job", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+@app.get("/api/projects/{project_id}/job", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_job(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
   if not is_supabase_configured():
     raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7622,7 +7621,7 @@ async def get_project_job(project_id: str, user_id: Annotated[str, Depends(get_u
   }
 
 
-@app.get("/api/projects/{project_id}/reels", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+@app.get("/api/projects/{project_id}/reels", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_reels(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	"""Get all reels for a specific project."""
 	if not is_supabase_configured():
@@ -7641,7 +7640,7 @@ async def get_project_reels(project_id: str, user_id: Annotated[str, Depends(get
 	}
 
 
-@app.get("/api/projects/{project_id}/captions", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+@app.get("/api/projects/{project_id}/captions", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_captions(project_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
 	"""Get all captions for a specific project."""
 	if not is_supabase_configured():
@@ -7671,7 +7670,7 @@ async def list_reels(user_id: Annotated[str, Depends(get_user_id_header)], page:
     }
 
 
-@app.get("/api/reels/{reel_id}/media-url", responses={404: {"description": "Not Found"}})
+@app.get("/api/reels/{reel_id}/media-url", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def reel_media_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -7680,7 +7679,7 @@ async def reel_media_url(reel_id: str, user_id: Annotated[str, Depends(get_user_
     return {"media_url": item.get("media_url")}
 
 
-@app.get("/api/reels/{reel_id}/thumbnail-url", responses={404: {"description": "Not Found"}})
+@app.get("/api/reels/{reel_id}/thumbnail-url", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def reel_thumbnail_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -7689,7 +7688,7 @@ async def reel_thumbnail_url(reel_id: str, user_id: Annotated[str, Depends(get_u
     return {"thumbnail_url": item.get("reel_thumbnail_url")}
 
 
-@app.get("/api/reels/{reel_id}/preview-url", responses={404: {"description": "Not Found"}})
+@app.get("/api/reels/{reel_id}/preview-url", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def reel_preview_url(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -7698,7 +7697,7 @@ async def reel_preview_url(reel_id: str, user_id: Annotated[str, Depends(get_use
     return {"preview_url": item.get("reel_preview_url")}
 
 
-@app.delete("/api/reels/{reel_id}", responses={404: {"description": "Not Found"}})
+@app.delete("/api/reels/{reel_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def delete_reel(reel_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     deleted = await supabase_soft_delete_reel(reel_id, user_id)
     if not deleted:
@@ -7706,7 +7705,7 @@ async def delete_reel(reel_id: str, user_id: Annotated[str, Depends(get_user_id_
     return {"deleted": True}
 
 
-@app.post("/api/reels/{reel_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
+@app.post("/api/reels/{reel_id}/share", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     await _assert_user_has_required_credits(user_id, 0.0)
 
@@ -8239,7 +8238,7 @@ async def _update_publish_job_status(
     await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).update(payload).eq("id", publish_job_id).execute()
 
 
-@app.get("/api/social/accounts")
+@app.get("/api/social/accounts", responses={401: {"description": "Unauthorized"}})
 async def list_social_accounts(user_id: Annotated[str, Depends(get_user_id_header)]):
     client = await supabase_get_client()
     response = (
@@ -8260,7 +8259,7 @@ async def list_social_accounts(user_id: Annotated[str, Depends(get_user_id_heade
     return {"accounts": accounts}
 
 
-@app.delete("/api/social/accounts/{platform}", responses={404: {"description": "Not Found"}})
+@app.delete("/api/social/accounts/{platform}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def disconnect_social_account(platform: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     key = (platform or "").strip().lower()
     if key not in PLATFORM_CONFIG:
@@ -8276,7 +8275,7 @@ async def disconnect_social_account(platform: str, user_id: Annotated[str, Depen
     return {"deleted": bool(response.data)}
 
 
-@app.get("/api/social/publish-jobs", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
+@app.get("/api/social/publish-jobs", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 500: {"description": "Internal Server Error"}})
 async def list_publish_jobs(
     user_id: Annotated[str, Depends(get_user_id_header)],
     page: Annotated[int, Query(ge=1)] = 1,
@@ -8382,7 +8381,7 @@ async def list_publish_jobs(
         raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
 
 
-@app.delete("/api/social/publish-jobs/{publish_job_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
+@app.delete("/api/social/publish-jobs/{publish_job_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def delete_publish_job(
     publish_job_id: str,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -8412,7 +8411,7 @@ class SelectFacebookPageRequest(BaseModel):
     page_id: str
 
 
-@app.post("/api/auth/facebook/select-page", responses={400: {"description": "Bad Request"}})
+@app.post("/api/auth/facebook/select-page", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def select_facebook_page(payload: SelectFacebookPageRequest):
     try:
         data = _page_selection_serializer.loads(payload.selection_token, max_age=_PAGE_SELECTION_TTL_SECONDS)
@@ -8453,7 +8452,7 @@ async def select_facebook_page(payload: SelectFacebookPageRequest):
     }
 
 
-@app.get("/api/auth/{platform}/connect")
+@app.get("/api/auth/{platform}/connect", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 def connect(platform: str, request: Request, user_id: Annotated[str, Depends(get_user_id_header)]):
     # Security: `user_id` MUST come from the verified session (get_user_id_header),
     # never from an unauthenticated query parameter -- otherwise an attacker
@@ -8501,7 +8500,7 @@ def connect(platform: str, request: Request, user_id: Annotated[str, Depends(get
     return {"auth_url": auth_url}
 
 
-@app.get("/api/auth/{platform}/callback")
+@app.get("/api/auth/{platform}/callback", responses={404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def callback(platform: str, code: Optional[str] = None, state: str = "", error: Optional[str] = None):
     key = (platform or "").strip().lower()
 
@@ -8685,7 +8684,7 @@ def _require_platform_user_id(account: Dict[str, Any], platform: str) -> str:
     return user_id
 
 
-async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> None:  # NOSONAR(python:S7503): kept async for uniformity across its ~18 `await`ed call sites (a mechanical de-asyncing of every one is not worth the churn/error risk for a function this trivially fast either way)
+async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> None:  # NOSONAR(S7503) kept async for uniformity across its ~18 `await`ed call sites (a mechanical de-asyncing of every one is not worth the churn/error risk for a function this trivially fast either way)
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -8778,7 +8777,7 @@ async def _validated_stream_request(client: "httpx.AsyncClient", method: str, ur
     raise HTTPException(status_code=400, detail="Too many redirects while fetching video_url")
 
 
-async def _download_to_file(url: str, dest_path: str, timeout: float = 180.0) -> None:
+async def _download_to_file(url: str, dest_path: str, timeout: float = 180.0) -> None:  # NOSONAR(S7483) this `timeout` configures httpx.AsyncClient's own connect/read/write/pool timeouts below, the idiomatic httpx pattern -- it isn't an asyncio.wait_for()-style overall deadline, so wrapping the call in asyncio.timeout() instead would change timeout semantics, not just syntax
     _validate_download_url(url)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         response = await _validated_stream_request(client, "GET", url)

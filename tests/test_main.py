@@ -1353,7 +1353,7 @@ def test_process_frame_pipeline_and_audio_merge_helpers(monkeypatch):
     monkeypatch.setattr(main.cv2, "VideoCapture", lambda _p: _Cap(), raising=False)
     monkeypatch.setattr(main, "tqdm", _Tqdm)
     monkeypatch.setattr(main, "_render_frame_by_strategy", lambda *args, **kwargs: frame)
-    code, stderr = main._process_frames_to_temp_video("in.mp4", "tmp.mp4", 25, 10, 20, [(0, 2)], ["TRACK"], [[]], cameraman, speaker_tracker, 20)
+    code, stderr = main._process_frames_to_temp_video("in.mp4", "tmp.mp4", 25, 10, 20, [(0, 2)], ["TRACK"], cameraman, speaker_tracker, 20)
     assert code == 0
     assert stderr == ""
 
@@ -1773,7 +1773,7 @@ def test_cookie_render_and_process_frame_extra_branches(monkeypatch):
     monkeypatch.setattr(main.cv2, "VideoCapture", lambda _p: _Cap(), raising=False)
     monkeypatch.setattr(main, "tqdm", _Tqdm)
     monkeypatch.setattr(main, "_render_frame_by_strategy", lambda *a, **k: frame)
-    code, stderr = main._process_frames_to_temp_video("in.mp4", "tmp.mp4", 25, 10, 20, [(0, 1)], ["TRACK"], [[]], cam, spk, 10)
+    code, stderr = main._process_frames_to_temp_video("in.mp4", "tmp.mp4", 25, 10, 20, [(0, 1)], ["TRACK"], cam, spk, 10)
     assert code == 0
     assert stderr == "stderr"
 
