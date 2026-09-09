@@ -3903,18 +3903,7 @@ def _apply_auto_edit_media_steps(
     return current_path, steps, bad_take_candidates, cleanup_paths
 
 @app.post("/api/process", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
-async def process_endpoint(
-    request: Request,
-    user_id: Annotated[str, Depends(get_user_id_header)],
-    file: Annotated[Optional[UploadFile], File()] = None,
-    url: Annotated[Optional[str], Form()] = None,
-    acknowledged: Annotated[Optional[str], Form()] = None,
-):
-    # Determine API Key: Use .env configuration (GEMINI_API_KEY or OPENAI_API_KEY as fallback)
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=400, detail=_GEMINI_API_KEY_NOT_CONFIGURED)
-
+async def _resolve_process_endpoint_url_and_ack(request: Request, url: Optional[str], acknowledged: Optional[str]):
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
 
     # Handle JSON body manually for URL payload
@@ -3924,25 +3913,25 @@ async def process_endpoint(
         url = body.get("url")
         ack_flag = bool(body.get("acknowledged"))
 
+    return url, ack_flag
+
+
+def _validate_process_endpoint_inputs(url: Optional[str], file: Optional[UploadFile], ack_flag: bool) -> None:
     if not url and not file:
         raise HTTPException(status_code=400, detail="Must provide URL or File")
-
     if not ack_flag:
         raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
-
     if url and DISABLE_YOUTUBE_URL:
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
 
-    await _enforce_job_concurrency_limit(user_id)
-    await _assert_user_has_storage_headroom(user_id)
 
-    # Capture attestation context for legal record (IP + timestamp + UA)
+def _build_process_endpoint_attestation(request: Request, url: Optional[str]) -> Dict[str, Any]:
     client_ip = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
         client_ip = fwd.split(",")[0].strip()
     user_agent = request.headers.get("user-agent", "")
-    attestation = {
+    return {
         "acknowledged": True,
         "ip": client_ip,
         "user_agent": user_agent,
@@ -3950,168 +3939,171 @@ async def process_endpoint(
         "source": "url" if url else "file",
     }
 
-    job_priority = await _resolve_user_job_priority(user_id)
 
-    job_id = str(uuid.uuid4())
-    job_output_dir = os.path.join(OUTPUT_DIR, job_id)
-    os.makedirs(job_output_dir, exist_ok=True)
+async def _prepare_process_job_from_url(url: str, user_id: str, job_id: str, job_output_dir: str, cmd: List[str]) -> Dict[str, Any]:
+    remote_meta = _probe_remote_video_metadata(url)
+    duration_seconds = float(remote_meta.get("duration_seconds") or 0.0)
+    source_duration_seconds = duration_seconds
+    size_bytes = float(remote_meta.get("size_bytes") or 0.0)
+    is_youtube_source = _is_youtube_url(url)
+    project_source_type = "youtube" if is_youtube_source else "url"
+    youtube_title = str(remote_meta.get("title") or "").strip()
+    fallback_name = _sanitize_input_filename(url) or "Video distante"
+    project_name = youtube_title or fallback_name
+    project_description = _build_short_project_summary(str(remote_meta.get("description") or ""), fallback_title=project_name)
+
     input_path = None
-    reel_required_credits = 0.0
-    source_duration_seconds = 0.0
-    source_type = "url" if url else "file"
-    if url:
-        source_value = url
-    elif file:
-        source_value = file.filename
-    else:
-        source_value = ""
-    project_source_type = "upload"
-    project_name = "Reel Project"
-    project_description = ""
-    remote_meta: Dict[str, Any] = {}
-
-    # Prepare Command
-    cmd = ["python", "-u", "main.py"] # -u for unbuffered
-    env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
-
-    if url:
-        remote_meta = _probe_remote_video_metadata(url)
-        duration_seconds = float(remote_meta.get("duration_seconds") or 0.0)
+    # If remote metadata is incomplete, download once and validate from local probe.
+    # Keep YouTube URLs in -u mode; direct HTTP fetch of watch pages returns HTML.
+    if (duration_seconds <= 0.0 or size_bytes <= 0.0) and not is_youtube_source:
+        input_path, _ = _download_input_url_to_job_dir(url, job_id)
+        duration_seconds = _probe_local_video_duration_seconds(input_path)
         source_duration_seconds = duration_seconds
-        size_bytes = float(remote_meta.get("size_bytes") or 0.0)
-        is_youtube_source = _is_youtube_url(url)
-        project_source_type = "youtube" if is_youtube_source else "url"
-        youtube_title = str(remote_meta.get("title") or "").strip()
-        fallback_name = _sanitize_input_filename(url) or "Video distante"
-        project_name = youtube_title or fallback_name
-        project_description = _build_short_project_summary(str(remote_meta.get("description") or ""), fallback_title=project_name)
-
-        # If remote metadata is incomplete, download once and validate from local probe.
-        # Keep YouTube URLs in -u mode; direct HTTP fetch of watch pages returns HTML.
-        if duration_seconds <= 0.0 or size_bytes <= 0.0:
-            if not is_youtube_source:
-                input_path, _ = _download_input_url_to_job_dir(url, job_id)
-                duration_seconds = _probe_local_video_duration_seconds(input_path)
-                source_duration_seconds = duration_seconds
-                try:
-                    size_bytes = float(os.path.getsize(input_path))
-                except Exception:
-                    size_bytes = 0.0
-
-        _validate_reel_source_constraints(
-            duration_seconds=duration_seconds,
-            size_bytes=size_bytes,
-            source_label="url",
-        )
-        reel_required_credits = _estimate_reel_required_credits(
-            duration_seconds=duration_seconds,
-            size_bytes=size_bytes,
-            uses_youtube_source=True,
-        )
         try:
-            await _reserve_job_credits(user_id, reel_required_credits)
-        except HTTPException:
-            if input_path and os.path.exists(input_path):
-                os.remove(input_path)
-            shutil.rmtree(job_output_dir, ignore_errors=True)
-            raise
+            size_bytes = float(os.path.getsize(input_path))
+        except Exception:
+            size_bytes = 0.0
 
-        if input_path:
-            cmd.extend(["-i", input_path])
-        else:
-            cmd.extend(["-u", url])
-    else:
-        _validate_video_extension(file.filename if file else "", context_label="reel")
-        project_source_type = "upload"
-        project_name = _project_name_from_uploaded_file(file.filename if file else "")
-        project_description = _build_short_project_summary(project_name, fallback_title=project_name)
+    _validate_reel_source_constraints(
+        duration_seconds=duration_seconds,
+        size_bytes=size_bytes,
+        source_label="url",
+    )
+    reel_required_credits = _estimate_reel_required_credits(
+        duration_seconds=duration_seconds,
+        size_bytes=size_bytes,
+        uses_youtube_source=True,
+    )
+    try:
+        await _reserve_job_credits(user_id, reel_required_credits)
+    except HTTPException:
+        if input_path and os.path.exists(input_path):
+            os.remove(input_path)
+        shutil.rmtree(job_output_dir, ignore_errors=True)
+        raise
 
-        # Save uploaded file with size limit check
-        # Security: sanitize the client-supplied filename to a safe basename
-        # before joining it into a filesystem path (path traversal guard).
-        safe_upload_name = _sanitize_input_filename(file.filename) or _DEFAULT_UPLOAD_FILENAME
-        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{safe_upload_name}")
-
-        # Read file in chunks to check size
-        size = 0
-        limit_bytes = max(0.0, REEL_MAX_STORAGE_GB) * (1024 ** 3)
-
-        async with aiofiles.open(input_path, "wb") as buffer:
-            while content := await file.read(1024 * 1024): # Read 1MB chunks
-                size += len(content)
-                if limit_bytes > 0 and size > limit_bytes:
-                    os.remove(input_path)
-                    shutil.rmtree(job_output_dir)
-                    raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {REEL_MAX_STORAGE_GB:.2f} Go")
-                await buffer.write(content)
-
-        local_duration = _probe_local_video_duration_seconds(input_path)
-        source_duration_seconds = float(local_duration or 0.0)
-        _validate_reel_source_constraints(
-            duration_seconds=local_duration,
-            size_bytes=float(size),
-            source_label="fichier",
-        )
-        reel_required_credits = _estimate_reel_required_credits(
-            duration_seconds=local_duration,
-            size_bytes=float(size),
-            uses_youtube_source=False,
-        )
-        try:
-            await _reserve_job_credits(user_id, reel_required_credits)
-        except HTTPException:
-            if os.path.exists(input_path):
-                os.remove(input_path)
-            shutil.rmtree(job_output_dir, ignore_errors=True)
-            raise
-
+    if input_path:
         cmd.extend(["-i", input_path])
+    else:
+        cmd.extend(["-u", url])
 
-    cmd.extend(["-o", job_output_dir])
+    return {
+        "input_path": input_path,
+        "reel_required_credits": reel_required_credits,
+        "source_duration_seconds": source_duration_seconds,
+        "project_source_type": project_source_type,
+        "project_name": project_name,
+        "project_description": project_description,
+        "remote_meta": remote_meta,
+    }
 
-    print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 
-    # Create a project to group all generated content
-    project = None
-    if is_supabase_configured():
-        try:
-            # Determine source duration and size
-            source_size_bytes = 0
-            source_duration_seconds = None
+async def _prepare_process_job_from_file(file: UploadFile, user_id: str, job_id: str, job_output_dir: str, cmd: List[str]) -> Dict[str, Any]:
+    _validate_video_extension(file.filename if file else "", context_label="reel")
+    project_source_type = "upload"
+    project_name = _project_name_from_uploaded_file(file.filename if file else "")
+    project_description = _build_short_project_summary(project_name, fallback_title=project_name)
 
-            if input_path and os.path.exists(input_path):
-                source_size_bytes = os.path.getsize(input_path)
-                source_duration_seconds = _probe_local_video_duration_seconds(input_path)
-            else:
-                source_size_bytes = int(float(remote_meta.get("size_bytes") or 0.0))
-                source_duration_seconds = float(remote_meta.get("duration_seconds") or 0.0) or None
+    # Save uploaded file with size limit check
+    # Security: sanitize the client-supplied filename to a safe basename
+    # before joining it into a filesystem path (path traversal guard).
+    safe_upload_name = _sanitize_input_filename(file.filename) or _DEFAULT_UPLOAD_FILENAME
+    input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{safe_upload_name}")
 
-            # Upload source to S3 with project-based key structure
-            bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
-            source_basename = os.path.basename(input_path) if input_path else (_sanitize_input_filename(source_value) or "video.mp4")
-            s3_source_key = f"projects/{job_id}/source/{source_basename}"
+    # Read file in chunks to check size
+    size = 0
+    limit_bytes = max(0.0, REEL_MAX_STORAGE_GB) * (1024 ** 3)
 
-            if input_path and os.path.exists(input_path):
-                upload_file_to_s3(input_path, bucket_name, s3_source_key)
+    async with aiofiles.open(input_path, "wb") as buffer:
+        while content := await file.read(1024 * 1024): # Read 1MB chunks
+            size += len(content)
+            if limit_bytes > 0 and size > limit_bytes:
+                os.remove(input_path)
+                shutil.rmtree(job_output_dir)
+                raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {REEL_MAX_STORAGE_GB:.2f} Go")
+            await buffer.write(content)
 
-            # Create project record
-            project = await supabase_create_project(
-                user_id=user_id,
-                name=project_name,
-                description=project_description,
-                project_type="reel",
-                source_type=project_source_type,
-                source_s3_key=s3_source_key,
-                source_size=source_size_bytes,
-                source_url=url if url else None,
-                source_duration=int(source_duration_seconds) if source_duration_seconds else None,
-                status="processing",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create project for job {job_id}: {str(e)}")
+    local_duration = _probe_local_video_duration_seconds(input_path)
+    source_duration_seconds = float(local_duration or 0.0)
+    _validate_reel_source_constraints(
+        duration_seconds=local_duration,
+        size_bytes=float(size),
+        source_label="fichier",
+    )
+    reel_required_credits = _estimate_reel_required_credits(
+        duration_seconds=local_duration,
+        size_bytes=float(size),
+        uses_youtube_source=False,
+    )
+    try:
+        await _reserve_job_credits(user_id, reel_required_credits)
+    except HTTPException:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        shutil.rmtree(job_output_dir, ignore_errors=True)
+        raise
 
-    # Enqueue job runtime payload.
+    cmd.extend(["-i", input_path])
+
+    return {
+        "input_path": input_path,
+        "reel_required_credits": reel_required_credits,
+        "source_duration_seconds": source_duration_seconds,
+        "project_source_type": project_source_type,
+        "project_name": project_name,
+        "project_description": project_description,
+        "remote_meta": {},
+    }
+
+
+async def _create_process_endpoint_project(
+    user_id: str, job_id: str, job_prep: Dict[str, Any], source_value: str, url: Optional[str], source_duration_seconds: float,
+):
+    if not is_supabase_configured():
+        return None, source_duration_seconds
+    input_path = job_prep["input_path"]
+    remote_meta = job_prep["remote_meta"]
+    try:
+        # Determine source duration and size
+        if input_path and os.path.exists(input_path):
+            source_size_bytes = os.path.getsize(input_path)
+            source_duration_seconds = _probe_local_video_duration_seconds(input_path)
+        else:
+            source_size_bytes = int(float(remote_meta.get("size_bytes") or 0.0))
+            source_duration_seconds = float(remote_meta.get("duration_seconds") or 0.0) or None
+
+        # Upload source to S3 with project-based key structure
+        bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+        source_basename = os.path.basename(input_path) if input_path else (_sanitize_input_filename(source_value) or "video.mp4")
+        s3_source_key = f"projects/{job_id}/source/{source_basename}"
+
+        if input_path and os.path.exists(input_path):
+            upload_file_to_s3(input_path, bucket_name, s3_source_key)
+
+        # Create project record
+        project = await supabase_create_project(
+            user_id=user_id,
+            name=job_prep["project_name"],
+            description=job_prep["project_description"],
+            project_type="reel",
+            source_type=job_prep["project_source_type"],
+            source_s3_key=s3_source_key,
+            source_size=source_size_bytes,
+            source_url=url if url else None,
+            source_duration=int(source_duration_seconds) if source_duration_seconds else None,
+            status="processing",
+        )
+        return project, source_duration_seconds
+    except Exception as e:
+        logger.warning(f"Failed to create project for job {job_id}: {str(e)}")
+        return None, source_duration_seconds
+
+
+async def _enqueue_process_endpoint_job(
+    job_id: str, user_id: str, cmd: List[str], env: Dict[str, str], job_output_dir: str,
+    source_type: str, source_value: str, attestation: Dict[str, Any], job_priority: int,
+    input_path: Optional[str], reel_required_credits: float, project, source_duration_seconds: float,
+) -> None:
     runtime_payload = {
         'status': 'queued',
         'logs': [f"Job {job_id} queued."],
@@ -4161,6 +4153,62 @@ async def process_endpoint(
     await ReelProcessingPipeline(reel_job_manager, job_id).queued()
 
     await enqueue_reel_job(job_id, priority=job_priority)
+
+
+async def process_endpoint(
+    request: Request,
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    file: Annotated[Optional[UploadFile], File()] = None,
+    url: Annotated[Optional[str], Form()] = None,
+    acknowledged: Annotated[Optional[str], Form()] = None,
+):
+    # Determine API Key: Use .env configuration (GEMINI_API_KEY or OPENAI_API_KEY as fallback)
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=400, detail=_GEMINI_API_KEY_NOT_CONFIGURED)
+
+    url, ack_flag = await _resolve_process_endpoint_url_and_ack(request, url, acknowledged)
+    _validate_process_endpoint_inputs(url, file, ack_flag)
+
+    await _enforce_job_concurrency_limit(user_id)
+    await _assert_user_has_storage_headroom(user_id)
+
+    attestation = _build_process_endpoint_attestation(request, url)
+    job_priority = await _resolve_user_job_priority(user_id)
+
+    job_id = str(uuid.uuid4())
+    job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(job_output_dir, exist_ok=True)
+    source_type = "url" if url else "file"
+    if url:
+        source_value = url
+    elif file:
+        source_value = file.filename
+    else:
+        source_value = ""
+
+    # Prepare Command
+    cmd = ["python", "-u", "main.py"] # -u for unbuffered
+    env = os.environ.copy()
+    env["GEMINI_API_KEY"] = api_key # Override with key from request
+
+    if url:
+        job_prep = await _prepare_process_job_from_url(url, user_id, job_id, job_output_dir, cmd)
+    else:
+        job_prep = await _prepare_process_job_from_file(file, user_id, job_id, job_output_dir, cmd)
+
+    cmd.extend(["-o", job_output_dir])
+
+    print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
+
+    project, source_duration_seconds = await _create_process_endpoint_project(
+        user_id, job_id, job_prep, source_value, url, job_prep["source_duration_seconds"],
+    )
+
+    await _enqueue_process_endpoint_job(
+        job_id, user_id, cmd, env, job_output_dir, source_type, source_value, attestation, job_priority,
+        job_prep["input_path"], job_prep["reel_required_credits"], project, source_duration_seconds,
+    )
 
     return {
         "job_id": job_id,
