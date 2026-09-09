@@ -3353,6 +3353,37 @@ def _normalize_auto_edit_options(raw_options: Optional[Dict[str, Any]]) -> Dict[
     return {key: bool(raw.get(key)) for key in _AUTO_EDIT_KEYS}
 
 
+def _apply_segment_option_defaults(segment: Dict[str, Any], options: Dict[str, Any]) -> Dict[str, Any]:
+    seg = dict(segment or {})
+    if not options["zoom"]:
+        seg["zoom"] = 1.0
+        seg["zoomCenterX"] = 0.5
+        seg["zoomCenterY"] = 0.5
+    if not options["brightness"]:
+        seg["brightness"] = 1.0
+    if not options["contrast"]:
+        seg["contrast"] = 1.0
+    if not options["saturation"]:
+        seg["saturate"] = 1.0
+    return seg
+
+
+_AUTO_EDIT_APPLIED_STEP_LABELS = [
+    ("removeBadTakes", "remove_bad_takes:queued"),
+    ("removeSilence", "remove_silence:queued"),
+    ("cleanAudio", "clean_audio:queued"),
+    ("zoom", "zoom:enabled"),
+    ("brightness", "brightness:enabled"),
+    ("saturation", "saturation:enabled"),
+    ("contrast", "contrast:enabled"),
+    ("speed", "speed:queued"),
+]
+
+
+def _collect_applied_auto_edit_steps(options: Dict[str, Any]) -> List[str]:
+    return [label for option_key, label in _AUTO_EDIT_APPLIED_STEP_LABELS if options[option_key]]
+
+
 def _apply_auto_edit_options_to_effects_config(
     effects_config: Optional[Dict[str, Any]],
     raw_options: Optional[Dict[str, Any]],
@@ -3360,41 +3391,9 @@ def _apply_auto_edit_options_to_effects_config(
     config = dict(effects_config or {})
     options = _normalize_auto_edit_options(raw_options)
     segments = config.get("segments") or []
-    processed_segments: List[Dict[str, Any]] = []
 
-    for segment in segments:
-        seg = dict(segment or {})
-        if not options["zoom"]:
-            seg["zoom"] = 1.0
-            seg["zoomCenterX"] = 0.5
-            seg["zoomCenterY"] = 0.5
-        if not options["brightness"]:
-            seg["brightness"] = 1.0
-        if not options["contrast"]:
-            seg["contrast"] = 1.0
-        if not options["saturation"]:
-            seg["saturate"] = 1.0
-        processed_segments.append(seg)
-
-    config["segments"] = processed_segments
-
-    applied_steps: List[str] = []
-    if options["removeBadTakes"]:
-        applied_steps.append("remove_bad_takes:queued")
-    if options["removeSilence"]:
-        applied_steps.append("remove_silence:queued")
-    if options["cleanAudio"]:
-        applied_steps.append("clean_audio:queued")
-    if options["zoom"]:
-        applied_steps.append("zoom:enabled")
-    if options["brightness"]:
-        applied_steps.append("brightness:enabled")
-    if options["saturation"]:
-        applied_steps.append("saturation:enabled")
-    if options["contrast"]:
-        applied_steps.append("contrast:enabled")
-    if options["speed"]:
-        applied_steps.append("speed:queued")
+    config["segments"] = [_apply_segment_option_defaults(segment, options) for segment in segments]
+    applied_steps = _collect_applied_auto_edit_steps(options)
 
     return config, applied_steps
 
@@ -3599,42 +3598,44 @@ def _apply_clean_audio_transform(input_path: str, output_path: str) -> None:
     _run_ffmpeg_command(cmd)
 
 
+_BAD_TAKE_FILLER_WORDS = {"um", "uh", "euh", "hmm", "erm", "hum", "ah"}
+
+
+def _bad_take_candidate_from_segment(segment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    start = float(segment.get("start", 0.0) or 0.0)
+    end = float(segment.get("end", 0.0) or 0.0)
+    if end <= start:
+        return None
+    text = str(segment.get("text") or "").strip().lower()
+    words = [w for w in re.findall(r"[a-zA-Z']+", text) if w]
+    if not words:
+        return None
+
+    filler_count = sum(1 for w in words if w in _BAD_TAKE_FILLER_WORDS)
+    repeated = any(words[i] == words[i + 1] for i in range(len(words) - 1))
+    reason = ""
+    confidence = 0.0
+    if filler_count >= 2:
+        reason = "filler hesitation"
+        confidence = min(0.98, 0.7 + 0.08 * filler_count)
+    elif repeated and len(words) >= 4:
+        reason = "repeated phrase"
+        confidence = 0.82
+
+    if not reason:
+        return None
+    return {
+        "start": max(0.0, start - 0.06),
+        "end": max(start, end + 0.06),
+        "reason": reason,
+        "confidence": round(confidence, 2),
+    }
+
+
 def _detect_bad_take_candidates_heuristic(transcript: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     segments = (transcript or {}).get("segments") or []
-    filler_words = {"um", "uh", "euh", "hmm", "erm", "hum", "ah"}
-    candidates: List[Dict[str, Any]] = []
-    for segment in segments:
-        start = float(segment.get("start", 0.0) or 0.0)
-        end = float(segment.get("end", 0.0) or 0.0)
-        if end <= start:
-            continue
-        text = str(segment.get("text") or "").strip().lower()
-        words = [w for w in re.findall(r"[a-zA-Z']+", text) if w]
-        if not words:
-            continue
-
-        filler_count = sum(1 for w in words if w in filler_words)
-        repeated = any(words[i] == words[i + 1] for i in range(len(words) - 1))
-        reason = ""
-        confidence = 0.0
-        if filler_count >= 2:
-            reason = "filler hesitation"
-            confidence = min(0.98, 0.7 + 0.08 * filler_count)
-        elif repeated and len(words) >= 4:
-            reason = "repeated phrase"
-            confidence = 0.82
-
-        if reason:
-            candidates.append(
-                {
-                    "start": max(0.0, start - 0.06),
-                    "end": max(start, end + 0.06),
-                    "reason": reason,
-                    "confidence": round(confidence, 2),
-                }
-            )
-
-    return candidates
+    candidates = [_bad_take_candidate_from_segment(segment) for segment in segments]
+    return [c for c in candidates if c]
 
 
 def _parse_bad_take_candidates_response(raw_text: str) -> List[Dict[str, Any]]:
@@ -3665,42 +3666,36 @@ def _parse_bad_take_candidates_response(raw_text: str) -> List[Dict[str, Any]]:
     return []
 
 
-def _sanitize_bad_take_candidates(
-    raw_candidates: List[Dict[str, Any]],
-    max_end: float,
-) -> List[Dict[str, Any]]:
-    normalized: List[Dict[str, Any]] = []
-    for candidate in raw_candidates:
-        try:
-            start = float(candidate.get("start", 0.0) or 0.0)
-            end = float(candidate.get("end", 0.0) or 0.0)
-        except Exception:
-            continue
+def _sanitize_single_bad_take_candidate(candidate: Dict[str, Any], max_end: float) -> Optional[Dict[str, Any]]:
+    try:
+        start = float(candidate.get("start", 0.0) or 0.0)
+        end = float(candidate.get("end", 0.0) or 0.0)
+    except Exception:
+        return None
 
-        start = max(0.0, min(start, max_end))
-        end = max(0.0, min(end, max_end))
-        if end <= start:
-            continue
+    start = max(0.0, min(start, max_end))
+    end = max(0.0, min(end, max_end))
+    if end <= start:
+        return None
 
-        reason = str(candidate.get("reason") or "bad take").strip() or "bad take"
-        reason = reason[:120]
+    reason = str(candidate.get("reason") or "bad take").strip() or "bad take"
+    reason = reason[:120]
 
-        try:
-            confidence = float(candidate.get("confidence", 0.5) or 0.5)
-        except Exception:
-            confidence = 0.5
-        confidence = max(0.0, min(confidence, 1.0))
+    try:
+        confidence = float(candidate.get("confidence", 0.5) or 0.5)
+    except Exception:
+        confidence = 0.5
+    confidence = max(0.0, min(confidence, 1.0))
 
-        normalized.append(
-            {
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "reason": reason,
-                "confidence": round(confidence, 2),
-            }
-        )
+    return {
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "reason": reason,
+        "confidence": round(confidence, 2),
+    }
 
-    normalized.sort(key=lambda x: (x["start"], x["end"]))
+
+def _merge_overlapping_bad_take_candidates(normalized: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
     for item in normalized:
         if not merged:
@@ -3715,18 +3710,17 @@ def _sanitize_bad_take_candidates(
     return merged
 
 
-def _detect_bad_take_candidates_ai(transcript: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if os.environ.get("AUTO_EDIT_BAD_TAKE_AI", "true").strip().lower() in {"0", "false", "no"}:
-        return []
+def _sanitize_bad_take_candidates(
+    raw_candidates: List[Dict[str, Any]],
+    max_end: float,
+) -> List[Dict[str, Any]]:
+    sanitized = [_sanitize_single_bad_take_candidate(c, max_end) for c in raw_candidates]
+    normalized = [c for c in sanitized if c]
+    normalized.sort(key=lambda x: (x["start"], x["end"]))
+    return _merge_overlapping_bad_take_candidates(normalized)
 
-    segments = (transcript or {}).get("segments") or []
-    if not segments:
-        return []
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key or api_key == "your_openai_key":
-        return []
-
+def _build_compact_segments_for_bad_take_ai(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     compact_segments: List[Dict[str, Any]] = []
     for idx, segment in enumerate(segments[:140]):
         start = float(segment.get("start", 0.0) or 0.0)
@@ -3742,11 +3736,10 @@ def _detect_bad_take_candidates_ai(transcript: Optional[Dict[str, Any]]) -> List
                 "text": text,
             }
         )
+    return compact_segments
 
-    if not compact_segments:
-        return []
 
-    max_end = max(float(seg.get("end", 0.0) or 0.0) for seg in compact_segments)
+def _call_openai_for_bad_takes(compact_segments: List[Dict[str, Any]], api_key: str, max_end: float) -> List[Dict[str, Any]]:
     prompt_payload = {
         "instructions": (
             "Detect low-quality speaking takes using multi-segment context. "
@@ -3794,11 +3787,78 @@ def _detect_bad_take_candidates_ai(transcript: Optional[Dict[str, Any]]) -> List
         return []
 
 
+def _detect_bad_take_candidates_ai(transcript: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if os.environ.get("AUTO_EDIT_BAD_TAKE_AI", "true").strip().lower() in {"0", "false", "no"}:
+        return []
+
+    segments = (transcript or {}).get("segments") or []
+    if not segments:
+        return []
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key or api_key == "your_openai_key":
+        return []
+
+    compact_segments = _build_compact_segments_for_bad_take_ai(segments)
+    if not compact_segments:
+        return []
+
+    max_end = max(float(seg.get("end", 0.0) or 0.0) for seg in compact_segments)
+    return _call_openai_for_bad_takes(compact_segments, api_key, max_end)
+
+
 def _detect_bad_take_candidates(transcript: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ai_candidates = _detect_bad_take_candidates_ai(transcript)
     if ai_candidates:
         return ai_candidates
     return _detect_bad_take_candidates_heuristic(transcript)
+
+
+def _auto_edit_temp_path(job_id: str, name: str) -> str:
+    return os.path.join(OUTPUT_DIR, job_id, f"auto_{name}_{uuid.uuid4().hex[:8]}.mp4")
+
+
+def _apply_remove_bad_takes_step(current_path: str, job_id: str, transcript: Optional[Dict[str, Any]], total_duration: float, cleanup_paths: List[str]):
+    bad_take_candidates = _detect_bad_take_candidates(transcript)
+    cut_ranges = [(float(c["start"]), float(c["end"])) for c in bad_take_candidates]
+    keep_ranges = _invert_cut_ranges(total_duration, cut_ranges)
+    if keep_ranges and len(keep_ranges) > 1:
+        next_path = _auto_edit_temp_path(job_id, "bad_takes")
+        _render_keep_ranges(current_path, next_path, keep_ranges)
+        cleanup_paths.append(next_path)
+        current_path = next_path
+        total_duration = _probe_local_video_duration_seconds(current_path)
+        step = f"remove_bad_takes:done:{len(bad_take_candidates)}"
+    else:
+        step = "remove_bad_takes:skipped"
+    return current_path, total_duration, bad_take_candidates, step
+
+
+def _apply_remove_silence_step(current_path: str, job_id: str, total_duration: float, cleanup_paths: List[str]):
+    if not _video_has_audio_stream(current_path):
+        return current_path, "remove_silence:no_audio"
+    silence_ranges = _detect_silence_cut_ranges(current_path, total_duration)
+    keep_ranges = _invert_cut_ranges(total_duration, silence_ranges)
+    if keep_ranges and len(keep_ranges) > 1:
+        next_path = _auto_edit_temp_path(job_id, "silence")
+        _render_keep_ranges(current_path, next_path, keep_ranges)
+        cleanup_paths.append(next_path)
+        return next_path, f"remove_silence:done:{len(silence_ranges)}"
+    return current_path, "remove_silence:skipped"
+
+
+def _apply_clean_audio_step(current_path: str, job_id: str, cleanup_paths: List[str]):
+    next_path = _auto_edit_temp_path(job_id, "clean_audio")
+    _apply_clean_audio_transform(current_path, next_path)
+    cleanup_paths.append(next_path)
+    return next_path, "clean_audio:done"
+
+
+def _apply_speed_step(current_path: str, job_id: str, cleanup_paths: List[str]):
+    next_path = _auto_edit_temp_path(job_id, "speed")
+    _apply_speed_transform(current_path, next_path, speed_factor=1.08)
+    cleanup_paths.append(next_path)
+    return next_path, "speed:done:1.08"
 
 
 def _apply_auto_edit_media_steps(
@@ -3812,59 +3872,31 @@ def _apply_auto_edit_media_steps(
     bad_take_candidates: List[Dict[str, Any]] = []
     cleanup_paths: List[str] = []
     current_path = input_path
-
-    def build_temp(name: str) -> str:
-        return os.path.join(OUTPUT_DIR, job_id, f"auto_{name}_{uuid.uuid4().hex[:8]}.mp4")
-
     total_duration = _probe_local_video_duration_seconds(current_path)
 
     if options["removeBadTakes"]:
-        bad_take_candidates = _detect_bad_take_candidates(transcript)
-        cut_ranges = [(float(c["start"]), float(c["end"])) for c in bad_take_candidates]
-        keep_ranges = _invert_cut_ranges(total_duration, cut_ranges)
-        if keep_ranges and len(keep_ranges) > 1:
-            next_path = build_temp("bad_takes")
-            _render_keep_ranges(current_path, next_path, keep_ranges)
-            cleanup_paths.append(next_path)
-            current_path = next_path
-            total_duration = _probe_local_video_duration_seconds(current_path)
-            steps.append(f"remove_bad_takes:done:{len(bad_take_candidates)}")
-        else:
-            steps.append("remove_bad_takes:skipped")
+        current_path, total_duration, bad_take_candidates, step = _apply_remove_bad_takes_step(
+            current_path, job_id, transcript, total_duration, cleanup_paths,
+        )
+        steps.append(step)
     else:
         steps.append("remove_bad_takes:disabled")
 
-    if options["removeSilence"] and _video_has_audio_stream(current_path):
-        silence_ranges = _detect_silence_cut_ranges(current_path, total_duration)
-        keep_ranges = _invert_cut_ranges(total_duration, silence_ranges)
-        if keep_ranges and len(keep_ranges) > 1:
-            next_path = build_temp("silence")
-            _render_keep_ranges(current_path, next_path, keep_ranges)
-            cleanup_paths.append(next_path)
-            current_path = next_path
-            steps.append(f"remove_silence:done:{len(silence_ranges)}")
-        else:
-            steps.append("remove_silence:skipped")
-    elif options["removeSilence"]:
-        steps.append("remove_silence:no_audio")
+    if options["removeSilence"]:
+        current_path, step = _apply_remove_silence_step(current_path, job_id, total_duration, cleanup_paths)
+        steps.append(step)
     else:
         steps.append("remove_silence:disabled")
 
     if options["cleanAudio"]:
-        next_path = build_temp("clean_audio")
-        _apply_clean_audio_transform(current_path, next_path)
-        cleanup_paths.append(next_path)
-        current_path = next_path
-        steps.append("clean_audio:done")
+        current_path, step = _apply_clean_audio_step(current_path, job_id, cleanup_paths)
+        steps.append(step)
     else:
         steps.append("clean_audio:disabled")
 
     if options["speed"]:
-        next_path = build_temp("speed")
-        _apply_speed_transform(current_path, next_path, speed_factor=1.08)
-        cleanup_paths.append(next_path)
-        current_path = next_path
-        steps.append("speed:done:1.08")
+        current_path, step = _apply_speed_step(current_path, job_id, cleanup_paths)
+        steps.append(step)
     else:
         steps.append("speed:disabled")
 
