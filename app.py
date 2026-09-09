@@ -6056,32 +6056,36 @@ def _translate_text_gemini(text: str, source_lang: str, target_lang: str) -> tup
     if not out:
         raise RuntimeError("Gemini returned empty translation")
 
+    return out, _parse_gemini_translation_usage(resp)
+
+
+def _read_gemini_usage_field(source: Any, *names: str) -> int:
+    for name in names:
+        if isinstance(source, dict) and name in source:
+            return int(source.get(name) or 0)
+        if source is not None and hasattr(source, name):
+            return int(getattr(source, name) or 0)
+    return 0
+
+
+def _parse_gemini_translation_usage(resp: Any) -> Dict[str, Any]:
     usage_meta = getattr(resp, "usage_metadata", None)
     if usage_meta is None and hasattr(resp, "usageMetadata"):
         usage_meta = getattr(resp, "usageMetadata")
 
-    def _read_usage_field(source: Any, *names: str) -> int:
-        for name in names:
-            if isinstance(source, dict) and name in source:
-                return int(source.get(name) or 0)
-            if source is not None and hasattr(source, name):
-                return int(getattr(source, name) or 0)
-        return 0
-
-    prompt_tokens = _read_usage_field(usage_meta, "prompt_token_count", "promptTokenCount")
-    completion_tokens = _read_usage_field(usage_meta, "candidates_token_count", "candidatesTokenCount")
-    total_tokens = _read_usage_field(usage_meta, "total_token_count", "totalTokenCount")
+    prompt_tokens = _read_gemini_usage_field(usage_meta, "prompt_token_count", "promptTokenCount")
+    completion_tokens = _read_gemini_usage_field(usage_meta, "candidates_token_count", "candidatesTokenCount")
+    total_tokens = _read_gemini_usage_field(usage_meta, "total_token_count", "totalTokenCount")
     if total_tokens <= 0:
         total_tokens = prompt_tokens + completion_tokens
 
-    usage_payload = {
+    return {
         "provider": "gemini",
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "cost_usd": estimate_llm_usage_cost_usd("gemini", prompt_tokens, completion_tokens),
     }
-    return out, usage_payload
 
 
 def _get_translation_cache(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -6131,6 +6135,39 @@ def _translate_segments_with_fallback(segments: List[Dict], source_lang: str, ta
     return translated
 
 
+def _cached_translated_segment(seg: Dict[str, Any], cached_entry: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "start": seg["start"],
+        "end": seg["end"],
+        "text": cached_entry["text"],
+        "provider": cached_entry.get("provider") or "cache",
+        "usage": cached_entry.get("usage") or {},
+    }
+
+
+def _store_translation_in_cache(cache_store: Dict[str, Any], cache_key: str, translated_segment: Dict[str, Any], source_lang: str, target_lang: str) -> None:
+    cache_store[cache_key] = {
+        "text": translated_segment["text"],
+        "provider": translated_segment.get("provider") or "unknown",
+        "usage": translated_segment.get("usage") or {},
+        "source_language": _normalize_lang(source_lang) or "auto",
+        "target_language": _normalize_lang(target_lang),
+        "cached_at": int(time.time()),
+    }
+
+
+def _accumulate_translation_usage(usage_totals: Dict[str, Dict[str, Any]], translated_segment: Dict[str, Any]) -> None:
+    usage = translated_segment.get("usage") or {}
+    provider = (usage.get("provider") or translated_segment.get("provider") or "").lower()
+    bucket = usage_totals.get(provider)
+    if bucket is None:
+        return
+    bucket["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+    bucket["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+    bucket["total_tokens"] += int(usage.get("total_tokens") or 0)
+    bucket["cost_usd"] = round(float(bucket["cost_usd"]) + float(usage.get("cost_usd") or 0.0), 6)
+
+
 def _translate_segments_with_cache(
     segments: List[Dict],
     source_lang: str,
@@ -6152,13 +6189,7 @@ def _translate_segments_with_cache(
         cached_entry = cache_store.get(cache_key) if cache_store is not None else None
 
         if isinstance(cached_entry, dict) and (cached_entry.get("text") or "").strip():
-            translated.append({
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": cached_entry["text"],
-                "provider": cached_entry.get("provider") or "cache",
-                "usage": cached_entry.get("usage") or {},
-            })
+            translated.append(_cached_translated_segment(seg, cached_entry))
             cache_hits += 1
             continue
 
@@ -6167,23 +6198,9 @@ def _translate_segments_with_cache(
         cache_misses += 1
 
         if cache_store is not None:
-            cache_store[cache_key] = {
-                "text": translated_segment["text"],
-                "provider": translated_segment.get("provider") or "unknown",
-                "usage": translated_segment.get("usage") or {},
-                "source_language": _normalize_lang(source_lang) or "auto",
-                "target_language": _normalize_lang(target_lang),
-                "cached_at": int(time.time()),
-            }
+            _store_translation_in_cache(cache_store, cache_key, translated_segment, source_lang, target_lang)
 
-        usage = translated_segment.get("usage") or {}
-        provider = (usage.get("provider") or translated_segment.get("provider") or "").lower()
-        bucket = usage_totals.get(provider)
-        if bucket is not None:
-            bucket["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-            bucket["completion_tokens"] += int(usage.get("completion_tokens") or 0)
-            bucket["total_tokens"] += int(usage.get("total_tokens") or 0)
-            bucket["cost_usd"] = round(float(bucket["cost_usd"]) + float(usage.get("cost_usd") or 0.0), 6)
+        _accumulate_translation_usage(usage_totals, translated_segment)
 
     total_cost_usd = round(
         float(usage_totals["openai"]["cost_usd"]) + float(usage_totals["gemini"]["cost_usd"]),
@@ -6197,40 +6214,45 @@ def _translate_segments_with_cache(
     }
 
 
+def _caption_words_from_segment(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    text = (seg.get("text") or "").strip()
+    if not text:
+        return []
+
+    words = [token for token in text.split() if token]
+    if not words:
+        return []
+
+    start_ms = int(round(float(seg.get("start", 0)) * 1000))
+    end_ms = int(round(float(seg.get("end", 0)) * 1000))
+    if end_ms <= start_ms:
+        end_ms = start_ms + 200
+
+    total_duration_ms = max(1, end_ms - start_ms)
+    step_ms = max(1, total_duration_ms // len(words))
+
+    captions = []
+    for index, word in enumerate(words):
+        word_start_ms = start_ms + (index * step_ms)
+        if index == len(words) - 1:
+            word_end_ms = end_ms
+        else:
+            word_end_ms = min(end_ms, start_ms + ((index + 1) * step_ms))
+        if word_end_ms <= word_start_ms:
+            word_end_ms = word_start_ms + 1
+
+        captions.append({
+            "text": word,
+            "startMs": word_start_ms,
+            "endMs": word_end_ms,
+        })
+    return captions
+
+
 def _translated_segments_to_caption_words(segments: List[Dict]) -> List[Dict]:
     captions: List[Dict] = []
     for seg in segments:
-        text = (seg.get("text") or "").strip()
-        if not text:
-            continue
-
-        words = [token for token in text.split() if token]
-        if not words:
-            continue
-
-        start_ms = int(round(float(seg.get("start", 0)) * 1000))
-        end_ms = int(round(float(seg.get("end", 0)) * 1000))
-        if end_ms <= start_ms:
-            end_ms = start_ms + 200
-
-        total_duration_ms = max(1, end_ms - start_ms)
-        step_ms = max(1, total_duration_ms // len(words))
-
-        for index, word in enumerate(words):
-            word_start_ms = start_ms + (index * step_ms)
-            if index == len(words) - 1:
-                word_end_ms = end_ms
-            else:
-                word_end_ms = min(end_ms, start_ms + ((index + 1) * step_ms))
-            if word_end_ms <= word_start_ms:
-                word_end_ms = word_start_ms + 1
-
-            captions.append({
-                "text": word,
-                "startMs": word_start_ms,
-                "endMs": word_end_ms,
-            })
-
+        captions.extend(_caption_words_from_segment(seg))
     return captions
 
 
