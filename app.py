@@ -3594,7 +3594,7 @@ def _apply_auto_edit_media_steps(
 
     return current_path, steps, bad_take_candidates, cleanup_paths
 
-@app.post("/api/process")
+@app.post("/api/process", responses={400: {"description": "Bad Request"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}})
 async def process_endpoint(
     request: Request,
     file: Optional[UploadFile] = File(None),
@@ -3860,7 +3860,7 @@ async def process_endpoint(
         "status": "queued"
     }
 
-@app.get("/api/status/{job_id}")
+@app.get("/api/status/{job_id}", responses={404: {"description": "Not Found"}})
 async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
     # Best effort read of in-memory runtime state, but the *authorization*
     # scope always comes from the verified caller identity above -- never
@@ -4076,7 +4076,7 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 
     return local_path, filename
 
-@app.post("/api/edit")
+@app.post("/api/edit", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def edit_clip(
     request: Request,
     req: EditRequest,
@@ -4259,7 +4259,7 @@ async def edit_clip(
     except Exception as e:
         raise _generic_error("Edit Error", e)
 
-@app.post("/api/captions/process")
+@app.post("/api/captions/process", responses={400: {"description": "Bad Request"}, 413: {"description": "Payload Too Large"}})
 async def process_caption_endpoint(
     file: UploadFile = File(...),
     acknowledged: Optional[str] = Form(None),
@@ -4428,7 +4428,7 @@ class SubtitleRequest(BaseModel):
     input_url: Optional[str] = None
 
 
-@app.get("/api/clip/{job_id}/{clip_index}/transcript")
+@app.get("/api/clip/{job_id}/{clip_index}/transcript", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     """Return word-level captions for a specific clip, formatted for Remotion."""
     # Do not depend on in-memory jobs: Reels page must keep working after restarts.
@@ -4500,7 +4500,7 @@ async def ensure_clip_preview_image(
     }
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/persist")
+@app.post("/api/reels/{job_id}/{clip_index}/captions/persist", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def persist_captioned_reel(
     job_id: str,
     clip_index: int,
@@ -4858,7 +4858,7 @@ class EffectsGenerateRequest(BaseModel):
     input_url: Optional[str] = None
     auto_edit_options: Optional[Dict[str, bool]] = None
 
-@app.post("/api/effects/generate")
+@app.post("/api/effects/generate", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def generate_effects_config(
     req: EffectsGenerateRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
@@ -4994,7 +4994,7 @@ async def generate_effects_config(
         raise _generic_error("Effects Generation Error", e)
 
 
-@app.post("/api/subtitle")
+@app.post("/api/subtitle", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def add_subtitles(req: SubtitleRequest, user_id: str = Depends(get_user_id_header)):
     await _require_job_ownership(req.job_id, user_id)
     subtitle_required_credits = 0.0
@@ -5259,7 +5259,7 @@ class HookRequest(BaseModel):
     size: Optional[str] = "M" # S, M, L
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/reset")
+@app.post("/api/reels/{job_id}/{clip_index}/captions/reset", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def reset_caption_style_history(
     job_id: str,
     clip_index: int,
@@ -5307,7 +5307,7 @@ async def reset_caption_style_history(
     }
 
 
-@app.get("/api/reels/{job_id}/{clip_index}/style-history")
+@app.get("/api/reels/{job_id}/{clip_index}/style-history", responses={404: {"description": "Not Found"}})
 async def get_caption_style_history_debug(
     job_id: str,
     clip_index: int,
@@ -5358,7 +5358,7 @@ async def get_caption_style_history_debug(
         },
     }
 
-@app.post("/api/hook")
+@app.post("/api/hook", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def add_hook(req: HookRequest, user_id: str = Depends(get_user_id_header)):
     await _require_job_ownership(req.job_id, user_id)
     hook_required_credits = 0.0
@@ -5831,7 +5831,7 @@ def get_languages():
     }
 
 
-@app.post("/api/translate/captions")
+@app.post("/api/translate/captions", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_captions(req: TranslateRequest, request: Request):
     """Translate reel transcript into Remotion-friendly timed word captions."""
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
@@ -5935,7 +5935,7 @@ async def translate_captions(req: TranslateRequest, request: Request):
     }
 
 
-@app.post("/api/translate")
+@app.post("/api/translate", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_clip(req: TranslateRequest, request: Request):
     """
     Translate subtitles only (OpenAI first, Gemini fallback),
@@ -6192,7 +6192,7 @@ def _resolve_public_video_url(video_ref: str, request: Request, job_id: str) -> 
     base_url = SOCIAL_BASE_URL or str(request.base_url).rstrip("/")
     return f"{base_url}/videos/{job_id}/{ref}"
 
-@app.post("/api/social/post")
+@app.post("/api/social/post", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def post_to_socials(req: SocialPostRequest, request: Request, user_id_header: str = Depends(get_user_id_header)):
     selected_platforms = _resolve_social_platforms(req.platforms)
     user_id = _resolve_request_user_id(req.user_id, user_id_header)
@@ -6289,7 +6289,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
 
 # --- Thumbnail Studio Endpoints ---
 
-@app.post("/api/thumbnail/upload")
+@app.post("/api/thumbnail/upload", responses={400: {"description": "Bad Request"}})
 async def thumbnail_upload(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
@@ -6361,7 +6361,7 @@ async def thumbnail_upload(
     return {"session_id": session_id}
 
 
-@app.post("/api/thumbnail/analyze")
+@app.post("/api/thumbnail/analyze", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_analyze(
     request: Request,
     file: Optional[UploadFile] = File(None),
@@ -6450,7 +6450,7 @@ class ThumbnailTitlesRequest(BaseModel):
     message: Optional[str] = None
     title: Optional[str] = None
 
-@app.post("/api/thumbnail/titles")
+@app.post("/api/thumbnail/titles", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def thumbnail_titles(
     req: ThumbnailTitlesRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
@@ -6507,7 +6507,7 @@ async def thumbnail_titles(
         raise _generic_error("Thumbnail Titles Error", e)
 
 
-@app.post("/api/thumbnail/generate")
+@app.post("/api/thumbnail/generate", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
 async def thumbnail_generate(
     request: Request,
     session_id: str = Form(...),
@@ -6588,7 +6588,7 @@ class ThumbnailDescribeRequest(BaseModel):
     session_id: str
     title: str
 
-@app.post("/api/thumbnail/describe")
+@app.post("/api/thumbnail/describe", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def thumbnail_describe(
     req: ThumbnailDescribeRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
@@ -6625,7 +6625,7 @@ async def thumbnail_describe(
         raise _generic_error("Thumbnail Describe Error", e)
 
 
-@app.post("/api/thumbnail/publish")
+@app.post("/api/thumbnail/publish", responses={404: {"description": "Not Found"}})
 def thumbnail_publish(
     background_tasks: BackgroundTasks,
     session_id: str = Form(...),
@@ -6690,7 +6690,7 @@ def thumbnail_publish(
     return {"publish_id": publish_id, "status": "uploading"}
 
 
-@app.get("/api/thumbnail/publish/status/{publish_id}")
+@app.get("/api/thumbnail/publish/status/{publish_id}", responses={404: {"description": "Not Found"}})
 def thumbnail_publish_status(publish_id: str):
     """Poll the status of a background publish job."""
     if publish_id not in publish_jobs:
@@ -6733,7 +6733,7 @@ def _frontend_base_url(request: Request) -> str:
     return "http://localhost:5175"
 
 
-@app.post("/api/stripe/checkout-session")
+@app.post("/api/stripe/checkout-session", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def create_stripe_checkout_session(
     request: Request,
     payload: StripeCheckoutRequest,
@@ -6995,7 +6995,7 @@ async def _handle_subscription_purchase(ctx: dict) -> dict:
 # Route
 # ---------------------------------------------------------------------------
 
-@app.post("/api/stripe/webhook")
+@app.post("/api/stripe/webhook", responses={400: {"description": "Bad Request"}, 503: {"description": "Service Unavailable"}})
 async def stripe_webhook(request: Request):
     """Handle Stripe checkout.session.completed events and persist the result."""
     _require_stripe_ready()
@@ -7021,7 +7021,7 @@ async def stripe_webhook(request: Request):
     return await _handle_subscription_purchase(ctx)
 
 
-@app.get("/api/abonnements")
+@app.get("/api/abonnements", responses={503: {"description": "Service Unavailable"}})
 async def list_abonnements():
     """List available subscription plans from Supabase."""
     if not is_supabase_configured():
@@ -7054,7 +7054,7 @@ async def get_current_souscription(
     return subscription
 
 
-@app.get("/api/souscription/history")
+@app.get("/api/souscription/history", responses={503: {"description": "Service Unavailable"}})
 async def get_souscription_history(
     request: Request,
     limit: int = Query(50, ge=1, le=200),
@@ -7092,7 +7092,7 @@ async def get_souscription_history(
 # User credits & history
 # ---------------------------------------------------------------------------
 
-@app.get("/api/user/credits")
+@app.get("/api/user/credits", responses={503: {"description": "Service Unavailable"}})
 async def get_user_credits(request: Request, user_id: str = Depends(get_user_id_header)):
     """Return the credit/storage balance for the authenticated user."""
     if not is_supabase_configured():
@@ -7153,7 +7153,7 @@ async def get_user_credits(request: Request, user_id: str = Depends(get_user_id_
     }
 
 
-@app.get("/api/user/history")
+@app.get("/api/user/history", responses={503: {"description": "Service Unavailable"}})
 async def get_user_history(
     request: Request,
     page: int = Query(1, ge=1),
@@ -7179,7 +7179,7 @@ class BuyCreditsRequest(BaseModel):
     cancel_url: Optional[str] = None
 
 
-@app.post("/api/stripe/buy-credits")
+@app.post("/api/stripe/buy-credits", responses={400: {"description": "Bad Request"}, 403: {"description": "Forbidden"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def buy_credits_checkout(
     request: Request,
     payload: BuyCreditsRequest,
@@ -7253,7 +7253,7 @@ async def buy_credits_checkout(
     }
 
 
-@app.get("/api/captions")
+@app.get("/api/captions", responses={503: {"description": "Service Unavailable"}})
 async def list_captions(
     user_id: str = Depends(get_user_id_header),
     page: int = Query(1, ge=1),
@@ -7273,7 +7273,7 @@ async def list_captions(
     }
 
 
-@app.get("/api/captions/{caption_id}/media-url")
+@app.get("/api/captions/{caption_id}/media-url", responses={404: {"description": "Not Found"}})
 async def caption_media_url(caption_id: str, user_id: str = Depends(get_user_id_header)):
     row = await supabase_get_caption(caption_id, user_id)
     if not row:
@@ -7282,7 +7282,7 @@ async def caption_media_url(caption_id: str, user_id: str = Depends(get_user_id_
     return {"media_url": item.get("media_url")}
 
 
-@app.delete("/api/captions/{caption_id}")
+@app.delete("/api/captions/{caption_id}", responses={404: {"description": "Not Found"}})
 async def delete_caption(caption_id: str, user_id: str = Depends(get_user_id_header)):
     deleted = await supabase_soft_delete_caption(caption_id, user_id)
     if not deleted:
@@ -7290,7 +7290,7 @@ async def delete_caption(caption_id: str, user_id: str = Depends(get_user_id_hea
     return {"deleted": True}
 
 
-@app.post("/api/captions/{caption_id}/share")
+@app.post("/api/captions/{caption_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
     await _assert_user_has_required_credits(user_id, 0.0)
 
@@ -7406,7 +7406,7 @@ async def share_caption(caption_id: str, payload: ReelShareRequest, user_id: str
 # Projects Endpoints
 # --------------------------------------------------------------------------
 
-@app.get("/api/projects")
+@app.get("/api/projects", responses={503: {"description": "Service Unavailable"}})
 async def list_projects(
 	user_id: str = Depends(get_user_id_header),
 	page: int = Query(1, ge=1),
@@ -7434,7 +7434,7 @@ async def list_projects(
 	}
 
 
-@app.get("/api/projects/{project_id}")
+@app.get("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7451,7 +7451,7 @@ class ProjectUpdateRequest(BaseModel):
 	description: Optional[str] = None
 
 
-@app.put("/api/projects/{project_id}")
+@app.put("/api/projects/{project_id}", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def update_project_endpoint(
 	project_id: str,
 	payload: ProjectUpdateRequest,
@@ -7477,7 +7477,7 @@ async def update_project_endpoint(
 	return project
 
 
-@app.delete("/api/projects/{project_id}")
+@app.delete("/api/projects/{project_id}", responses={404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
 async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_user_id_header)):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7573,7 +7573,7 @@ async def delete_project_endpoint(project_id: str, user_id: str = Depends(get_us
 	return {"deleted": True}
 
 
-@app.get("/api/projects/{project_id}/source-url")
+@app.get("/api/projects/{project_id}/source-url", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}, 503: {"description": "Service Unavailable"}})
 async def get_project_source_url(project_id: str, user_id: str = Depends(get_user_id_header)):
 	if not is_supabase_configured():
 		raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7596,7 +7596,7 @@ async def get_project_source_url(project_id: str, user_id: str = Depends(get_use
 	return {"source_url": source_url}
 
 
-@app.get("/api/projects/{project_id}/job")
+@app.get("/api/projects/{project_id}/job", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_job(project_id: str, user_id: str = Depends(get_user_id_header)):
   if not is_supabase_configured():
     raise HTTPException(status_code=503, detail=_SUPABASE_PROJECTS_NOT_CONFIGURED)
@@ -7622,7 +7622,7 @@ async def get_project_job(project_id: str, user_id: str = Depends(get_user_id_he
   }
 
 
-@app.get("/api/projects/{project_id}/reels")
+@app.get("/api/projects/{project_id}/reels", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_reels(project_id: str, user_id: str = Depends(get_user_id_header)):
 	"""Get all reels for a specific project."""
 	if not is_supabase_configured():
@@ -7641,7 +7641,7 @@ async def get_project_reels(project_id: str, user_id: str = Depends(get_user_id_
 	}
 
 
-@app.get("/api/projects/{project_id}/captions")
+@app.get("/api/projects/{project_id}/captions", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def get_project_captions(project_id: str, user_id: str = Depends(get_user_id_header)):
 	"""Get all captions for a specific project."""
 	if not is_supabase_configured():
@@ -7671,7 +7671,7 @@ async def list_reels(user_id: str = Depends(get_user_id_header), page: int = Que
     }
 
 
-@app.get("/api/reels/{reel_id}/media-url")
+@app.get("/api/reels/{reel_id}/media-url", responses={404: {"description": "Not Found"}})
 async def reel_media_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -7680,7 +7680,7 @@ async def reel_media_url(reel_id: str, user_id: str = Depends(get_user_id_header
     return {"media_url": item.get("media_url")}
 
 
-@app.get("/api/reels/{reel_id}/thumbnail-url")
+@app.get("/api/reels/{reel_id}/thumbnail-url", responses={404: {"description": "Not Found"}})
 async def reel_thumbnail_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -7689,7 +7689,7 @@ async def reel_thumbnail_url(reel_id: str, user_id: str = Depends(get_user_id_he
     return {"thumbnail_url": item.get("reel_thumbnail_url")}
 
 
-@app.get("/api/reels/{reel_id}/preview-url")
+@app.get("/api/reels/{reel_id}/preview-url", responses={404: {"description": "Not Found"}})
 async def reel_preview_url(reel_id: str, user_id: str = Depends(get_user_id_header)):
     row = await supabase_get_reel(reel_id, user_id)
     if not row:
@@ -7698,7 +7698,7 @@ async def reel_preview_url(reel_id: str, user_id: str = Depends(get_user_id_head
     return {"preview_url": item.get("reel_preview_url")}
 
 
-@app.delete("/api/reels/{reel_id}")
+@app.delete("/api/reels/{reel_id}", responses={404: {"description": "Not Found"}})
 async def delete_reel(reel_id: str, user_id: str = Depends(get_user_id_header)):
     deleted = await supabase_soft_delete_reel(reel_id, user_id)
     if not deleted:
@@ -7706,7 +7706,7 @@ async def delete_reel(reel_id: str, user_id: str = Depends(get_user_id_header)):
     return {"deleted": True}
 
 
-@app.post("/api/reels/{reel_id}/share")
+@app.post("/api/reels/{reel_id}/share", responses={400: {"description": "Bad Request"}, 404: {"description": "Not Found"}})
 async def share_reel(reel_id: str, payload: ReelShareRequest, user_id: str = Depends(get_user_id_header)):
     await _assert_user_has_required_credits(user_id, 0.0)
 
@@ -8260,7 +8260,7 @@ async def list_social_accounts(user_id: str = Depends(get_user_id_header)):
     return {"accounts": accounts}
 
 
-@app.delete("/api/social/accounts/{platform}")
+@app.delete("/api/social/accounts/{platform}", responses={404: {"description": "Not Found"}})
 async def disconnect_social_account(platform: str, user_id: str = Depends(get_user_id_header)):
     key = (platform or "").strip().lower()
     if key not in PLATFORM_CONFIG:
@@ -8276,7 +8276,7 @@ async def disconnect_social_account(platform: str, user_id: str = Depends(get_us
     return {"deleted": bool(response.data)}
 
 
-@app.get("/api/social/publish-jobs")
+@app.get("/api/social/publish-jobs", responses={400: {"description": "Bad Request"}, 500: {"description": "Internal Server Error"}})
 async def list_publish_jobs(
     user_id: str = Depends(get_user_id_header),
     page: int = Query(1, ge=1),
@@ -8382,7 +8382,7 @@ async def list_publish_jobs(
         raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
 
 
-@app.delete("/api/social/publish-jobs/{publish_job_id}")
+@app.delete("/api/social/publish-jobs/{publish_job_id}", responses={404: {"description": "Not Found"}, 503: {"description": "Service Unavailable"}})
 async def delete_publish_job(
     publish_job_id: str,
     user_id: str = Depends(get_user_id_header),
@@ -8412,7 +8412,7 @@ class SelectFacebookPageRequest(BaseModel):
     page_id: str
 
 
-@app.post("/api/auth/facebook/select-page")
+@app.post("/api/auth/facebook/select-page", responses={400: {"description": "Bad Request"}})
 async def select_facebook_page(payload: SelectFacebookPageRequest):
     try:
         data = _page_selection_serializer.loads(payload.selection_token, max_age=_PAGE_SELECTION_TTL_SECONDS)
