@@ -1366,6 +1366,49 @@ def _resolve_local_video_path_for_preview(deduped_candidates: List[str], job_id:
     return local_video_path, downloaded_video_path
 
 
+async def _update_caption_thumbnail_after_upload(caption_row: Optional[Dict[str, Any]], caption_thumb_uploaded: bool, user_id: str, caption_thumb_key: str) -> str:
+    if not (caption_row and caption_thumb_uploaded):
+        return ""
+    await supabase_update_caption(
+        str(caption_row.get("id")),
+        user_id,
+        {"caption_thumbnail_url": caption_thumb_key},
+    )
+    return _caption_media_url_from_s3_key(caption_thumb_key) or ""
+
+
+async def _update_reel_thumbnail_after_upload(reel_row: Optional[Dict[str, Any]], reel_thumb_uploaded: bool, job_id: str, clip_index: int, user_id: str, reel_thumb_key: str, preview_url: str) -> str:
+    if not (reel_row and reel_thumb_uploaded):
+        return preview_url
+    normalized_reel = _normalize_reel_row(reel_row)
+    reel_media_url = normalized_reel.get("reel_url") or str(reel_row.get("reel_url") or "")
+    if reel_media_url:
+        await supabase_update_reel_media_by_job_clip(
+            job_id=job_id,
+            clip_index=int(clip_index),
+            reel_url=reel_media_url,
+            reel_s3_key=str(reel_row.get("reel_s3_key") or "") or None,
+            reel_thumbnail_url=reel_thumb_key,
+            user_id=user_id,
+        )
+    if not preview_url:
+        preview_url = _reel_thumbnail_url_from_s3_key(reel_thumb_key) or ""
+    return preview_url
+
+
+def _cleanup_preview_thumbnail_temp_files(thumb_local: str, downloaded_video_path: str) -> None:
+    try:
+        if os.path.exists(thumb_local):
+            os.remove(thumb_local)
+    except Exception:
+        pass
+    try:
+        if downloaded_video_path and os.path.exists(downloaded_video_path):
+            os.remove(downloaded_video_path)
+    except Exception:
+        pass
+
+
 async def _generate_and_upload_preview_thumbnail(
     thumb_local: str,
     downloaded_video_path: str,
@@ -1384,39 +1427,10 @@ async def _generate_and_upload_preview_thumbnail(
         reel_thumb_uploaded = upload_file_to_s3(thumb_local, bucket, reel_thumb_key)
         caption_thumb_uploaded = upload_file_to_s3(thumb_local, bucket, caption_thumb_key)
 
-        if caption_row and caption_thumb_uploaded:
-            await supabase_update_caption(
-                str(caption_row.get("id")),
-                user_id,
-                {"caption_thumbnail_url": caption_thumb_key},
-            )
-            preview_url = _caption_media_url_from_s3_key(caption_thumb_key) or ""
-
-        if reel_row and reel_thumb_uploaded:
-            normalized_reel = _normalize_reel_row(reel_row)
-            reel_media_url = normalized_reel.get("reel_url") or str(reel_row.get("reel_url") or "")
-            if reel_media_url:
-                await supabase_update_reel_media_by_job_clip(
-                    job_id=job_id,
-                    clip_index=int(clip_index),
-                    reel_url=reel_media_url,
-                    reel_s3_key=str(reel_row.get("reel_s3_key") or "") or None,
-                    reel_thumbnail_url=reel_thumb_key,
-                    user_id=user_id,
-                )
-            if not preview_url:
-                preview_url = _reel_thumbnail_url_from_s3_key(reel_thumb_key) or ""
+        preview_url = await _update_caption_thumbnail_after_upload(caption_row, caption_thumb_uploaded, user_id, caption_thumb_key)
+        preview_url = await _update_reel_thumbnail_after_upload(reel_row, reel_thumb_uploaded, job_id, clip_index, user_id, reel_thumb_key, preview_url)
     finally:
-        try:
-            if os.path.exists(thumb_local):
-                os.remove(thumb_local)
-        except Exception:
-            pass
-        try:
-            if downloaded_video_path and os.path.exists(downloaded_video_path):
-                os.remove(downloaded_video_path)
-        except Exception:
-            pass
+        _cleanup_preview_thumbnail_temp_files(thumb_local, downloaded_video_path)
     return preview_url
 
 
@@ -1845,7 +1859,7 @@ def _compute_clip_duration_seconds(clip: Dict[str, Any]) -> int:
         return 0
 
 
-async def _build_reel_row_for_clip(
+def _build_reel_row_for_clip(
     job_id: str,
     user_id: str,
     output_dir: str,
@@ -1930,7 +1944,7 @@ async def _persist_reels_for_job(
     rows: List[Dict[str, Any]] = []
 
     for i, clip in enumerate(clips, start=1):
-        reel_row = await _build_reel_row_for_clip(
+        reel_row = _build_reel_row_for_clip(
             job_id, user_id, output_dir, bucket, base_name, clip, i, now_iso, uses_youtube_source, project_id,
         )
         if reel_row:
@@ -2400,6 +2414,39 @@ async def _finalize_completed_reel_billing(
     )
 
 
+def _derive_reel_completion_summary_text(enriched_clips: List[Dict[str, Any]], saved_rows: List[Dict[str, Any]]) -> str:
+    summary_text = ""
+    if enriched_clips:
+        top_clip = enriched_clips[0] if isinstance(enriched_clips[0], dict) else {}
+        summary_text = (
+            str(top_clip.get("video_description_for_instagram") or "")
+            or str(top_clip.get("video_description_for_tiktok") or "")
+            or str(top_clip.get("video_title_for_youtube_short") or "")
+        )
+    if not summary_text and saved_rows:
+        first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
+        summary_text = str(first_row.get("reel_description") or "")
+    return summary_text
+
+
+def _build_reel_completion_project_updates(job_data: Dict[str, Any], summary_text: str, saved_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    thumbnail_url = ""
+    if saved_rows:
+        first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
+        thumbnail_url = str(first_row.get("reel_thumbnail_url") or "")
+
+    project_updates = {
+        "description": _build_short_project_summary(summary_text),
+        "output_count": len(saved_rows),
+    }
+    source_duration_value = int(float((job_data or {}).get("source_duration_seconds") or 0.0))
+    if source_duration_value > 0:
+        project_updates["source_duration"] = source_duration_value
+    if thumbnail_url:
+        project_updates["thumbnail_url"] = thumbnail_url
+    return project_updates
+
+
 async def _update_project_on_reel_completion(
     job_data: Dict[str, Any], user_id: Optional[str], enriched_clips: List[Dict[str, Any]], saved_rows: List[Dict[str, Any]],
 ) -> None:
@@ -2408,32 +2455,8 @@ async def _update_project_on_reel_completion(
         return
     try:
         await supabase_update_project_status(project_id, "completed", user_id=user_id)
-        summary_text = ""
-        if enriched_clips:
-            top_clip = enriched_clips[0] if isinstance(enriched_clips[0], dict) else {}
-            summary_text = (
-                str(top_clip.get("video_description_for_instagram") or "")
-                or str(top_clip.get("video_description_for_tiktok") or "")
-                or str(top_clip.get("video_title_for_youtube_short") or "")
-            )
-        if not summary_text and saved_rows:
-            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
-            summary_text = str(first_row.get("reel_description") or "")
-
-        thumbnail_url = ""
-        if saved_rows:
-            first_row = saved_rows[0] if isinstance(saved_rows[0], dict) else {}
-            thumbnail_url = str(first_row.get("reel_thumbnail_url") or "")
-
-        project_updates = {
-            "description": _build_short_project_summary(summary_text),
-            "output_count": len(saved_rows),
-        }
-        source_duration_value = int(float((job_data or {}).get("source_duration_seconds") or 0.0))
-        if source_duration_value > 0:
-            project_updates["source_duration"] = source_duration_value
-        if thumbnail_url:
-            project_updates["thumbnail_url"] = thumbnail_url
+        summary_text = _derive_reel_completion_summary_text(enriched_clips, saved_rows)
+        project_updates = _build_reel_completion_project_updates(job_data, summary_text, saved_rows)
         await supabase_update_project(project_id, user_id or "", project_updates)
         logger.info(f"Project {project_id} marked as completed")
     except Exception as e:
@@ -2759,6 +2782,32 @@ async def _update_project_on_caption_completion(job_data: Dict[str, Any], user_i
         logger.warning(f"Failed to update project status to completed: {str(e)}")
 
 
+async def _mark_caption_job_project_failed(job_data: Dict[str, Any], user_id: Optional[str]) -> None:
+    if not is_supabase_configured():
+        return
+    project_id = job_data.get("project_id")
+    if not project_id:
+        return
+    try:
+        await supabase_update_project_status(project_id, "failed", user_id=user_id)
+        logger.info(f"Project {project_id} marked as failed")
+    except Exception as e:
+        logger.warning(f"Failed to update project status to failed: {str(e)}")
+
+
+async def _refund_caption_job_reservation(job_id: str, job_data: Dict[str, Any], user_id: Optional[str], result: Dict[str, Any]) -> None:
+    # Release the reservation made at job creation: nothing was billed
+    # in this failure path, so the full reserved amount is refundable.
+    if result.get("retry") or not user_id:
+        return
+    reserved = float(job_data.get("caption_required_credits") or 0.0)
+    if reserved > 0 and is_supabase_configured():
+        try:
+            await reel_job_manager.refund_reservation(job_id, user_id, reserved, operation_type="sous_titre")
+        except Exception as refund_error:
+            logger.warning(f"Failed to refund caption reservation: {refund_error}")
+
+
 async def _handle_caption_job_failure(job_id: str, job_data: Dict[str, Any], user_id: Optional[str], exc: Exception) -> None:
     jobs[job_id]["status"] = "failed"
     jobs[job_id]["logs"].append(f"Caption job failed: {exc}")
@@ -2769,28 +2818,81 @@ async def _handle_caption_job_failure(job_id: str, job_data: Dict[str, Any], use
         retry_delay_seconds=CAPTION_JOB_RETRY_DELAY_SECONDS,
     )
 
-    # Update project status to failed if associated with a project
-    if is_supabase_configured():
-        project_id = job_data.get("project_id")
-        if project_id:
-            try:
-                await supabase_update_project_status(project_id, "failed", user_id=user_id)
-                logger.info(f"Project {project_id} marked as failed")
-            except Exception as e:
-                logger.warning(f"Failed to update project status to failed: {str(e)}")
-
-    # Release the reservation made at job creation: nothing was billed
-    # in this failure path, so the full reserved amount is refundable.
-    if not result.get("retry") and user_id:
-        reserved = float(job_data.get("caption_required_credits") or 0.0)
-        if reserved > 0 and is_supabase_configured():
-            try:
-                await reel_job_manager.refund_reservation(job_id, user_id, reserved, operation_type="sous_titre")
-            except Exception as refund_error:
-                logger.warning(f"Failed to refund caption reservation: {refund_error}")
+    await _mark_caption_job_project_failed(job_data, user_id)
+    await _refund_caption_job_reservation(job_id, job_data, user_id, result)
 
     if result.get("retry"):
         _spawn_background_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
+
+
+async def _process_and_complete_caption_job(
+    job_id: str, job_data: Dict[str, Any], user_id: Optional[str], pipeline: CaptionProcessingPipeline,
+    input_path: str, source_name: str, local_duration: float, transcript: Dict[str, Any],
+    caption_required_credits: float, output_dir: str,
+) -> None:
+    await pipeline.persisting()
+    duration_sec = max(0.5, float(local_duration) or _estimate_transcript_duration_seconds(transcript))
+    caption_storage_gb = _bytes_to_gb(float(os.path.getsize(input_path) if os.path.exists(input_path) else 0))
+    caption_cost_breakdown = _estimate_caption_cost_breakdown(
+        duration_seconds=duration_sec,
+        size_bytes=float(os.path.getsize(input_path) if os.path.exists(input_path) else 0),
+        uses_assembly=True,
+        uses_openai=True,
+        uses_gemini=False,
+    )
+    title = os.path.splitext(source_name)[0] or "Sous-titres"
+    local_video_ref = f"/videos/{job_id}/{os.path.basename(input_path)}"
+
+    _build_and_persist_caption_metadata(job_id, output_dir, source_name, title, duration_sec, local_video_ref, transcript)
+
+    bucket = os.environ.get("AWS_S3_BUCKET", "")
+    if not bucket:
+        raise RuntimeError("AWS_S3_BUCKET is required for caption persistence")
+    caption_s3_key, media_url, thumbnail_ref = _upload_caption_source_and_thumbnail(input_path, user_id, job_id, bucket, local_video_ref)
+
+    row_payload = _build_caption_row_payload(
+        job_id, job_data, user_id, source_name, title, duration_sec, media_url, thumbnail_ref,
+        caption_s3_key, caption_required_credits, caption_storage_gb, caption_cost_breakdown,
+    )
+    normalized_item = await _save_caption_row_and_debit(row_payload, job_id, user_id, caption_required_credits, caption_storage_gb)
+
+    await pipeline.rendering()
+    result_payload = {
+        "item": _normalize_caption_row(normalized_item),
+        "job_id": job_id,
+        "clip_index": 0,
+    }
+    jobs[job_id]["result"] = result_payload
+    jobs[job_id]["status"] = "completed"
+    await reel_job_manager.complete_job(
+        job_id,
+        result_payload,
+        actual_credit=caption_required_credits,
+        actual_storage_gb=caption_storage_gb,
+        consumed_quota=1.0,
+        cost_breakdown=caption_cost_breakdown,
+    )
+
+    await _update_project_on_caption_completion(job_data, user_id, normalized_item, local_duration)
+
+    await _persist_transcription_cache(
+        user_id=user_id,
+        job_id=job_id,
+        clip_index=0,
+        source_type="caption_upload",
+        source_value=source_name,
+        transcript=transcript,
+        billing_details=_build_billing_details(
+            "sous_titre",
+            caption_cost_breakdown,
+            actual_credit=caption_required_credits,
+            actual_storage_gb=caption_storage_gb,
+            extra={
+                "source_type": "file",
+                "source_value": source_name,
+            },
+        ),
+    )
 
 
 async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):  # NOSONAR(S1172) kept for call-site symmetry with run_job, which does use it for preemption/timeout control -- both are dispatched identically from run_job_wrapper
@@ -2820,68 +2922,9 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
         await pipeline.transcribing()
         transcript = await _transcribe_caption_source(user_id, job_id, input_path, source_name)
 
-        await pipeline.persisting()
-        duration_sec = max(0.5, float(local_duration) or _estimate_transcript_duration_seconds(transcript))
-        caption_storage_gb = _bytes_to_gb(float(os.path.getsize(input_path) if os.path.exists(input_path) else 0))
-        caption_cost_breakdown = _estimate_caption_cost_breakdown(
-            duration_seconds=duration_sec,
-            size_bytes=float(os.path.getsize(input_path) if os.path.exists(input_path) else 0),
-            uses_assembly=True,
-            uses_openai=True,
-            uses_gemini=False,
-        )
-        title = os.path.splitext(source_name)[0] or "Sous-titres"
-        local_video_ref = f"/videos/{job_id}/{os.path.basename(input_path)}"
-
-        _build_and_persist_caption_metadata(job_id, output_dir, source_name, title, duration_sec, local_video_ref, transcript)
-
-        bucket = os.environ.get("AWS_S3_BUCKET", "")
-        if not bucket:
-            raise RuntimeError("AWS_S3_BUCKET is required for caption persistence")
-        caption_s3_key, media_url, thumbnail_ref = _upload_caption_source_and_thumbnail(input_path, user_id, job_id, bucket, local_video_ref)
-
-        row_payload = _build_caption_row_payload(
-            job_id, job_data, user_id, source_name, title, duration_sec, media_url, thumbnail_ref,
-            caption_s3_key, caption_required_credits, caption_storage_gb, caption_cost_breakdown,
-        )
-        normalized_item = await _save_caption_row_and_debit(row_payload, job_id, user_id, caption_required_credits, caption_storage_gb)
-
-        await pipeline.rendering()
-        result_payload = {
-            "item": _normalize_caption_row(normalized_item),
-            "job_id": job_id,
-            "clip_index": 0,
-        }
-        jobs[job_id]["result"] = result_payload
-        jobs[job_id]["status"] = "completed"
-        await reel_job_manager.complete_job(
-            job_id,
-            result_payload,
-            actual_credit=caption_required_credits,
-            actual_storage_gb=caption_storage_gb,
-            consumed_quota=1.0,
-            cost_breakdown=caption_cost_breakdown,
-        )
-
-        await _update_project_on_caption_completion(job_data, user_id, normalized_item, local_duration)
-
-        await _persist_transcription_cache(
-            user_id=user_id,
-            job_id=job_id,
-            clip_index=0,
-            source_type="caption_upload",
-            source_value=source_name,
-            transcript=transcript,
-            billing_details=_build_billing_details(
-                "sous_titre",
-                caption_cost_breakdown,
-                actual_credit=caption_required_credits,
-                actual_storage_gb=caption_storage_gb,
-                extra={
-                    "source_type": "file",
-                    "source_value": source_name,
-                },
-            ),
+        await _process_and_complete_caption_job(
+            job_id, job_data, user_id, pipeline, input_path, source_name,
+            local_duration, transcript, caption_required_credits, output_dir,
         )
     except Exception as exc:
         await _handle_caption_job_failure(job_id, job_data, user_id, exc)
@@ -3940,7 +3983,7 @@ def _build_process_endpoint_attestation(request: Request, url: Optional[str]) ->
     }
 
 
-async def _prepare_process_job_from_url(url: str, user_id: str, job_id: str, job_output_dir: str, cmd: List[str]) -> Dict[str, Any]:
+def _resolve_process_url_source(url: str, job_id: str) -> Dict[str, Any]:
     remote_meta = _probe_remote_video_metadata(url)
     duration_seconds = float(remote_meta.get("duration_seconds") or 0.0)
     source_duration_seconds = duration_seconds
@@ -3964,6 +4007,35 @@ async def _prepare_process_job_from_url(url: str, user_id: str, job_id: str, job
         except Exception:
             size_bytes = 0.0
 
+    return {
+        "input_path": input_path,
+        "duration_seconds": duration_seconds,
+        "size_bytes": size_bytes,
+        "source_duration_seconds": source_duration_seconds,
+        "is_youtube_source": is_youtube_source,
+        "project_source_type": project_source_type,
+        "project_name": project_name,
+        "project_description": project_description,
+        "remote_meta": remote_meta,
+    }
+
+
+async def _reserve_reel_credits_or_cleanup(user_id: str, reel_required_credits: float, input_path: Optional[str], job_output_dir: str) -> None:
+    try:
+        await _reserve_job_credits(user_id, reel_required_credits)
+    except HTTPException:
+        if input_path and os.path.exists(input_path):
+            os.remove(input_path)
+        shutil.rmtree(job_output_dir, ignore_errors=True)
+        raise
+
+
+async def _prepare_process_job_from_url(url: str, user_id: str, job_id: str, job_output_dir: str, cmd: List[str]) -> Dict[str, Any]:
+    source = _resolve_process_url_source(url, job_id)
+    input_path = source["input_path"]
+    duration_seconds = source["duration_seconds"]
+    size_bytes = source["size_bytes"]
+
     _validate_reel_source_constraints(
         duration_seconds=duration_seconds,
         size_bytes=size_bytes,
@@ -3974,13 +4046,7 @@ async def _prepare_process_job_from_url(url: str, user_id: str, job_id: str, job
         size_bytes=size_bytes,
         uses_youtube_source=True,
     )
-    try:
-        await _reserve_job_credits(user_id, reel_required_credits)
-    except HTTPException:
-        if input_path and os.path.exists(input_path):
-            os.remove(input_path)
-        shutil.rmtree(job_output_dir, ignore_errors=True)
-        raise
+    await _reserve_reel_credits_or_cleanup(user_id, reel_required_credits, input_path, job_output_dir)
 
     if input_path:
         cmd.extend(["-i", input_path])
@@ -3990,11 +4056,11 @@ async def _prepare_process_job_from_url(url: str, user_id: str, job_id: str, job
     return {
         "input_path": input_path,
         "reel_required_credits": reel_required_credits,
-        "source_duration_seconds": source_duration_seconds,
-        "project_source_type": project_source_type,
-        "project_name": project_name,
-        "project_description": project_description,
-        "remote_meta": remote_meta,
+        "source_duration_seconds": source["source_duration_seconds"],
+        "project_source_type": source["project_source_type"],
+        "project_name": source["project_name"],
+        "project_description": source["project_description"],
+        "remote_meta": source["remote_meta"],
     }
 
 
@@ -4035,13 +4101,7 @@ async def _prepare_process_job_from_file(file: UploadFile, user_id: str, job_id:
         size_bytes=float(size),
         uses_youtube_source=False,
     )
-    try:
-        await _reserve_job_credits(user_id, reel_required_credits)
-    except HTTPException:
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        shutil.rmtree(job_output_dir, ignore_errors=True)
-        raise
+    await _reserve_reel_credits_or_cleanup(user_id, reel_required_credits, input_path, job_output_dir)
 
     cmd.extend(["-i", input_path])
 
@@ -4872,6 +4932,31 @@ async def ensure_clip_preview_image(
     }
 
 
+async def _fetch_existing_caption_row_for_history(job_id: str, clip_index: int, user_id: str, fallback_url: str):
+    try:
+        existing_caption_row = await supabase_get_caption_by_job_clip(job_id, clip_index, user_id)
+    except Exception:
+        return None, fallback_url
+    source_video_url = (
+        _caption_media_url_from_s3_key((existing_caption_row or {}).get("caption_s3_key") or "")
+        or str((existing_caption_row or {}).get("caption_url") or "")
+        or fallback_url
+    )
+    return existing_caption_row, source_video_url
+
+
+async def _fetch_existing_reel_url_for_history(job_id: str, clip_index: int, user_id: str, fallback_url: str) -> str:
+    try:
+        reel_row = await supabase_get_reel_by_job_clip(job_id, clip_index, user_id=user_id)
+    except Exception:
+        return fallback_url
+    return (
+        _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
+        or str((reel_row or {}).get("reel_url") or "")
+        or fallback_url
+    )
+
+
 async def _resolve_caption_persist_history_context(job_id: str, clip_index: int, user_id: str, clip_data: Dict[str, Any]):
     source_video_url_before_edit = str(clip_data.get("video_url") or "")
     if source_video_url_before_edit and not clip_data.get("original_video_url"):
@@ -4879,24 +4964,12 @@ async def _resolve_caption_persist_history_context(job_id: str, clip_index: int,
     source_video_url_for_history = source_video_url_before_edit
     existing_caption_row: Optional[Dict[str, Any]] = None
     if is_supabase_configured():
-        try:
-            existing_caption_row = await supabase_get_caption_by_job_clip(job_id, clip_index, user_id)
-            source_video_url_for_history = (
-                _caption_media_url_from_s3_key((existing_caption_row or {}).get("caption_s3_key") or "")
-                or str((existing_caption_row or {}).get("caption_url") or "")
-                or source_video_url_for_history
-            )
-        except Exception:
-            existing_caption_row = None
-        try:
-            reel_row = await supabase_get_reel_by_job_clip(job_id, clip_index, user_id=user_id)
-            source_video_url_for_history = (
-                _reel_media_url_from_s3_key((reel_row or {}).get("reel_s3_key") or "")
-                or str((reel_row or {}).get("reel_url") or "")
-                or source_video_url_for_history
-            )
-        except Exception:
-            pass
+        existing_caption_row, source_video_url_for_history = await _fetch_existing_caption_row_for_history(
+            job_id, clip_index, user_id, source_video_url_for_history
+        )
+        source_video_url_for_history = await _fetch_existing_reel_url_for_history(
+            job_id, clip_index, user_id, source_video_url_for_history
+        )
     return existing_caption_row, source_video_url_for_history
 
 
@@ -4961,43 +5034,51 @@ def _apply_local_video_url_to_clip(
     data['shorts'] = clips
 
 
-def _upload_captioned_video_and_thumbnails(output_path: str, user_id: str, job_id: str, clip_index: int, output_filename: str, local_video_url: str):
-    caption_s3_key = ""
+def _upload_captioned_thumbnails(output_path: str, user_id: str, job_id: str, clip_index: int, bucket: str):
     caption_thumbnail_ref = ""
     reel_thumbnail_s3_key = ""
+    # Keep a static visual for cards that should not autoplay the edited clip.
+    thumb_local_path = _generate_reel_thumbnail_from_video(output_path, OUTPUT_DIR, job_id, clip_index)
+    if not (thumb_local_path and os.path.exists(thumb_local_path)):
+        return caption_thumbnail_ref, reel_thumbnail_s3_key
+
+    thumb_suffix = int(time.time())
+    caption_thumbnail_s3_key = f"captions/{user_id}/{job_id}/thumbnail_{clip_index}_{thumb_suffix}.jpg"
+    reel_thumbnail_s3_key = f"reels/{user_id}/{job_id}/thumbnail_{clip_index}.jpg"
+
+    try:
+        if upload_file_to_s3(thumb_local_path, bucket, caption_thumbnail_s3_key):
+            caption_thumbnail_ref = caption_thumbnail_s3_key
+    except Exception as thumb_upload_error:
+        logger.warning("Caption thumbnail upload failed for %s/%s: %s", job_id, clip_index, thumb_upload_error)
+
+    try:
+        if not upload_file_to_s3(thumb_local_path, bucket, reel_thumbnail_s3_key):
+            reel_thumbnail_s3_key = ""
+    except Exception as thumb_upload_error:
+        reel_thumbnail_s3_key = ""
+        logger.warning("Reel thumbnail upload failed for %s/%s: %s", job_id, clip_index, thumb_upload_error)
+
+    try:
+        os.remove(thumb_local_path)
+    except Exception:
+        pass
+
+    return caption_thumbnail_ref, reel_thumbnail_s3_key
+
+
+def _upload_captioned_video_and_thumbnails(output_path: str, user_id: str, job_id: str, clip_index: int, output_filename: str, local_video_url: str):
+    caption_s3_key = ""
     persisted_video_url = local_video_url
     bucket = os.environ.get("AWS_S3_BUCKET", "")
     if not (bucket and os.path.exists(output_path)):
-        return persisted_video_url, caption_s3_key, caption_thumbnail_ref, reel_thumbnail_s3_key
+        return persisted_video_url, caption_s3_key, "", ""
 
     caption_s3_key = f"captions/{user_id}/{job_id}/{output_filename}"
     if upload_file_to_s3(output_path, bucket, caption_s3_key):
         persisted_video_url = _caption_media_url_from_s3_key(caption_s3_key) or local_video_url
 
-    # Keep a static visual for cards that should not autoplay the edited clip.
-    thumb_local_path = _generate_reel_thumbnail_from_video(output_path, OUTPUT_DIR, job_id, clip_index)
-    if thumb_local_path and os.path.exists(thumb_local_path):
-        thumb_suffix = int(time.time())
-        caption_thumbnail_s3_key = f"captions/{user_id}/{job_id}/thumbnail_{clip_index}_{thumb_suffix}.jpg"
-        reel_thumbnail_s3_key = f"reels/{user_id}/{job_id}/thumbnail_{clip_index}.jpg"
-
-        try:
-            if upload_file_to_s3(thumb_local_path, bucket, caption_thumbnail_s3_key):
-                caption_thumbnail_ref = caption_thumbnail_s3_key
-        except Exception as thumb_upload_error:
-            logger.warning("Caption thumbnail upload failed for %s/%s: %s", job_id, clip_index, thumb_upload_error)
-
-        try:
-            if not upload_file_to_s3(thumb_local_path, bucket, reel_thumbnail_s3_key):
-                reel_thumbnail_s3_key = ""
-        except Exception as thumb_upload_error:
-            reel_thumbnail_s3_key = ""
-            logger.warning("Reel thumbnail upload failed for %s/%s: %s", job_id, clip_index, thumb_upload_error)
-
-        try:
-            os.remove(thumb_local_path)
-        except Exception:
-            pass
+    caption_thumbnail_ref, reel_thumbnail_s3_key = _upload_captioned_thumbnails(output_path, user_id, job_id, clip_index, bucket)
 
     return persisted_video_url, caption_s3_key, caption_thumbnail_ref, reel_thumbnail_s3_key
 
@@ -5121,6 +5202,46 @@ async def _persist_style_edit_version_after_captions(
 
 
 @app.post("/api/reels/{job_id}/{clip_index}/captions/persist", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
+def _validate_captioned_reel_upload(file: Optional[UploadFile]) -> None:
+    if not file:
+        raise HTTPException(status_code=400, detail="Missing rendered video file")
+    content_type = str(file.content_type or "").lower()
+    if content_type and not content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="Invalid rendered video content type")
+
+
+async def _load_clip_for_caption_persist(job_id: str, clip_index: int):
+    metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
+    if not metadata_path or not data:
+        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
+    clips = data.get('shorts', [])
+    if clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
+    clip_data = clips[clip_index] if isinstance(clips[clip_index], dict) else {}
+    return metadata_path, data, clips, clip_data
+
+
+def _resolve_captioned_reel_output_path(job_id: str, clip_index: int, filename: Optional[str]):
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(output_dir, exist_ok=True)
+    upload_name = str(filename or "captioned.mp4")
+    ext = os.path.splitext(upload_name)[1].lower()
+    if ext not in {".mp4", ".mov", ".webm", ".mkv"}:
+        ext = ".mp4"
+    output_filename = f"captioned_{clip_index}_{int(time.time())}{ext}"
+    output_path = os.path.join(output_dir, output_filename)
+    return output_filename, output_path
+
+
+async def _assert_credits_or_cleanup_output(user_id: str, caption_required_credits: float, output_path: str) -> None:
+    try:
+        await _assert_user_has_required_credits(user_id, caption_required_credits)
+    except HTTPException:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        raise
+
+
 async def persist_captioned_reel(
     job_id: str,
     clip_index: int,
@@ -5129,45 +5250,18 @@ async def persist_captioned_reel(
     subtitle_config: Annotated[Optional[str], Form()] = None,
     remotion_layers: Annotated[Optional[str], Form()] = None,
 ):
-    if not file:
-        raise HTTPException(status_code=400, detail="Missing rendered video file")
+    _validate_captioned_reel_upload(file)
 
-    content_type = str(file.content_type or "").lower()
-    if content_type and not content_type.startswith("video/"):
-        raise HTTPException(status_code=400, detail="Invalid rendered video content type")
-
-    metadata_path, data = await _get_or_build_job_metadata(job_id, clip_index)
-    if not metadata_path or not data:
-        raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
-
-    clips = data.get('shorts', [])
-    if clip_index >= len(clips):
-        raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
-
-    clip_data = clips[clip_index] if isinstance(clips[clip_index], dict) else {}
+    metadata_path, data, clips, clip_data = await _load_clip_for_caption_persist(job_id, clip_index)
     existing_caption_row, source_video_url_for_history = await _resolve_caption_persist_history_context(job_id, clip_index, user_id, clip_data)
 
     subtitle_config_payload = _parse_json_dict_or_none(subtitle_config)
     remotion_layers_payload = _parse_json_dict_or_none(remotion_layers)
 
-    output_dir = os.path.join(OUTPUT_DIR, job_id)
-    os.makedirs(output_dir, exist_ok=True)
-
-    upload_name = str(file.filename or "captioned.mp4")
-    ext = os.path.splitext(upload_name)[1].lower()
-    if ext not in {".mp4", ".mov", ".webm", ".mkv"}:
-        ext = ".mp4"
-
-    output_filename = f"captioned_{clip_index}_{int(time.time())}{ext}"
-    output_path = os.path.join(output_dir, output_filename)
+    output_filename, output_path = _resolve_captioned_reel_output_path(job_id, clip_index, file.filename)
 
     rendered_storage_gb, caption_persist_cost_breakdown, caption_required_credits = await _save_and_measure_captioned_render(file, output_path)
-    try:
-        await _assert_user_has_required_credits(user_id, caption_required_credits)
-    except HTTPException:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        raise
+    await _assert_credits_or_cleanup_output(user_id, caption_required_credits, output_path)
 
     local_video_url = f"/videos/{job_id}/{output_filename}"
     job = jobs.get(job_id)
@@ -5819,7 +5913,7 @@ def _run_add_hook(input_path: str, text: str, output_path: str, position: str, f
     add_hook_to_video(input_path, text, output_path, position=position, font_scale=font_scale)
 
 
-def _persist_new_video_url_to_clip(job: Optional[Dict[str, Any]], job_id: str, clip_index: int, clips: List[Any], data: Dict[str, Any], metadata_path: str, new_video_url: str, log_label: str) -> None:
+def _persist_new_video_url_to_clip(job: Optional[Dict[str, Any]], clip_index: int, clips: List[Any], data: Dict[str, Any], metadata_path: str, new_video_url: str, log_label: str) -> None:
     # Update InMemory Jobs
     if job and clip_index < len(job.get('result', {}).get('clips', [])):
         job['result']['clips'][clip_index]['video_url'] = new_video_url
@@ -5879,7 +5973,7 @@ async def add_hook(req: HookRequest, user_id: Annotated[str, Depends(get_user_id
         raise _generic_error("Hook Error", e)
 
     new_video_url = f"/videos/{req.job_id}/{output_filename}"
-    _persist_new_video_url_to_clip(job, req.job_id, req.clip_index, clips, data, metadata_path, new_video_url, "hook")
+    _persist_new_video_url_to_clip(job, req.clip_index, clips, data, metadata_path, new_video_url, "hook")
 
     if is_supabase_configured() and hook_required_credits > 0:
         await supabase_deduct_user_credits(user_id, hook_required_credits)
