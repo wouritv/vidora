@@ -10,7 +10,7 @@ on:
         type: string
 
 env:
-  NEXUS_REGISTRY: 82.112.253.226:8082
+  NEXUS_REGISTRY: nexus.wouri.tv:8082
   IMAGE_PREFIX: vireel
 
 jobs:
