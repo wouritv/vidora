@@ -1,6 +1,7 @@
 import express from "express";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
+import { pathToFileURL } from "node:url";
 import { initBundle } from "./bundle.js";
 import { executeRender } from "./render-worker.js";
 import { buildRenderStatusResponse, resolveRenderVideoUrl } from "./lib/render-utils.js";
@@ -46,7 +47,7 @@ const renderRequestSchema = z.object({
 
 // --- Express app ---
 
-const app = express();
+export const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
@@ -67,7 +68,7 @@ if (!INTERNAL_API_KEY) {
   process.exit(1);
 }
 
-function requireInternalApiKey(
+export function requireInternalApiKey(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
@@ -84,7 +85,7 @@ function requireInternalApiKey(
 // container* via http://localhost:<port>/... (see resolveRenderVideoUrl) --
 // it cannot attach the internal API key header, so /output is instead
 // restricted to loopback callers only rather than key-gated.
-function requireLoopback(
+export function requireLoopback(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
@@ -200,7 +201,17 @@ async function main() {
   });
 }
 
-main().catch((err) => {
-  console.error("[render-service] Fatal error during startup:", err);
-  process.exit(1);
-});
+// Only auto-start when this file is executed directly (e.g. `tsx src/server.ts`
+// or `node dist/server.js`), not when imported as a module -- mirrors Python's
+// `if __name__ == "__main__":` idiom so tests can import `app` without booting
+// a real server or bundling Remotion.
+const isMainModule = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+if (isMainModule) {
+  main().catch((err) => {
+    console.error("[render-service] Fatal error during startup:", err);
+    process.exit(1);
+  });
+}
