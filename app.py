@@ -4611,34 +4611,8 @@ async def edit_clip(
     except Exception as e:
         raise _generic_error("Edit Error", e)
 
-@app.post("/api/captions/process", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
-async def process_caption_endpoint(
-    file: Annotated[UploadFile, File()],
-    user_id: Annotated[str, Depends(get_user_id_header)],
-    acknowledged: Annotated[Optional[str], Form()] = None,
-):
-    if not file:
-        raise HTTPException(status_code=400, detail="Must provide a video file")
-
-    ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
-    if not ack_flag:
-        raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
-
-    await _enforce_job_concurrency_limit(user_id)
-    await _assert_user_has_storage_headroom(user_id)
-
-    _validate_video_extension(file.filename if file else "", context_label="sous-titres")
-
-    caption_job_id = str(uuid.uuid4())
-    output_dir = os.path.join(OUTPUT_DIR, caption_job_id)
-    os.makedirs(output_dir, exist_ok=True)
-
-    source_name = os.path.basename(str(file.filename or "caption_source.mp4"))
-    input_filename = f"caption_input_{int(time.time())}_{source_name}"
-    input_path = os.path.join(output_dir, input_filename)
-
+async def _save_caption_upload_file(file: UploadFile, input_path: str, limit_bytes: float) -> int:
     size_bytes = 0
-    limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
     try:
         async with aiofiles.open(input_path, "wb") as handle:
             while content := await file.read(1024 * 1024):
@@ -4652,56 +4626,43 @@ async def process_caption_endpoint(
         raise
     finally:
         await file.close()
+    return size_bytes
 
-    local_duration = _probe_local_video_duration_seconds(input_path)
-    _validate_caption_source_constraints(
-        duration_seconds=local_duration,
-        size_bytes=float(size_bytes),
-        source_label="fichier",
-    )
 
-    caption_required_credits = _estimate_caption_required_credits(
-        duration_seconds=local_duration,
-        size_bytes=float(size_bytes),
-    )
+async def _create_caption_endpoint_project(user_id: str, caption_job_id: str, source_name: str, input_path: str, size_bytes: int, local_duration: float):
+    if not is_supabase_configured():
+        return None
     try:
-        await _reserve_job_credits(user_id, caption_required_credits)
-    except HTTPException:
+        project_name = _project_name_from_uploaded_file(source_name)
+        project_description = _build_short_project_summary(project_name, fallback_title=project_name)
+        # Upload source to S3 with project-based key structure
+        bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+        s3_source_key = f"projects/{caption_job_id}/source/{source_name}"
+
         if os.path.exists(input_path):
-            os.remove(input_path)
-        shutil.rmtree(output_dir, ignore_errors=True)
-        raise
+            upload_file_to_s3(input_path, bucket_name, s3_source_key)
 
-    job_priority = await _resolve_user_job_priority(user_id)
+        # Create project record
+        return await supabase_create_project(
+            user_id=user_id,
+            name=project_name,
+            description=project_description,
+            project_type="caption",
+            source_type="upload",
+            source_s3_key=s3_source_key,
+            source_size=size_bytes,
+            source_duration=int(local_duration) if local_duration else None,
+            status="processing",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to create project for caption job {caption_job_id}: {str(e)}")
+        return None
 
-    # Create a project to group all generated content
-    project = None
-    if is_supabase_configured():
-        try:
-            project_name = _project_name_from_uploaded_file(source_name)
-            project_description = _build_short_project_summary(project_name, fallback_title=project_name)
-            # Upload source to S3 with project-based key structure
-            bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
-            s3_source_key = f"projects/{caption_job_id}/source/{source_name}"
 
-            if os.path.exists(input_path):
-                upload_file_to_s3(input_path, bucket_name, s3_source_key)
-
-            # Create project record
-            project = await supabase_create_project(
-                user_id=user_id,
-                name=project_name,
-                description=project_description,
-                project_type="caption",
-                source_type="upload",
-                source_s3_key=s3_source_key,
-                source_size=size_bytes,
-                source_duration=int(local_duration) if local_duration else None,
-                status="processing",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create project for caption job {caption_job_id}: {str(e)}")
-
+async def _enqueue_caption_endpoint_job(
+    caption_job_id: str, user_id: str, output_dir: str, input_path: str, source_name: str,
+    job_priority: int, caption_required_credits: float, project, local_duration: float,
+) -> None:
     runtime_payload = {
         "status": "queued",
         "logs": [f"Caption job {caption_job_id} queued."],
@@ -4746,6 +4707,63 @@ async def process_caption_endpoint(
     await CaptionProcessingPipeline(reel_job_manager, caption_job_id).step(0, "queued")
     await enqueue_reel_job(caption_job_id, priority=job_priority)
 
+
+@app.post("/api/captions/process", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
+async def process_caption_endpoint(
+    file: Annotated[UploadFile, File()],
+    user_id: Annotated[str, Depends(get_user_id_header)],
+    acknowledged: Annotated[Optional[str], Form()] = None,
+):
+    if not file:
+        raise HTTPException(status_code=400, detail="Must provide a video file")
+
+    ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
+    if not ack_flag:
+        raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
+
+    await _enforce_job_concurrency_limit(user_id)
+    await _assert_user_has_storage_headroom(user_id)
+
+    _validate_video_extension(file.filename if file else "", context_label="sous-titres")
+
+    caption_job_id = str(uuid.uuid4())
+    output_dir = os.path.join(OUTPUT_DIR, caption_job_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    source_name = os.path.basename(str(file.filename or "caption_source.mp4"))
+    input_filename = f"caption_input_{int(time.time())}_{source_name}"
+    input_path = os.path.join(output_dir, input_filename)
+
+    limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
+    size_bytes = await _save_caption_upload_file(file, input_path, limit_bytes)
+
+    local_duration = _probe_local_video_duration_seconds(input_path)
+    _validate_caption_source_constraints(
+        duration_seconds=local_duration,
+        size_bytes=float(size_bytes),
+        source_label="fichier",
+    )
+
+    caption_required_credits = _estimate_caption_required_credits(
+        duration_seconds=local_duration,
+        size_bytes=float(size_bytes),
+    )
+    try:
+        await _reserve_job_credits(user_id, caption_required_credits)
+    except HTTPException:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+
+    job_priority = await _resolve_user_job_priority(user_id)
+
+    project = await _create_caption_endpoint_project(user_id, caption_job_id, source_name, input_path, size_bytes, local_duration)
+
+    await _enqueue_caption_endpoint_job(
+        caption_job_id, user_id, output_dir, input_path, source_name, job_priority, caption_required_credits, project, local_duration,
+    )
+
     return {
         "job_id": caption_job_id,
         "project_id": project.get("id") if project else None,
@@ -4778,6 +4796,19 @@ class SubtitleRequest(BaseModel):
     animation: str = "pop"
     input_filename: Optional[str] = None
     input_url: Optional[str] = None
+
+
+def _extract_clip_captions_from_transcript(transcript: Dict[str, Any], clip_start: float, clip_end: float) -> List[Dict[str, Any]]:
+    captions = []
+    for segment in transcript.get('segments', []):
+        for word_info in segment.get('words', []):
+            if word_info['end'] > clip_start and word_info['start'] < clip_end:
+                captions.append({
+                    "text": word_info.get('word', '').strip(),
+                    "startMs": int((max(0, word_info['start'] - clip_start)) * 1000),
+                    "endMs": int((max(0, word_info['end'] - clip_start)) * 1000),
+                })
+    return captions
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
@@ -4815,18 +4846,7 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
         raise HTTPException(status_code=400, detail="Transcript not found in metadata")
 
     # Extract words within clip range and convert to CaptionWord format
-    captions = []
-    if saved_captions:
-        captions = saved_captions
-    else:
-        for segment in transcript.get('segments', []):
-            for word_info in segment.get('words', []):
-                if word_info['end'] > clip_start and word_info['start'] < clip_end:
-                    captions.append({
-                        "text": word_info.get('word', '').strip(),
-                        "startMs": int((max(0, word_info['start'] - clip_start)) * 1000),
-                        "endMs": int((max(0, word_info['end'] - clip_start)) * 1000),
-                    })
+    captions = saved_captions if saved_captions else _extract_clip_captions_from_transcript(transcript, clip_start, clip_end)
 
     duration_sec = clip_end - clip_start
 
