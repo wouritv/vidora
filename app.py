@@ -1270,7 +1270,7 @@ async def _ensure_preview_image_for_clip(job_id: str, clip_index: int, user_id: 
         if caption_thumb and not _is_probably_video_url(caption_thumb):
             return caption_thumb
 
-    metadata_path, metadata = await _get_or_build_job_metadata(job_id, clip_index)
+    _, metadata = await _get_or_build_job_metadata(job_id, clip_index)
     clip_data: Dict[str, Any] = {}
     if isinstance(metadata, dict):
         shorts = metadata.get("shorts") or []
@@ -1814,7 +1814,7 @@ async def cleanup_jobs():
 
             # Cleanup in-memory API jobs (artifacts are cleaned by batched output sweeps).
             expired_api_jobs = [
-                jid for jid, jdata in list(jobs.items())
+                jid for jid, jdata in jobs.items()
                 if jdata.get("status") in ("completed", "failed")
                 and jdata.get("output_dir")
                 and os.path.isdir(jdata["output_dir"])
@@ -1826,7 +1826,7 @@ async def cleanup_jobs():
             # Cleanup SaaSShorts jobs from memory
             try:
                 saas_expired = [
-                    jid for jid, jdata in list(saas_jobs.items())
+                    jid for jid, jdata in saas_jobs.items()
                     if jdata.get("status") in ("completed", "failed")
                     and jdata.get("output_dir")
                     and os.path.isdir(jdata["output_dir"])
@@ -1926,7 +1926,7 @@ app = FastAPI(lifespan=lifespan)
 _cors_extra_origins = [
     o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
 ]
-_cors_allowed_origins = sorted(set([FRONTEND_ORIGIN, *_cors_extra_origins]))
+_cors_allowed_origins = sorted({FRONTEND_ORIGIN, *_cors_extra_origins})
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allowed_origins,
@@ -2061,7 +2061,6 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
 
         # Async wait for process with incremental updates
         start_wait = time.time()
-        timed_out = False
         while process.poll() is None:
             if execution_ctx and execution_ctx.get("preempt_requested"):
                 try:
@@ -2073,7 +2072,6 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 # longer than any legitimate input should require, instead
                 # of letting it occupy a worker slot indefinitely (see
                 # security audit finding H13).
-                timed_out = True
                 jobs[job_id]['logs'].append(
                     f"Job exceeded max processing time ({REEL_JOB_MAX_PROCESSING_SECONDS}s); terminating."
                 )
@@ -2239,7 +2237,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                             reserved_credits=job_reserved_credits,
                         )
                     except Exception as billing_error:
-                        logger.error(f"Billing update failed: {billing_error}")
+                        logger.exception("Billing update failed")
                         jobs[job_id]['logs'].append(f"Billing update failed: {billing_error}")
 
                 result_payload = {
@@ -2362,7 +2360,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     pass
 
 
-async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):
+async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: Optional[Dict[str, Any]] = None):  # NOSONAR(python:S1172): kept for call-site symmetry with run_job, which does use it for preemption/timeout control -- both are dispatched identically from run_job_wrapper
     user_id = job_data.get("user_id")
     output_dir = str(job_data.get("output_dir") or "")
     input_path = str(job_data.get("input_path") or "")
@@ -3925,7 +3923,6 @@ async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
                     # Build partial result from generated clips
                     partial_clips = []
                     for i, clip_file in enumerate(clip_files):
-                        clip_path = os.path.join(output_dir, clip_file)
                         match = re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file)
                         resolved_clip_index = (int(match.group(1)) - 1) if match else i
                         partial_clips.append({
@@ -3936,7 +3933,7 @@ async def get_status(job_id: str, user_id: str = Depends(get_user_id_header)):
                             'status': 'generated'
                         })
                     response['partialClips'] = partial_clips
-        except Exception as e:
+        except Exception:
             # Silently fail - don't break the status endpoint
             pass
 
@@ -6112,12 +6109,16 @@ class SocialPostRequest(BaseModel):
 import httpx
 
 
-def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:
+def _resolve_request_user_id(explicit_user_id: Optional[str], user_id: str) -> str:  # NOSONAR(python:S1172)
     # Security: `explicit_user_id` comes from a client-supplied request body
     # field and must never override the verified identity resolved from the
     # authenticated session (`user_id`, from get_user_id_header). Otherwise a
     # client could act on behalf of an arbitrary victim simply by setting
-    # `user_id` in the JSON body.
+    # `user_id` in the JSON body. Kept as a named (but deliberately unused)
+    # parameter -- rather than dropped or renamed to `_` -- so every call
+    # site visibly shows the untrusted value being discarded, instead of
+    # silently omitting it in a way a future edit could "helpfully" start
+    # trusting again.
     resolved = (user_id or "").strip()
     if not resolved:
         raise HTTPException(status_code=400, detail="Missing authenticated user id")
@@ -6168,7 +6169,7 @@ async def _resolve_clip_for_social_post(job_id: str, clip_index: int) -> Dict[st
     return clip
 
 
-def _resolve_public_video_url(video_ref: str, request: Request, job_id: str, clip_index: int) -> str:
+def _resolve_public_video_url(video_ref: str, request: Request, job_id: str) -> str:
     ref = (video_ref or "").strip()
     # NOSONAR(python:S5332): this detects whether `ref` is already an
     # absolute URL (any scheme) so it isn't re-prefixed with a base URL --
@@ -6203,7 +6204,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
         raise HTTPException(status_code=404, detail="Video URL not found for this clip")
 
     local_video_path = _resolve_local_video_path(req.job_id, video_ref, req.clip_index)
-    public_video_url = _resolve_public_video_url(video_ref, request, req.job_id, req.clip_index)
+    public_video_url = _resolve_public_video_url(video_ref, request, req.job_id)
 
     final_title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title') or 'Vireel Short'
     final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
@@ -8684,7 +8685,7 @@ async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> N
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
-        logger.error("%s API error: %s - %s", platform, e.response.status_code, e.response.text)
+        logger.exception("%s API error: %s - %s", platform, e.response.status_code, e.response.text)
         raise HTTPException(
             status_code=502,
             detail=f"{platform} API error ({e.response.status_code}): {e.response.text}",
