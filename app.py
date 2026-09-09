@@ -8975,6 +8975,66 @@ def connect(platform: str, request: Request, user_id: Annotated[str, Depends(get
     return {"auth_url": auth_url}
 
 
+def _build_oauth_token_payload(key: str, code: str, config: dict, state_data: dict) -> Dict[str, Any]:
+    token_payload = {
+        "code": code,
+        "redirect_uri": state_data.get("redirect_uri") or _oauth_redirect_uri(key),
+        "grant_type": "authorization_code",
+    }
+
+    if key == "tiktok":
+        token_payload["client_key"] = config["client_id"]
+        token_payload["client_secret"] = config["client_secret"]
+        token_payload["code_verifier"] = state_data["code_verifier"]  # ← récupéré du connect
+    else:
+        token_payload["client_id"] = config["client_id"]
+        token_payload["client_secret"] = config["client_secret"]
+
+    return token_payload
+
+
+async def _handle_facebook_oauth_callback(key: str, token_data: dict, state_data: dict):
+    try:
+        pages = await fetch_facebook_pages(token_data["access_token"])
+        if pages:
+            # Retourne le modal de sélection de pages
+            return _oauth_popup_response(
+                False, key, None,
+                page_selection_data={
+                    "pages": pages,
+                    "user_token": token_data["access_token"],
+                    "user_token_expires_in": token_data.get("expires_in", 5184000),
+                    "user_id": state_data.get("user_id"),
+                }
+            )
+        return _oauth_popup_response(
+            False,
+            key,
+            "No manageable Facebook Pages found. Ensure you are Page admin/editor and grant pages_show_list, pages_manage_posts, pages_read_engagement.",
+        )
+    except Exception as e:
+        return _oauth_popup_response(
+            False,
+            key,
+            f"Facebook pages fetch failed: {e}",
+        )
+
+
+async def _finalize_oauth_callback_identity(key: str, state_data: dict, token_data: dict):
+    identity = await fetch_platform_identity(key, token_data["access_token"])
+    await _upsert_social_account(
+        user_id=state_data["user_id"],
+        platform=key,
+        access_token=token_data["access_token"],
+        refresh_token=token_data.get("refresh_token"),
+        expires_in=int(token_data.get("expires_in") or 3600),
+        platform_user_id=identity.get("id", ""),
+        platform_account_name=identity.get("name", key),
+        scopes=str(token_data.get("scopes") or ""),
+    )
+    return _oauth_popup_response(True, key)
+
+
 @app.get("/api/auth/{platform}/callback", responses={404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def callback(platform: str, code: Optional[str] = None, state: str = "", error: Optional[str] = None):
     key = (platform or "").strip().lower()
@@ -8994,20 +9054,7 @@ async def callback(platform: str, code: Optional[str] = None, state: str = "", e
         return _oauth_popup_response(False, key, "Missing OAuth code")
 
     config = _resolve_platform_config(key)
-
-    token_payload = {
-        "code": code,
-        "redirect_uri": state_data.get("redirect_uri") or _oauth_redirect_uri(key),
-        "grant_type": "authorization_code",
-    }
-
-    if key == "tiktok":
-        token_payload["client_key"] = config["client_id"]
-        token_payload["client_secret"] = config["client_secret"]
-        token_payload["code_verifier"] = state_data["code_verifier"]  # ← récupéré du connect
-    else:
-        token_payload["client_id"] = config["client_id"]
-        token_payload["client_secret"] = config["client_secret"]
+    token_payload = _build_oauth_token_payload(key, code, config, state_data)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -9025,43 +9072,9 @@ async def callback(platform: str, code: Optional[str] = None, state: str = "", e
 
         # Facebook : récupère les pages et affiche la sélection
         if key == "facebook":
-            try:
-                pages = await fetch_facebook_pages(token_data["access_token"])
-                if pages:
-                    # Retourne le modal de sélection de pages
-                    return _oauth_popup_response(
-                        False, key, None,
-                        page_selection_data={
-                            "pages": pages,
-                            "user_token": token_data["access_token"],
-                            "user_token_expires_in": token_data.get("expires_in", 5184000),
-                            "user_id": state_data.get("user_id"),
-                        }
-                    )
-                return _oauth_popup_response(
-                    False,
-                    key,
-                    "No manageable Facebook Pages found. Ensure you are Page admin/editor and grant pages_show_list, pages_manage_posts, pages_read_engagement.",
-                )
-            except Exception as e:
-                return _oauth_popup_response(
-                    False,
-                    key,
-                    f"Facebook pages fetch failed: {e}",
-                )
+            return await _handle_facebook_oauth_callback(key, token_data, state_data)
 
-        identity = await fetch_platform_identity(key, token_data["access_token"])
-        await _upsert_social_account(
-            user_id=state_data["user_id"],
-            platform=key,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token"),
-            expires_in=int(token_data.get("expires_in") or 3600),
-            platform_user_id=identity.get("id", ""),
-            platform_account_name=identity.get("name", key),
-            scopes=str(token_data.get("scopes") or ""),
-        )
-        return _oauth_popup_response(True, key)
+        return await _finalize_oauth_callback_identity(key, state_data, token_data)
     except Exception as exc:
         return _oauth_popup_response(False, key, str(exc))
 
@@ -9084,50 +9097,67 @@ async def _exchange_instagram_long_lived_token(config: dict, short_lived_token: 
     data = response.json()
     return data
 
+async def _fetch_linkedin_identity(client: httpx.AsyncClient, headers: Dict[str, str]) -> Dict[str, str]:
+    response = await client.get("https://api.linkedin.com/v2/userinfo", headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    return {"id": str(data.get("sub") or ""), "name": data.get("name") or "LinkedIn"}
+
+
+async def _fetch_facebook_identity(client: httpx.AsyncClient, headers: Dict[str, str]) -> Dict[str, str]:
+    response = await client.get("https://graph.facebook.com/me", params={"fields": "id,name"}, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    return {"id": str(data.get("id") or ""), "name": data.get("name") or "Facebook"}
+
+
+async def _fetch_instagram_identity(access_token: str) -> Dict[str, str]:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            "https://graph.instagram.com/me",
+            params={
+                "fields": "id,username,account_type",
+                "access_token": access_token,
+            },
+        )
+    response.raise_for_status()
+    data = response.json()
+    return {"id": data["id"], "name": data.get("username", "instagram")}
+
+
+async def _fetch_youtube_identity(client: httpx.AsyncClient, headers: Dict[str, str]) -> Dict[str, str]:
+    response = await client.get("https://www.googleapis.com/youtube/v3/channels", params={"part": "snippet", "mine": "true"}, headers=headers)
+    response.raise_for_status()
+    items = response.json().get("items") or []
+    first = items[0] if items else {}
+    return {"id": str(first.get("id") or ""), "name": ((first.get("snippet") or {}).get("title") or "YouTube")}
+
+
+async def _fetch_tiktok_identity(client: httpx.AsyncClient, headers: Dict[str, str]) -> Dict[str, str]:
+    response = await client.get(
+        "https://open.tiktokapis.com/v2/user/info/",
+        params={"fields": "open_id,display_name"},
+        headers=headers,
+    )
+    response.raise_for_status()
+    user = ((response.json().get("data") or {}).get("user") or {})
+    return {"id": str(user.get("open_id") or ""), "name": user.get("display_name") or "TikTok"}
+
+
 async def fetch_platform_identity(platform: str, access_token: str):
+    if platform == "instagram":
+        return await _fetch_instagram_identity(access_token)
+
     headers = {"Authorization": f"Bearer {access_token}"}
     async with httpx.AsyncClient(timeout=20.0) as client:
         if platform == "linkedin":
-            response = await client.get("https://api.linkedin.com/v2/userinfo", headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            return {"id": str(data.get("sub") or ""), "name": data.get("name") or "LinkedIn"}
-
+            return await _fetch_linkedin_identity(client, headers)
         if platform == "facebook":
-            response = await client.get("https://graph.facebook.com/me", params={"fields": "id,name"}, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            return {"id": str(data.get("id") or ""), "name": data.get("name") or "Facebook"}
-
-        if platform == "instagram":
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    "https://graph.instagram.com/me",
-                    params={
-                        "fields": "id,username,account_type",
-                        "access_token": access_token,
-                    },
-                )
-            response.raise_for_status()
-            data = response.json()
-            return {"id": data["id"], "name": data.get("username", "instagram")}
-
+            return await _fetch_facebook_identity(client, headers)
         if platform == "youtube":
-            response = await client.get("https://www.googleapis.com/youtube/v3/channels", params={"part": "snippet", "mine": "true"}, headers=headers)
-            response.raise_for_status()
-            items = response.json().get("items") or []
-            first = items[0] if items else {}
-            return {"id": str(first.get("id") or ""), "name": ((first.get("snippet") or {}).get("title") or "YouTube")}
-
+            return await _fetch_youtube_identity(client, headers)
         if platform == "tiktok":
-            response = await client.get(
-                "https://open.tiktokapis.com/v2/user/info/",
-                params={"fields": "open_id,display_name"},
-                headers=headers,
-            )
-            response.raise_for_status()
-            user = ((response.json().get("data") or {}).get("user") or {})
-            return {"id": str(user.get("open_id") or ""), "name": user.get("display_name") or "TikTok"}
+            return await _fetch_tiktok_identity(client, headers)
 
     raise HTTPException(status_code=404, detail=_UNSUPPORTED_PLATFORM)
 
@@ -9276,39 +9306,34 @@ _REFRESH_PARAM_OVERRIDES = {
 }
 
 
-async def get_valid_token(account: Dict[str, Any]) -> str:
-    access_token = _decrypt_token(account.get("access_token_encrypted"))
-    if access_token and not _is_token_expiring(account):
-        return access_token
-
-    platform = str(account.get("platform") or "").lower()
-
+async def _refresh_instagram_token(account: Dict[str, Any], access_token: Optional[str]) -> str:
     # --- Instagram : pas de refresh_token classique, on rafraîchit le
     # long-lived access_token directement via ig_refresh_token ---
-    if platform == "instagram":
-        if not access_token:
-            raise HTTPException(status_code=401, detail="Instagram account token missing, reconnection required")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Instagram account token missing, reconnection required")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                "https://graph.instagram.com/refresh_access_token",
-                params={"grant_type": "ig_refresh_token", "access_token": access_token},
-            )
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            "https://graph.instagram.com/refresh_access_token",
+            params={"grant_type": "ig_refresh_token", "access_token": access_token},
+        )
 
-        if response.status_code in (400, 401):
-            logger.warning("Instagram token refresh rejected: %s", response.text)
-            raise HTTPException(status_code=401, detail="Instagram token expired, reconnection required")
-        await _raise_for_status_or_502(response, "Instagram")
+    if response.status_code in (400, 401):
+        logger.warning("Instagram token refresh rejected: %s", response.text)
+        raise HTTPException(status_code=401, detail="Instagram token expired, reconnection required")
+    await _raise_for_status_or_502(response, "Instagram")
 
-        new_data = response.json()
-        refreshed_access_token = new_data.get("access_token")
-        if not refreshed_access_token:
-            raise HTTPException(status_code=502, detail="Instagram refresh response missing access_token")
-        expires_in = int(new_data.get("expires_in") or 5_184_000)  # 60 jours par défaut
+    new_data = response.json()
+    refreshed_access_token = new_data.get("access_token")
+    if not refreshed_access_token:
+        raise HTTPException(status_code=502, detail="Instagram refresh response missing access_token")
+    expires_in = int(new_data.get("expires_in") or 5_184_000)  # 60 jours par défaut
 
-        await _persist_refreshed_token(account, refreshed_access_token, None, expires_in)
-        return refreshed_access_token
+    await _persist_refreshed_token(account, refreshed_access_token, None, expires_in)
+    return refreshed_access_token
 
+
+async def _refresh_generic_oauth_token(account: Dict[str, Any], platform: str, access_token: Optional[str]) -> str:
     # --- Flow générique (OAuth refresh_token) pour les autres plateformes ---
     refresh_token = _decrypt_token(account.get("refresh_token_encrypted"))
     if not refresh_token:
@@ -9350,6 +9375,19 @@ async def get_valid_token(account: Dict[str, Any]) -> str:
 
     await _persist_refreshed_token(account, refreshed_access_token, refreshed_refresh_token, expires_in)
     return refreshed_access_token
+
+
+async def get_valid_token(account: Dict[str, Any]) -> str:
+    access_token = _decrypt_token(account.get("access_token_encrypted"))
+    if access_token and not _is_token_expiring(account):
+        return access_token
+
+    platform = str(account.get("platform") or "").lower()
+
+    if platform == "instagram":
+        return await _refresh_instagram_token(account, access_token)
+
+    return await _refresh_generic_oauth_token(account, platform, access_token)
 
 
 async def _persist_refreshed_token(
