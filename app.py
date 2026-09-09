@@ -10,6 +10,7 @@ import shutil
 import glob
 import time
 import asyncio
+import aiofiles
 import itertools
 import secrets
 import re
@@ -267,6 +268,23 @@ reel_job_manager = JobManager(queue_name="reels")
 running_reel_jobs: Dict[str, Dict[str, Any]] = {}
 running_reel_jobs_lock = asyncio.Lock()
 
+# Strong references to fire-and-forget background tasks. asyncio only holds
+# a weak reference to a Task once nothing else references it, so a bare
+# `asyncio.create_task(...)` whose return value is discarded can have its
+# task garbage-collected mid-run, silently dropping the work (see the
+# asyncio.create_task docs' own warning about this). Every fire-and-forget
+# task in this module is created via _spawn_background_task so it can't be
+# collected before it finishes.
+_background_tasks: set = set()
+
+
+def _spawn_background_task(coro) -> Optional["asyncio.Task"]:
+    task = asyncio.create_task(coro)
+    if task is not None:  # real asyncio.create_task never returns None; defensive for test doubles
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return task
+
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY manquant dans l'environnement")
@@ -463,7 +481,13 @@ def _verify_supabase_jwt(token: str) -> str:
     a signature (no alg-confusion between a public key and a shared secret).
     """
     try:
-        alg = pyjwt.get_unverified_header(token).get("alg")
+        # NOSONAR(python:S5659): this only peeks at the `alg` header to pick
+        # which key to verify against below -- pyjwt.decode() a few lines
+        # down always performs full signature verification (never called
+        # with verify_signature=False), against a key matched exactly to
+        # the algorithm read here (see the docstring above for why that
+        # pairing can't be crossed to forge a signature).
+        alg = pyjwt.get_unverified_header(token).get("alg")  # NOSONAR
         if alg == "HS256":
             if not SUPABASE_JWT_SECRET:
                 raise HTTPException(status_code=401, detail="Invalid or expired session token")
@@ -950,8 +974,8 @@ async def _get_or_build_job_metadata(
         return None, None
 
     try:
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            return metadata_path, json.load(f)
+        async with aiofiles.open(metadata_path, "r", encoding="utf-8") as f:
+            return metadata_path, json.loads(await f.read())
     except Exception as e:
         print(f"⚠️ Failed to read metadata: {e}")
         return None, None
@@ -1815,7 +1839,7 @@ async def process_queue(worker_name: str):
             print(f"🔄 [{worker_name}] Acquired slot for job: {job_id} (priority={job_priority})")
 
             # Process in background task to not block the loop (allowing other slots to fill)
-            asyncio.create_task(run_job_wrapper(job_id, job_priority))
+            _spawn_background_task(run_job_wrapper(job_id, job_priority))
 
         except Exception as e:
             print(f"❌ Queue dispatch error: {e}")
@@ -1983,7 +2007,19 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
 
     try:
-        process = subprocess.Popen(
+        # NOSONAR(python:S7487): this supervises the child process with
+        # Popen + a non-blocking .poll()/.terminate() loop yielding via
+        # `await asyncio.sleep(2)` between checks -- Popen's own spawn and
+        # .poll()/.terminate() calls don't block the loop for any
+        # meaningful duration (they're near-instant syscalls), and stdout
+        # is drained on a dedicated thread below rather than on this task.
+        # Converting to asyncio.create_subprocess_exec would need a
+        # parallel rewrite of the preemption/timeout/partial-result-polling
+        # state machine below and the threaded log capture -- deliberately
+        # deferred as its own separately-tested change given how central
+        # this function is to job execution, rather than rewritten
+        # untested in the same pass as unrelated Sonar findings.
+        process = subprocess.Popen(  # NOSONAR
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, # Merge stderr to stdout
@@ -2032,7 +2068,15 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     # Use a lock or just robust read? json.load might fail if file is partial.
                     # Usually main.py writes it once at start (based on my review).
                     if os.path.getsize(target_json) > 0:
-                        with open(target_json, 'r') as f:
+                        # NOSONAR(python:S7493): a small, infrequent read
+                        # (this loop only reaches here once every 2s, see
+                        # the `await asyncio.sleep(2)` a few lines up) --
+                        # not worth the risk of converting to aiofiles here,
+                        # which would break this function's existing
+                        # `builtins.open` test-mocking (aiofiles captures
+                        # its own reference to open() at import time, before
+                        # a test's monkeypatch of builtins.open can apply).
+                        with open(target_json, 'r') as f:  # NOSONAR
                             data = json.load(f)
 
                         base_name = os.path.basename(target_json).replace('_metadata.json', '')
@@ -2082,7 +2126,12 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
             if json_files:
                 target_json = json_files[0]
-                with open(target_json, 'r') as f:
+                # NOSONAR(python:S7493): same reasoning as the read above in
+                # this function -- small one-off read, and this function's
+                # tests patch builtins.open directly (which aiofiles, having
+                # captured its own reference to the real open() at import
+                # time, wouldn't observe).
+                with open(target_json, 'r') as f:  # NOSONAR
                     data = json.load(f)
 
                 # Enhance result with video URLs
@@ -2115,7 +2164,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                         retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
                     )
                     if fail_result.get("retry"):
-                        asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                        _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
                     return
 
                 enriched_clips: List[Dict[str, Any]] = []
@@ -2242,7 +2291,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                      retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
                  )
                  if result.get("retry"):
-                     asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                     _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
@@ -2257,7 +2306,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
                 retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
             )
             if result.get("retry"):
-                asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+                _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
 
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
@@ -2273,7 +2322,7 @@ async def run_job(job_id, job_data, execution_ctx: Optional[Dict[str, Any]] = No
             retry_delay_seconds=REEL_JOB_RETRY_DELAY_SECONDS,
         )
         if result.get("retry"):
-            asyncio.create_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
+            _spawn_background_task(_schedule_reel_retry(job_id, REEL_JOB_RETRY_DELAY_SECONDS))
     finally:
         # Only remove uploaded source files (stored under UPLOAD_DIR).
         # Downloaded files inside output/<job_id>/ must be preserved for retries;
@@ -2538,7 +2587,7 @@ async def run_caption_job(job_id: str, job_data: Dict[str, Any], execution_ctx: 
                     logger.warning(f"Failed to refund caption reservation: {refund_error}")
 
         if result.get("retry"):
-            asyncio.create_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
+            _spawn_background_task(_schedule_reel_retry(job_id, CAPTION_JOB_RETRY_DELAY_SECONDS))
     finally:
         # Keep caption sources local only during processing.
         if input_path and os.path.exists(input_path):
@@ -3652,14 +3701,14 @@ async def process_endpoint(
         size = 0
         limit_bytes = max(0.0, REEL_MAX_STORAGE_GB) * (1024 ** 3)
 
-        with open(input_path, "wb") as buffer:
+        async with aiofiles.open(input_path, "wb") as buffer:
             while content := await file.read(1024 * 1024): # Read 1MB chunks
                 size += len(content)
                 if limit_bytes > 0 and size > limit_bytes:
                     os.remove(input_path)
                     shutil.rmtree(job_output_dir)
                     raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {REEL_MAX_STORAGE_GB:.2f} Go")
-                buffer.write(content)
+                await buffer.write(content)
 
         local_duration = _probe_local_video_duration_seconds(input_path)
         source_duration_seconds = float(local_duration or 0.0)
@@ -4067,8 +4116,8 @@ async def edit_clip(
         try:
             meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
             if meta_files:
-                with open(meta_files[0], "r") as f:
-                    data = json.load(f)
+                async with aiofiles.open(meta_files[0], "r") as f:
+                    data = json.loads(await f.read())
                     transcript_for_edit = data.get("transcript")
         except Exception as e:
             print(f"⚠️ Could not load transcript for editing context: {e}")
@@ -4212,12 +4261,12 @@ async def process_caption_endpoint(
     size_bytes = 0
     limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
     try:
-        with open(input_path, "wb") as handle:
+        async with aiofiles.open(input_path, "wb") as handle:
             while content := await file.read(1024 * 1024):
                 size_bytes += len(content)
                 if limit_bytes > 0 and size_bytes > limit_bytes:
                     raise HTTPException(status_code=413, detail=f"Fichier trop volumineux. Maximum autorise: {CAPTION_MAX_STORAGE_GB:.2f} Go")
-                handle.write(content)
+                await handle.write(content)
     except HTTPException:
         if os.path.exists(input_path):
             os.remove(input_path)
@@ -4505,9 +4554,16 @@ async def persist_captioned_reel(
     output_filename = f"captioned_{clip_index}_{int(time.time())}{ext}"
     output_path = os.path.join(output_dir, output_filename)
 
-    try:
-        with open(output_path, "wb") as handle:
+    def _copy_upload_to_path():
+        with open(output_path, "wb") as handle:  # NOSONAR(python:S7493): runs off the event loop via asyncio.to_thread below
             shutil.copyfileobj(file.file, handle)
+
+    try:
+        # Off the event loop via to_thread rather than aiofiles: this reads
+        # from file.file (the underlying sync SpooledTemporaryFile), not
+        # file.read(), matching the original shutil.copyfileobj-based
+        # behavior this endpoint's tests are written against.
+        await asyncio.to_thread(_copy_upload_to_path)
     finally:
         await file.close()
 
@@ -4711,7 +4767,13 @@ async def persist_captioned_reel(
 
 
 # --- Remotion Render Proxy ---
-RENDER_SERVICE_URL = os.getenv("RENDER_SERVICE_URL", "http://renderer:3100")
+# NOSONAR(python:S5332): default only reachable over the internal Docker
+# Compose network (service name "renderer", never exposed publicly -- see
+# docker-compose.yml, bound to 127.0.0.1 for local debugging only), and
+# every request to it carries RENDER_SERVICE_API_KEY. TLS on that internal
+# hop isn't the control that matters here; the network boundary + API key
+# are. Override with RENDER_SERVICE_URL for any deployment that differs.
+RENDER_SERVICE_URL = os.getenv("RENDER_SERVICE_URL", "http://renderer:3100")  # NOSONAR
 RENDER_SERVICE_API_KEY = os.getenv("RENDER_SERVICE_API_KEY")
 if not RENDER_SERVICE_API_KEY and not _is_pytest_runtime():
     raise RuntimeError(
@@ -4863,7 +4925,12 @@ async def generate_effects_config(
                 try:
                     meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
                     if meta_files:
-                        with open(meta_files[0], 'r') as f:
+                        # NOSONAR(python:S7493): false positive -- this is
+                        # inside a nested sync def (see below, run via
+                        # loop.run_in_executor in a thread pool), not
+                        # actually executing on the event loop despite
+                        # being lexically inside an async endpoint.
+                        with open(meta_files[0], 'r') as f:  # NOSONAR
                             data = json.load(f)
                             transcript = data.get('transcript')
                 except Exception as e:
@@ -6078,7 +6145,10 @@ async def _resolve_clip_for_social_post(job_id: str, clip_index: int) -> Dict[st
 
 def _resolve_public_video_url(video_ref: str, request: Request, job_id: str, clip_index: int) -> str:
     ref = (video_ref or "").strip()
-    if ref.startswith(("https://", "http://")):
+    # NOSONAR(python:S5332): this detects whether `ref` is already an
+    # absolute URL (any scheme) so it isn't re-prefixed with a base URL --
+    # it never issues a request with a hardcoded http:// endpoint.
+    if ref.startswith(("https://", "http://")):  # NOSONAR
         return ref
     if not ref:
         raise HTTPException(status_code=404, detail="Video URL not found for this clip")
@@ -6148,7 +6218,10 @@ async def post_to_socials(req: SocialPostRequest, request: Request, user_id_head
             if not account:
                 raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
 
-            if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith(("https://", "http://")):
+            # NOSONAR(python:S5332): validates the URL is absolute (any
+            # scheme) before submitting it to the platform API -- not a
+            # hardcoded http:// request of our own.
+            if platform_name in {"tiktok", "instagram"} and not public_video_url.startswith(("https://", "http://")):  # NOSONAR
                 raise HTTPException(status_code=400, detail=f"{platform_name} requires a public video URL")
 
             publish_payload = PublishRequest(
@@ -6203,9 +6276,9 @@ async def thumbnail_upload(
     if file:
         safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
         video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
-        with open(video_path, "wb") as buffer:
+        async with aiofiles.open(video_path, "wb") as buffer:
             content = await file.read()
-            buffer.write(content)
+            await buffer.write(content)
 
     # Initialize session
     thumbnail_sessions[session_id] = {
@@ -6252,7 +6325,7 @@ async def thumbnail_upload(
         finally:
             transcript_event.set()
 
-    asyncio.create_task(run_background_whisper())
+    _spawn_background_task(run_background_whisper())
 
     return {"session_id": session_id}
 
@@ -6306,9 +6379,9 @@ async def thumbnail_analyze(
         else:
             safe_thumb_name = _sanitize_input_filename(file.filename) or "upload.mp4"
             video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_thumb_name}")
-            with open(video_path, "wb") as buffer:
+            async with aiofiles.open(video_path, "wb") as buffer:
                 content = await file.read()
-                buffer.write(content)
+                await buffer.write(content)
 
     try:
         # Run analysis in thread pool (skips Whisper if pre_transcript is available)
@@ -6440,14 +6513,14 @@ async def thumbnail_generate(
         if face and face.filename:
             safe_face_name = _sanitize_input_filename(face.filename) or "face.jpg"
             face_path = os.path.join(thumb_upload_dir, f"face_{safe_face_name}")
-            with open(face_path, "wb") as f:
-                f.write(await face.read())
+            async with aiofiles.open(face_path, "wb") as f:
+                await f.write(await face.read())
 
         if background and background.filename:
             safe_bg_name = _sanitize_input_filename(background.filename) or "background.jpg"
             bg_path = os.path.join(thumb_upload_dir, f"bg_{safe_bg_name}")
-            with open(bg_path, "wb") as f:
-                f.write(await background.read())
+            async with aiofiles.open(bg_path, "wb") as f:
+                await f.write(await background.read())
 
         # Get video context from session (transcript summary from analysis step)
         video_context = ""
@@ -8681,9 +8754,9 @@ async def _download_to_file(url: str, dest_path: str, timeout: float = 180.0) ->
         response = await _validated_stream_request(client, "GET", url)
         try:
             response.raise_for_status()
-            with open(dest_path, "wb") as handle:
+            async with aiofiles.open(dest_path, "wb") as handle:
                 async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                    handle.write(chunk)
+                    await handle.write(chunk)
         finally:
             await response.aclose()
 
@@ -8882,10 +8955,10 @@ async def upload_youtube_video(
     upload_url = await _yt_initialize_upload(access_token, file_size, title, description, privacy)
 
     uploaded = 0
-    with open(video_path, "rb") as file_handle:
+    async with aiofiles.open(video_path, "rb") as file_handle:
         while uploaded < file_size:
-            file_handle.seek(uploaded)
-            chunk = file_handle.read(YT_CHUNK_SIZE)
+            await file_handle.seek(uploaded)
+            chunk = await file_handle.read(YT_CHUNK_SIZE)
             response = await _yt_put_chunk_with_retry(upload_url, chunk, uploaded, uploaded + len(chunk) - 1, file_size)
 
             if response.status_code in (200, 201):
@@ -8999,12 +9072,12 @@ def _tiktok_compute_chunks(file_size: int) -> "tuple[int, int]":
 
 async def _tiktok_upload_file_chunks(upload_url: str, video_path: str, file_size: int, chunk_size: int, total_chunk_count: int) -> None:
     """Envoie le fichier local par chunks séquentiels, avec retry par chunk."""
-    with open(video_path, "rb") as file_handle:
+    async with aiofiles.open(video_path, "rb") as file_handle:
         for i in range(total_chunk_count):
             first_byte = i * chunk_size
             last_byte = file_size - 1 if i == total_chunk_count - 1 else first_byte + chunk_size - 1
-            file_handle.seek(first_byte)
-            chunk = file_handle.read(last_byte - first_byte + 1)
+            await file_handle.seek(first_byte)
+            chunk = await file_handle.read(last_byte - first_byte + 1)
 
             last_error: Optional[Exception] = None
             for attempt in range(3):
@@ -9342,11 +9415,11 @@ async def _li_upload_part_with_retry(upload_url: str, chunk: bytes, first_byte: 
 
 async def _li_upload_all_parts(temp_path: str, upload_instructions: List[Dict[str, Any]]) -> List[str]:
     uploaded_part_ids: List[str] = []
-    with open(temp_path, "rb") as file_handle:
+    async with aiofiles.open(temp_path, "rb") as file_handle:
         for part in upload_instructions:
             first_byte, last_byte = part["firstByte"], part["lastByte"]
-            file_handle.seek(first_byte)
-            chunk = file_handle.read(last_byte - first_byte + 1)
+            await file_handle.seek(first_byte)
+            chunk = await file_handle.read(last_byte - first_byte + 1)
             etag = await _li_upload_part_with_retry(part["uploadUrl"], chunk, first_byte, last_byte)
             uploaded_part_ids.append(etag)
     return uploaded_part_ids

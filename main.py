@@ -976,7 +976,11 @@ def _build_ytdlp_opts(use_cookies: bool, job_cookies_path, proxy_session_id):
                 'player_skip': ['webpage', 'configs'],
                 'formats': ['missing_pot'],
             },
-            'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}
+            # NOSONAR(python:S5332): "pot-provider" only resolves on the
+            # internal Docker Compose network (see docker-compose.yml),
+            # never exposed publicly -- TLS on that internal hop isn't the
+            # control that matters here.
+            'youtubepot-bgutilhttp': {'base_url': 'http://pot-provider:4416'}  # NOSONAR
         },
         # Pas de 'http_headers' custom ici : yt-dlp applique automatiquement
         # les en-têtes cohérents avec le client choisi (android/ios/web...).

@@ -107,8 +107,8 @@ def estimate_reel_cost_usd(
 
     assembly_usd = duration_minutes * ASSEMBLY_ESTIMATE_COST_PER_MINUTE if uses_assembly else 0.0
     # Real OpenAI/Gemini costs are billed from exact token usage at runtime.
-    openai_usd = 0.0 if uses_openai else 0.0
-    gemini_usd = 0.0 if uses_gemini else 0.0
+    openai_usd = 0.0
+    gemini_usd = 0.0
 
     total_usd = s3_usd + vps_usd + dataimpulse_usd + assembly_usd + openai_usd + gemini_usd
 
@@ -139,8 +139,8 @@ def estimate_caption_cost_usd(
     vps_usd      = duration_minutes * VIREEL_VPS_PRICE_BY_MINUTE
     assembly_usd = duration_minutes * ASSEMBLY_ESTIMATE_COST_PER_MINUTE if uses_assembly else 0.0
     # Real OpenAI/Gemini costs are billed from exact token usage at runtime.
-    openai_usd = 0.0 if uses_openai else 0.0
-    gemini_usd = 0.0 if uses_gemini else 0.0
+    openai_usd = 0.0
+    gemini_usd = 0.0
     total_usd    = s3_usd + vps_usd + assembly_usd + openai_usd + gemini_usd
 
     return {

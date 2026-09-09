@@ -55,5 +55,20 @@ mypy_cache
 output/
 uploads/
 
+# Security: COPY . . copies the entire build context recursively (docker:
+# S6470) -- anything a developer happens to have sitting locally at build
+# time (not just what's tracked by git) gets baked permanently into an
+# image layer otherwise. cookies.txt in particular was previously found
+# committed to this repo's history (a real leaked secret); excluding it
+# here stops a local copy from being re-baked into an image even after
+# that history was purged.
+cookies.txt
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secret*
+
 
 
