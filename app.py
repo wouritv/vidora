@@ -6310,11 +6310,12 @@ async def _resolve_translation_cache_and_owner(request: Request, job_id: str, cl
 async def _persist_translation_usage_billing(
     owner_user_id: str, req: "TranslateRequest", normalized_clip_index: int, transcription_row: Optional[Dict[str, Any]],
     translation_cache: Dict[str, Any], source_lang: str, target_lang: str, transcript: Dict[str, Any], cache_stats: Dict[str, Any],
+    operation: str = "translation",
 ) -> None:
     if not (owner_user_id and is_supabase_configured()):
         return
     usage_payload = {
-        "operation": "translation",
+        "operation": operation,
         "source_language": source_lang or "auto",
         "target_language": target_lang,
         "cache": {"hits": cache_stats.get("hits", 0), "misses": cache_stats.get("misses", 0)},
@@ -6408,6 +6409,69 @@ async def translate_captions(req: TranslateRequest, request: Request):
     }
 
 
+def _burn_translated_subtitles(req: "TranslateRequest", input_path: str, srt_path: str, output_path: str) -> None:
+    style_options = SubtitleStyleOptions(
+        font_name=req.font_name,
+        font_color=req.font_color,
+        border_color=req.border_color,
+        border_width=req.border_width,
+        bg_color=req.bg_color,
+        bg_opacity=req.bg_opacity,
+    )
+    burn_subtitles(
+        input_path,
+        srt_path,
+        output_path,
+        alignment=req.position,
+        fontsize=req.font_size,
+        style_options=style_options,
+    )
+
+
+async def _translate_and_burn_clip_subtitles(
+    req: "TranslateRequest", source_segments: List[Dict[str, Any]], source_lang: str, target_lang: str,
+    translation_cache: Dict[str, Any], input_path: str, filename: str, output_dir: str,
+):
+    # 1) Translate text segments (OpenAI primary, Gemini fallback)
+    loop = asyncio.get_event_loop()
+    translated_segments, cache_stats = await loop.run_in_executor(
+        None, _translate_segments_with_cache, source_segments, source_lang, target_lang, translation_cache,
+    )
+
+    # 2) Write translated SRT
+    base, ext = os.path.splitext(filename)
+    srt_filename = f"translated_subs_{target_lang}_{req.clip_index}_{int(time.time())}.srt"
+    srt_path = os.path.join(output_dir, srt_filename)
+
+    if not _write_translated_srt(translated_segments, srt_path):
+        raise HTTPException(status_code=500, detail="Failed to write translated SRT")
+
+    # 3) Burn subtitles on original video (audio unchanged)
+    output_filename = f"translated_{target_lang}_{base}{ext}"
+    output_path = os.path.join(output_dir, output_filename)
+
+    await loop.run_in_executor(None, _burn_translated_subtitles, req, input_path, srt_path, output_path)
+
+    return cache_stats, srt_filename, output_filename
+
+
+def _update_clip_after_translation(job: Optional[Dict[str, Any]], job_id: str, clip_index: int, clips: List[Any], data: Dict[str, Any], metadata_path: str, output_filename: str, target_lang: str) -> None:
+    # Update in-memory job result if the job is still alive in memory.
+    if job and clip_index < len(job.get("result", {}).get("clips", [])):
+        job["result"]["clips"][clip_index]["video_url"] = f"/videos/{job_id}/{output_filename}"
+
+    # Persist metadata
+    try:
+        if clip_index < len(clips):
+            clips[clip_index]["video_url"] = f"/videos/{job_id}/{output_filename}"
+            clips[clip_index]["translated_subtitles_language"] = target_lang
+            data["shorts"] = clips
+            _persist_metadata_json(metadata_path, data)
+            print(f"✅ Metadata updated with translated-subtitle video for clip {clip_index}")
+    except Exception as e:
+        print(f"⚠️ Failed to update metadata.json: {e}")
+
+
 @app.post("/api/translate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def translate_clip(req: TranslateRequest, request: Request):
     """
@@ -6420,38 +6484,16 @@ async def translate_clip(req: TranslateRequest, request: Request):
     if not metadata_path or not data:
         raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
     translation_cache = _get_translation_cache(data)
-    request_user_id = _get_authenticated_user_id_optional(request) or ""
-    owner_user_id = request_user_id or await _resolve_job_owner_user_id(req.job_id, req.clip_index)
-    transcription_row = None
-    if owner_user_id and is_supabase_configured():
-        transcription_row = await _load_cached_transcription(owner_user_id, req.job_id, req.clip_index)
-        db_cache = (transcription_row or {}).get("translations_cache") or {}
-        if isinstance(db_cache, dict) and db_cache:
-            translation_cache = db_cache
+    owner_user_id, transcription_row, translation_cache = await _resolve_translation_cache_and_owner(
+        request, req.job_id, req.clip_index, translation_cache,
+    )
 
     clips = data.get("shorts", [])
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail=_CLIP_NOT_FOUND)
 
     clip_data = clips[req.clip_index]
-
-    # Resolve input video path
-    if req.input_filename:
-        filename = _sanitize_input_filename(req.input_filename)
-        if not filename:
-            raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
-    else:
-        filename = clip_data.get("video_url", "").split("/")[-1]
-        if not filename:
-            base_name = os.path.basename(metadata_path).replace(_METADATA_JSON_SUFFIX, "")
-            filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
-
-    input_path = os.path.join(output_dir, filename)
-    if not os.path.exists(input_path) and req.input_url:
-        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
-
-    if not os.path.exists(input_path):
-        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+    input_path, filename = _resolve_add_subtitles_input_path(req, output_dir, clip_data, metadata_path)
 
     # Load clip transcript segments from existing metadata transcript (no re-transcription)
     source_lang = _normalize_lang(req.source_language) or _normalize_lang((data.get("transcript") or {}).get("language"))
@@ -6464,99 +6506,21 @@ async def translate_clip(req: TranslateRequest, request: Request):
         raise HTTPException(status_code=400, detail="No transcript segments found for this clip range")
 
     try:
-        # 1) Translate text segments (OpenAI primary, Gemini fallback)
-        def run_translate_segments():
-            return _translate_segments_with_cache(source_segments, source_lang, target_lang, translation_cache)
-
-        loop = asyncio.get_event_loop()
-        translated_segments, cache_stats = await loop.run_in_executor(None, run_translate_segments)
-
-        # 2) Write translated SRT
-        base, ext = os.path.splitext(filename)
-        srt_filename = f"translated_subs_{target_lang}_{req.clip_index}_{int(time.time())}.srt"
-        srt_path = os.path.join(output_dir, srt_filename)
-
-        if not _write_translated_srt(translated_segments, srt_path):
-            raise HTTPException(status_code=500, detail="Failed to write translated SRT")
-
-        # 3) Burn subtitles on original video (audio unchanged)
-        output_filename = f"translated_{target_lang}_{base}{ext}"
-        output_path = os.path.join(output_dir, output_filename)
-
-        def run_burn():
-            style_options = SubtitleStyleOptions(
-                font_name=req.font_name,
-                font_color=req.font_color,
-                border_color=req.border_color,
-                border_width=req.border_width,
-                bg_color=req.bg_color,
-                bg_opacity=req.bg_opacity,
-            )
-            burn_subtitles(
-                input_path,
-                srt_path,
-                output_path,
-                alignment=req.position,
-                fontsize=req.font_size,
-                style_options=style_options,
-            )
-
-        await loop.run_in_executor(None, run_burn)
-
+        cache_stats, srt_filename, output_filename = await _translate_and_burn_clip_subtitles(
+            req, source_segments, source_lang, target_lang, translation_cache, input_path, filename, output_dir,
+        )
     except HTTPException:
         raise
     except Exception as e:
         raise _generic_error("Translation(subtitles-only) Error", e)
 
-    # Update in-memory job result if the job is still alive in memory.
-    if job and req.clip_index < len(job.get("result", {}).get("clips", [])):
-        job["result"]["clips"][req.clip_index]["video_url"] = f"/videos/{req.job_id}/{output_filename}"
+    _update_clip_after_translation(job, req.job_id, req.clip_index, clips, data, metadata_path, output_filename, target_lang)
 
-    # Persist metadata
-    try:
-        if req.clip_index < len(clips):
-            clips[req.clip_index]["video_url"] = f"/videos/{req.job_id}/{output_filename}"
-            clips[req.clip_index]["translated_subtitles_language"] = target_lang
-            data["shorts"] = clips
-            _persist_metadata_json(metadata_path, data)
-            print(f"✅ Metadata updated with translated-subtitle video for clip {req.clip_index}")
-    except Exception as e:
-        print(f"⚠️ Failed to update metadata.json: {e}")
-
-    if owner_user_id and is_supabase_configured():
-        usage_payload = {
-            "operation": "translation_subtitles_only",
-            "source_language": source_lang or "auto",
-            "target_language": target_lang,
-            "cache": {"hits": cache_stats.get("hits", 0), "misses": cache_stats.get("misses", 0)},
-            "usage": cache_stats.get("usage", {}),
-            "total_cost_usd": cache_stats.get("cost_usd", 0.0),
-        }
-        if transcription_row:
-            await supabase_update_transcription_translations_cache(
-                req.job_id,
-                req.clip_index,
-                owner_user_id,
-                translation_cache,
-                billing_details=usage_payload,
-            )
-        else:
-            await _persist_transcription_cache(
-                user_id=owner_user_id,
-                job_id=req.job_id,
-                clip_index=req.clip_index,
-                source_type="translation",
-                source_value=req.input_url or req.input_filename or req.job_id,
-                transcript=data.get("transcript") or {},
-                billing_details=usage_payload,
-            )
-            await supabase_update_transcription_translations_cache(
-                req.job_id,
-                req.clip_index,
-                owner_user_id,
-                translation_cache,
-                billing_details=usage_payload,
-            )
+    await _persist_translation_usage_billing(
+        owner_user_id, req, req.clip_index, transcription_row, translation_cache,
+        source_lang, target_lang, data.get("transcript") or {}, cache_stats,
+        operation="translation_subtitles_only",
+    )
 
     return {
         "success": True,
