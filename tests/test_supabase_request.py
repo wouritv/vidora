@@ -1119,7 +1119,14 @@ def test_upsert_user_data_credits_existing_paths(monkeypatch):
     )
 
     assert result["user_id"] == "u1"
-    assert bank_entry.calls and bank_entry.calls[0]["direction"] == "debt_payment"
+    assert bank_entry.calls
+    assert bank_entry.calls[0]["direction"] == "debt_payment"
+    payload = _event_args(fake_client.events, supabase_request.SUPABASE_USER_DATA_TABLE, "update")[0]
+    assert payload["credit"] == 13.0
+    assert payload["credit_debt"] == 0.0
+    assert payload["stockage"] == 3.0
+    assert payload["credit_max"] == 18.0
+    assert payload["stockage_max"] == 3.0
 
 
 def test_upsert_user_data_credits_caps_credit_max_when_needed(monkeypatch):
@@ -1205,7 +1212,14 @@ def test_set_user_data_balance_existing_and_insert_paths(monkeypatch):
     monkeypatch.setattr(supabase_request, "insert_user_credit_bank_entry", _bank)
     updated = asyncio.run(supabase_request.set_user_data_balance("u1", credit=10, storage=3.0))
     assert updated["user_id"] == "u1"
-    assert bank_calls and bank_calls[0]["direction"] == "debt_payment"
+    assert bank_calls
+    assert bank_calls[0]["direction"] == "debt_payment"
+    payload = _event_args(fake_client.events, supabase_request.SUPABASE_USER_DATA_TABLE, "update")[0]
+    assert payload["credit"] == 7.0
+    assert payload["credit_debt"] == 0.0
+    assert payload["stockage"] == 3.0
+    assert payload["credit_max"] == 7.0
+    assert payload["stockage_max"] == 2.0
 
     async def _missing(_uid):
         return None

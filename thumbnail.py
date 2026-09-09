@@ -171,44 +171,35 @@ OUTPUT JSON:
         return {"titles": ["Could not refine titles - please try again"]}
 
 
-def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context=""):
-    """
-    Generates YouTube thumbnails using Gemini image generation.
-    Returns list of saved image paths (relative URLs).
-    """
-    client = genai.Client(api_key=api_key)
+def _append_image_if_exists(prompt_parts, image_path):
+    if not image_path or not os.path.exists(image_path):
+        return False
 
-    output_dir = os.path.join("output", "thumbnails", session_id)
-    os.makedirs(output_dir, exist_ok=True)
+    prompt_parts.append(Image.open(image_path))
+    return True
 
-    prompt_parts = []
 
-    # Add face image if provided
-    if face_image_path and os.path.exists(face_image_path):
-        face_img = Image.open(face_image_path)
-        prompt_parts.append(face_img)
+def _build_thumbnail_context_block(video_context):
+    if not video_context:
+        return ""
 
-    # Add background image if provided
-    if bg_image_path and os.path.exists(bg_image_path):
-        bg_img = Image.open(bg_image_path)
-        prompt_parts.append(bg_img)
-
-    # Build video context block
-    context_block = ""
-    if video_context:
-        context_block = f"""
+    return f"""
 VIDEO CONTEXT (use this to understand the video and design a relevant thumbnail):
 {video_context}
 """
 
-    # Build extra instructions block (high priority)
-    extra_block = ""
-    if extra_prompt:
-        extra_block = f"""
+
+def _build_thumbnail_extra_block(extra_prompt):
+    if not extra_prompt:
+        return ""
+
+    return f"""
 ⚠️ MANDATORY USER INSTRUCTIONS (MUST follow these exactly — they override any default behavior):
 {extra_prompt}
 """
 
+
+def _build_thumbnail_text_prompt(title, context_block, extra_block, has_face_image, has_bg_image):
     text_prompt = f"""Generate a professional, eye-catching YouTube thumbnail image.
 
 VIDEO TITLE (for reference — do NOT put the full title on the thumbnail): "{title}"
@@ -227,12 +218,51 @@ DESIGN REQUIREMENTS:
 - Clean composition — text and face/subject as clear focal points
 - NO clutter, NO small text, NO watermarks"""
 
-    if face_image_path and os.path.exists(face_image_path):
+    if has_face_image:
         text_prompt += "\n- Include the provided face/person prominently with an exaggerated expression (surprise, excitement, shock)"
 
-    if bg_image_path and os.path.exists(bg_image_path):
+    if has_bg_image:
         text_prompt += "\n- Use the provided background image as the base/backdrop"
 
+    return text_prompt
+
+
+def _extract_and_save_thumbnail(response_parts, output_dir, session_id, index):
+    for part in response_parts:
+        if part.text is not None:
+            print(f"📝 [Thumbnail] Gemini text: {part.text}")
+            continue
+
+        image = part.as_image()
+        if not image:
+            continue
+
+        filename = f"thumb_{index + 1}.jpg"
+        filepath = os.path.join(output_dir, filename)
+        image.save(filepath)
+        print(f"✅ [Thumbnail] Saved: {filepath}")
+        return f"/thumbnails/{session_id}/{filename}"
+
+    return None
+
+
+def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context=""):
+    """
+    Generates YouTube thumbnails using Gemini image generation.
+    Returns list of saved image paths (relative URLs).
+    """
+    client = genai.Client(api_key=api_key)
+
+    output_dir = os.path.join("output", "thumbnails", session_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    prompt_parts = []
+    has_face_image = _append_image_if_exists(prompt_parts, face_image_path)
+    has_bg_image = _append_image_if_exists(prompt_parts, bg_image_path)
+
+    context_block = _build_thumbnail_context_block(video_context)
+    extra_block = _build_thumbnail_extra_block(extra_prompt)
+    text_prompt = _build_thumbnail_text_prompt(title, context_block, extra_block, has_face_image, has_bg_image)
     prompt_parts.append(text_prompt)
 
     thumbnails = []
@@ -252,16 +282,9 @@ DESIGN REQUIREMENTS:
                 )
             )
 
-            for part in response.parts:
-                if part.text is not None:
-                    print(f"📝 [Thumbnail] Gemini text: {part.text}")
-                elif image := part.as_image():
-                    filename = f"thumb_{i + 1}.jpg"
-                    filepath = os.path.join(output_dir, filename)
-                    image.save(filepath)
-                    thumbnails.append(f"/thumbnails/{session_id}/{filename}")
-                    print(f"✅ [Thumbnail] Saved: {filepath}")
-                    break
+            thumbnail_path = _extract_and_save_thumbnail(response.parts, output_dir, session_id, i)
+            if thumbnail_path:
+                thumbnails.append(thumbnail_path)
 
         except Exception as e:
             last_error = str(e)

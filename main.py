@@ -1577,44 +1577,58 @@ def _transcribe_with_faster_whisper(video_path):
     }
 
 
+def _load_transcriber_settings():
+    provider = os.getenv("TRANSCRIBER_PROVIDER", "hybrid").strip().lower()
+    fallback = os.getenv("TRANSCRIBER_FALLBACK", "faster_whisper").strip().lower()
+    assembly_retry_attempts = max(1, int(os.getenv("ASSEMBLY_RETRY_ATTEMPTS", "2")))
+    assembly_retry_delay_seconds = max(0.0, float(os.getenv("ASSEMBLY_RETRY_DELAY_SECONDS", "2")))
+    return provider, fallback, assembly_retry_attempts, assembly_retry_delay_seconds
+
+
+def _run_assemblyai_attempts(video_path, retry_attempts, retry_delay_seconds):
+    last_error = None
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            return _transcribe_with_assemblyai(video_path), None
+        except Exception as exc:
+            last_error = exc
+            print(f"⚠️ AssemblyAI failed (attempt {attempt}/{retry_attempts}): {exc}")
+            if attempt < retry_attempts and retry_delay_seconds > 0:
+                time.sleep(retry_delay_seconds)
+    return None, last_error
+
+
 def transcribe_video(video_path):
     """
     Hybrid transcription entrypoint.
     TRANSCRIBER_PROVIDER: assemblyai | faster_whisper | hybrid
     TRANSCRIBER_FALLBACK: faster_whisper | none
     """
-    provider = os.getenv("TRANSCRIBER_PROVIDER", "hybrid").strip().lower()
-    fallback = os.getenv("TRANSCRIBER_FALLBACK", "faster_whisper").strip().lower()
-    assembly_retry_attempts = max(1, int(os.getenv("ASSEMBLY_RETRY_ATTEMPTS", "2")))
-    assembly_retry_delay_seconds = max(0.0, float(os.getenv("ASSEMBLY_RETRY_DELAY_SECONDS", "2")))
+    provider, fallback, assembly_retry_attempts, assembly_retry_delay_seconds = _load_transcriber_settings()
 
     print(f"🎛️  Transcriber provider: {provider}")
 
     if provider == "assemblyai":
-        last_error = None
-        for attempt in range(1, assembly_retry_attempts + 1):
-            try:
-                return _transcribe_with_assemblyai(video_path)
-            except Exception as exc:
-                last_error = exc
-                print(f"⚠️ AssemblyAI failed (attempt {attempt}/{assembly_retry_attempts}): {exc}")
-                if attempt < assembly_retry_attempts and assembly_retry_delay_seconds > 0:
-                    time.sleep(assembly_retry_delay_seconds)
+        result, last_error = _run_assemblyai_attempts(
+            video_path,
+            assembly_retry_attempts,
+            assembly_retry_delay_seconds,
+        )
+        if result is not None:
+            return result
         raise RuntimeError(f"AssemblyAI transcription failed after {assembly_retry_attempts} attempts: {last_error}")
 
     if provider == "faster_whisper":
         return _transcribe_with_faster_whisper(video_path)
 
     # Hybrid: retry AssemblyAI first, then fallback local if enabled.
-    last_error = None
-    for attempt in range(1, assembly_retry_attempts + 1):
-        try:
-            return _transcribe_with_assemblyai(video_path)
-        except Exception as exc:
-            last_error = exc
-            print(f"⚠️ AssemblyAI failed (attempt {attempt}/{assembly_retry_attempts}): {exc}")
-            if attempt < assembly_retry_attempts and assembly_retry_delay_seconds > 0:
-                time.sleep(assembly_retry_delay_seconds)
+    result, last_error = _run_assemblyai_attempts(
+        video_path,
+        assembly_retry_attempts,
+        assembly_retry_delay_seconds,
+    )
+    if result is not None:
+        return result
 
     if fallback == "faster_whisper":
         print("↩️ Falling back to Faster-Whisper...")
@@ -1879,6 +1893,47 @@ def _build_external_costs(transcript, clips_data):
     }
 
 
+def _clip_duration_bounds():
+    return float(MIN_CLIP_DURATION_SECONDS), float(MAX_CLIP_DURATIONS_SECOND)
+
+
+def _clamp_clip_window(start, end, source_duration):
+    start = max(0.0, min(start, source_duration))
+    end = max(0.0, min(end, source_duration))
+    return start, end
+
+
+def _normalize_single_short(clip, source_duration, min_clip_duration, max_clip_duration):
+    if not isinstance(clip, dict):
+        return None
+
+    start = _safe_float(clip.get("start"), 0.0)
+    end = _safe_float(clip.get("end"), 0.0)
+    start, end = _clamp_clip_window(start, end, source_duration)
+    if end <= start:
+        return None
+
+    duration = end - start
+    if duration < min_clip_duration:
+        end = min(source_duration, start + min_clip_duration)
+        if (end - start) < min_clip_duration:
+            return None
+
+    duration = end - start
+    if duration > max_clip_duration:
+        end = start + max_clip_duration
+        if end > source_duration:
+            end = source_duration
+            start = max(0.0, end - max_clip_duration)
+
+    if end <= start:
+        return None
+
+    clip["start"] = round(start, 3)
+    clip["end"] = round(end, 3)
+    return clip
+
+
 def _normalize_short_durations(clips_data, video_duration):
     shorts = clips_data.get("shorts") if isinstance(clips_data, dict) else None
     if not isinstance(shorts, list):
@@ -1888,45 +1943,19 @@ def _normalize_short_durations(clips_data, video_duration):
     if source_duration <= 0:
         return clips_data
 
-    min_clip_duration = float(MIN_CLIP_DURATION_SECONDS)
-    max_clip_duration = float(MAX_CLIP_DURATIONS_SECOND)
+    min_clip_duration, max_clip_duration = _clip_duration_bounds()
 
     normalized_shorts = []
 
     for clip in shorts:
-        if not isinstance(clip, dict):
-            continue
-
-        start = _safe_float(clip.get("start"), 0.0)
-        end = _safe_float(clip.get("end"), 0.0)
-
-        # timestamps absolus dans la vidéo
-        start = max(0.0, min(start, source_duration))
-        end = max(0.0, min(end, source_duration))
-
-        if end <= start:
-            continue
-
-        duration = end - start
-
-        if duration < min_clip_duration:
-            end = min(source_duration, start + min_clip_duration)
-            duration = end - start
-            if duration < min_clip_duration:
-                continue
-
-        if duration > max_clip_duration:
-            end = start + max_clip_duration
-            if end > source_duration:
-                end = source_duration
-                start = max(0.0, end - max_clip_duration)
-
-        if end <= start:
-            continue
-
-        clip["start"] = round(start, 3)
-        clip["end"] = round(end, 3)
-        normalized_shorts.append(clip)
+        normalized = _normalize_single_short(
+            clip,
+            source_duration,
+            min_clip_duration,
+            max_clip_duration,
+        )
+        if normalized is not None:
+            normalized_shorts.append(normalized)
 
     clips_data["shorts"] = normalized_shorts
     return clips_data

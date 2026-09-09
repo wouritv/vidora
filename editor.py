@@ -286,6 +286,81 @@ class VideoEditor:
         return ",".join(out_parts)
 
     @staticmethod
+    def _probe_video_dimensions(input_path: str) -> tuple[int, int] | tuple[None, None]:
+        try:
+            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', input_path]
+            res_out = subprocess.check_output(
+                probe_cmd, env={**os.environ, "LANG": _LOCALE_UTF8}, timeout=FFPROBE_TIMEOUT_SECONDS
+            ).decode().strip()
+            w, h = map(int, res_out.split('x'))
+            return w, h
+        except Exception as e:
+            print(f"⚠️ Could not probe resolution: {e}")
+            return None, None
+
+    @staticmethod
+    def _prepare_filter_string(filter_string: str, width: int | None, height: int | None) -> str:
+        sanitized = VideoEditor._sanitize_filter_string(filter_string)
+        if sanitized != filter_string:
+            print("🧼 Sanitized AI Filter (converted comparisons to lt/lte/gt/gte functions)")
+            print(f"🧼 Before: {filter_string}")
+            print(f"🧼 After:  {sanitized}")
+            filter_string = sanitized
+
+        if width and height:
+            enforced = VideoEditor._enforce_zoompan_output_size(filter_string, width, height)
+            if enforced != filter_string:
+                print(f"📐 Enforced zoompan output size to {width}x{height}")
+                filter_string = enforced
+            if "setsar=" not in filter_string:
+                filter_string = f"{filter_string},setsar=1"
+
+        return filter_string
+
+    @staticmethod
+    def _build_ffmpeg_cmd(input_path: str, output_path: str, filter_string: str) -> list:
+        return [
+            'ffmpeg', '-y',
+            '-i', input_path,
+            '-vf', filter_string,
+            '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', EXPORT_AUDIO_BITRATE,
+            output_path
+        ]
+
+    @staticmethod
+    def _execute_ffmpeg_command(cmd: list) -> None:
+        env = os.environ.copy()
+        env["LANG"] = _LOCALE_UTF8
+        env["LC_ALL"] = _LOCALE_UTF8
+
+        cmd_bytes = []
+        for arg in cmd:
+            if isinstance(arg, str):
+                cmd_bytes.append(arg.encode('utf-8'))
+            else:
+                cmd_bytes.append(arg)
+
+        try:
+            subprocess.run(
+                cmd_bytes, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            print(f"❌ FFmpeg timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s")
+            raise e
+        except subprocess.CalledProcessError as e:
+            print(f"❌ FFmpeg failed: {e}")
+            try:
+                stderr_text = (e.stderr or b"").decode("utf-8", errors="ignore")
+                if stderr_text:
+                    print(f"❌ FFmpeg stderr:\n{stderr_text}")
+            except Exception:
+                pass
+            raise e
+
+    @staticmethod
     def _sanitize_filter_string(filter_string: str) -> str:
         """
         Best-effort sanitizer for Gemini-generated FFmpeg expressions.
@@ -335,91 +410,16 @@ class VideoEditor:
 
     def apply_edits(self, input_path, output_path, filter_data):
         """Executes FFmpeg with the generated filter."""
-        
+
         if not filter_data or "filter_string" not in filter_data:
             print("⚠️ No filter string found. Copying original.")
-            subprocess.run(['ffmpeg', '-y', '-i', input_path, '-c', 'copy', output_path], timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
+            copy_cmd = ['ffmpeg', '-y', '-i', input_path, '-c', 'copy', output_path]
+            self._execute_ffmpeg_command(copy_cmd)
             return
 
         filter_string = filter_data["filter_string"]
-        
-        # Get input dimensions so we can enforce geometry (avoid broken aspect ratios).
-        try:
-            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', input_path]
-            res_out = subprocess.check_output(
-                probe_cmd, env={**os.environ, "LANG": _LOCALE_UTF8}, timeout=FFPROBE_TIMEOUT_SECONDS
-            ).decode().strip()
-            w, h = map(int, res_out.split('x'))
-        except Exception as e:
-            print(f"⚠️ Could not probe resolution: {e}")
-            w, h = None, None
-
-        # Sanitize common expression pitfalls (e.g., t<3 / on>=75) before executing FFmpeg.
-        sanitized = self._sanitize_filter_string(filter_string)
-        if sanitized != filter_string:
-            print("🧼 Sanitized AI Filter (converted comparisons to lt/lte/gt/gte functions)")
-            print(f"🧼 Before: {filter_string}")
-            print(f"🧼 After:  {sanitized}")
-            filter_string = sanitized
-
-        # Enforce zoompan output size to preserve aspect ratio / resolution.
-        if w and h:
-            enforced = self._enforce_zoompan_output_size(filter_string, w, h)
-            if enforced != filter_string:
-                print(f"📐 Enforced zoompan output size to {w}x{h}")
-                filter_string = enforced
-
-            # Ensure square pixels (avoid weird display stretching in some players).
-            if "setsar=" not in filter_string:
-                filter_string = f"{filter_string},setsar=1"
-
+        w, h = self._probe_video_dimensions(input_path)
+        filter_string = self._prepare_filter_string(filter_string, w, h)
         print(f"🎬 Executing AI Filter: {filter_string}")
-        
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', input_path,
-            '-vf', filter_string,
-            '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
-            '-pix_fmt', 'yuv420p',
-            '-c:a', 'aac', '-b:a', EXPORT_AUDIO_BITRATE,
-            output_path
-        ]
-        
-        # Use explicit environment with UTF-8 to avoid ascii errors in subprocess
-        env = os.environ.copy()
-        # On some minimal docker images, we need to ensure we use a UTF-8 locale
-        # Try C.UTF-8 first, fallback to en_US.UTF-8 if available, but C.UTF-8 is usually safer for minimal
-        env["LANG"] = _LOCALE_UTF8
-        env["LC_ALL"] = _LOCALE_UTF8
-        
-        try:
-            # We must encode arguments if filesystem is ascii but we have unicode chars
-            # But subprocess in Python 3 handles unicode args by encoding them with os.fsencode().
-            # If sys.getfilesystemencoding() is ascii, this fails.
-            # We can't change fs encoding at runtime easily.
-            # Workaround: pass bytes directly? subprocess allows bytes in args.
-            
-            # Convert command elements to bytes assuming utf-8 if they are strings
-            cmd_bytes = []
-            for arg in cmd:
-                if isinstance(arg, str):
-                    cmd_bytes.append(arg.encode('utf-8'))
-                else:
-                    cmd_bytes.append(arg)
-            
-            subprocess.run(
-                cmd_bytes, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired as e:
-            print(f"❌ FFmpeg timed out after {FFMPEG_STEP_TIMEOUT_SECONDS}s")
-            raise e
-        except subprocess.CalledProcessError as e:
-            print(f"❌ FFmpeg failed: {e}")
-            try:
-                stderr_text = (e.stderr or b"").decode("utf-8", errors="ignore")
-                if stderr_text:
-                    print(f"❌ FFmpeg stderr:\n{stderr_text}")
-            except Exception:
-                pass
-            raise e
+        cmd = self._build_ffmpeg_cmd(input_path, output_path, filter_string)
+        self._execute_ffmpeg_command(cmd)
