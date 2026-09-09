@@ -171,16 +171,7 @@ OUTPUT JSON:
         return {"titles": ["Could not refine titles - please try again"]}
 
 
-def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context=""):
-    """
-    Generates YouTube thumbnails using Gemini image generation.
-    Returns list of saved image paths (relative URLs).
-    """
-    client = genai.Client(api_key=api_key)
-
-    output_dir = os.path.join("output", "thumbnails", session_id)
-    os.makedirs(output_dir, exist_ok=True)
-
+def _build_thumbnail_prompt_parts(title, video_context, extra_prompt, face_image_path, bg_image_path):
     prompt_parts = []
 
     # Add face image if provided
@@ -234,38 +225,66 @@ DESIGN REQUIREMENTS:
         text_prompt += "\n- Use the provided background image as the base/backdrop"
 
     prompt_parts.append(text_prompt)
+    return prompt_parts
+
+
+def _generate_single_thumbnail(client, prompt_parts, output_dir, session_id, index, count):
+    """Run a single Gemini thumbnail generation attempt.
+
+    Returns ``(url, error)`` -- exactly one of them is set on failure/no
+    image, both are None if the model returned no image and raised nothing.
+    """
+    print(f"🎨 [Thumbnail] Generating thumbnail {index + 1}/{count}...")
+    try:
+        response = client.models.generate_content(
+            model=os.environ.get("GEMINI_MODEL"),
+            contents=prompt_parts,
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio="16:9",
+                    image_size="2K"
+                )
+            )
+        )
+
+        for part in response.parts:
+            if part.text is not None:
+                print(f"📝 [Thumbnail] Gemini text: {part.text}")
+            elif image := part.as_image():
+                filename = f"thumb_{index + 1}.jpg"
+                filepath = os.path.join(output_dir, filename)
+                image.save(filepath)
+                print(f"✅ [Thumbnail] Saved: {filepath}")
+                return f"/thumbnails/{session_id}/{filename}", None
+
+    except Exception as e:
+        print(f"❌ [Thumbnail] Generation {index + 1} failed: {e}")
+        return None, str(e)
+
+    return None, None
+
+
+def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context=""):
+    """
+    Generates YouTube thumbnails using Gemini image generation.
+    Returns list of saved image paths (relative URLs).
+    """
+    client = genai.Client(api_key=api_key)
+
+    output_dir = os.path.join("output", "thumbnails", session_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    prompt_parts = _build_thumbnail_prompt_parts(title, video_context, extra_prompt, face_image_path, bg_image_path)
 
     thumbnails = []
     last_error = None
     for i in range(count):
-        print(f"🎨 [Thumbnail] Generating thumbnail {i + 1}/{count}...")
-        try:
-            response = client.models.generate_content(
-                model=os.environ.get("GEMINI_MODEL"),
-                contents=prompt_parts,
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    image_config=types.ImageConfig(
-                        aspect_ratio="16:9",
-                        image_size="2K"
-                    )
-                )
-            )
-
-            for part in response.parts:
-                if part.text is not None:
-                    print(f"📝 [Thumbnail] Gemini text: {part.text}")
-                elif image := part.as_image():
-                    filename = f"thumb_{i + 1}.jpg"
-                    filepath = os.path.join(output_dir, filename)
-                    image.save(filepath)
-                    thumbnails.append(f"/thumbnails/{session_id}/{filename}")
-                    print(f"✅ [Thumbnail] Saved: {filepath}")
-                    break
-
-        except Exception as e:
-            last_error = str(e)
-            print(f"❌ [Thumbnail] Generation {i + 1} failed: {e}")
+        url, error = _generate_single_thumbnail(client, prompt_parts, output_dir, session_id, i, count)
+        if url:
+            thumbnails.append(url)
+        if error:
+            last_error = error
 
     if not thumbnails and last_error:
         raise RuntimeError(f"All thumbnail generations failed. Last error: {last_error}")

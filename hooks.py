@@ -31,54 +31,43 @@ def download_font_if_needed():
         except Exception as e:
             print(f"❌ Failed to download font: {e}")
 
-def create_hook_image(text, target_width, output_image_path="hook_overlay.png", font_scale=1.0):
-    """
-    Generates a white box with black serif text using pixel-based wrapping.
-    target_width: The max width the box should occupy (e.g. 85% of video)
-    """
-    download_font_if_needed()
-    
-    # Configuration
-    padding_x = 30 # Balanced padding
-    padding_y = 25 
-    line_spacing = 20 # Increased spacing
-    cornerradius = 20
-    shadow_offset = (5, 5)
-
+def _load_hook_font(target_width, font_scale):
     # Font Size Calculation (approx 5% of width - tuned to match Noto Serif Bold metrics in browser)
     base_font_size = int(target_width * 0.05)
     font_size = int(base_font_size * font_scale)
-    
+
     try:
         font = ImageFont.truetype(FONT_PATH, font_size)
     except Exception as e:
         print(f"⚠️ Warning: Could not load font {FONT_PATH}, using default. Error: {e}")
         font = ImageFont.load_default()
 
+    return font, font_size
+
+
+def _wrap_hook_text_lines(text, font, max_text_width):
     # Wrap text logic (Pixel-based)
     dummy_img = Image.new('RGBA', (1, 1))
     draw = ImageDraw.Draw(dummy_img)
-    
-    max_text_width = target_width - (2 * padding_x)
-    
+
     # Handle manual newlines first
     paragraphs = text.split('\n')
     lines = []
-    
+
     for p in paragraphs:
         if not p.strip():
-            lines.append("") 
+            lines.append("")
             continue
-            
+
         words = p.split()
         current_line = []
-        
+
         for word in words:
             # Test if adding word fits
             test_line = ' '.join(current_line + [word])
             bbox = draw.textbbox((0, 0), test_line, font=font)
             w = bbox[2] - bbox[0]
-            
+
             if w <= max_text_width:
                 current_line.append(word)
             else:
@@ -90,85 +79,128 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
                     # Single word too long? Force it.
                     lines.append(word)
                     current_line = []
-        
+
         if current_line:
             lines.append(' '.join(current_line))
-    
+
+    return lines
+
+
+def _measure_hook_lines(lines, font, font_size, line_spacing, padding_x, padding_y, target_width):
+    dummy_img = Image.new('RGBA', (1, 1))
+    draw = ImageDraw.Draw(dummy_img)
+
     # Recalculate true width/height
     max_line_width = 0
     text_heights = []
-    
+
     for line in lines:
         if not line:
             text_heights.append(font_size) # Use font size for empty line height
             continue
-            
+
         bbox = draw.textbbox((0, 0), line, font=font)
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
         max_line_width = max(max_line_width, w)
         text_heights.append(h)
-    
+
     # Box dimensions
     # We want the box to fit the text exactly + padding
     # Ensure min width for aesthetic reasons if text is short (at least 30% of target)
     box_width = max(max_line_width + (2 * padding_x), int(target_width * 0.3))
-    
+
     # Total Text Height: sum(heights) + spacing * (n-1)
     if not text_heights:
          total_text_height = font_size
     else:
          total_text_height = sum(text_heights) + (len(text_heights) - 1) * line_spacing
-         
+
     box_height = total_text_height + (2 * padding_y)
-    
+
+    return box_width, box_height, text_heights
+
+
+def _render_hook_box_canvas(box_width, box_height, cornerradius, shadow_offset):
     # Create Final Image with Rounded Corners and Shadow
     # 1. Canvas for Shadow (larger than box)
     canvas_w = box_width + 40
     canvas_h = box_height + 40
-    
+
     img = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    
+
     # 2. Draw Shadow
     shadow_box = [
         (20 + shadow_offset[0], 20 + shadow_offset[1]),
         (20 + box_width + shadow_offset[0], 20 + box_height + shadow_offset[1])
     ]
     draw.rounded_rectangle(shadow_box, radius=cornerradius, fill=(0, 0, 0, 100))
-    
+
     # 3. Blur Shadow
     img = img.filter(ImageFilter.GaussianBlur(5))
-    
+
     # 4. Draw White Box (sharper, on top of blurred shadow)
     draw_final = ImageDraw.Draw(img)
-    
+
     main_box = [
         (20, 20),
         (20 + box_width, 20 + box_height)
     ]
     # Semi-transparent white (240/255 alpha ~ 94% opacity)
     draw_final.rounded_rectangle(main_box, radius=cornerradius, fill=(255, 255, 255, 240))
-    
+
+    return img, draw_final, canvas_w, canvas_h
+
+
+def _draw_hook_text_lines(draw_final, lines, text_heights, font, font_size, box_width, line_spacing, padding_y):
     # 5. Draw Text
     current_y = 20 + padding_y - 2 # Minor visual adjustment
     for i, line in enumerate(lines):
         if not line:
-            current_y += font_size + line_spacing 
+            current_y += font_size + line_spacing
             continue
-            
+
         bbox = draw_final.textbbox((0, 0), line, font=font)
         line_w = bbox[2] - bbox[0]
         line_h = text_heights[i] if i < len(text_heights) else bbox[3] - bbox[1]
-        
+
         # Center X
         x = 20 + (box_width - line_w) // 2
-        
+
         # Draw Black Text
         draw_final.text((x, current_y), line, font=font, fill="black")
-        
+
         current_y += line_h + line_spacing
-        
+
+
+def create_hook_image(text, target_width, output_image_path="hook_overlay.png", font_scale=1.0):
+    """
+    Generates a white box with black serif text using pixel-based wrapping.
+    target_width: The max width the box should occupy (e.g. 85% of video)
+    """
+    download_font_if_needed()
+
+    # Configuration
+    padding_x = 30 # Balanced padding
+    padding_y = 25
+    line_spacing = 20 # Increased spacing
+    cornerradius = 20
+    shadow_offset = (5, 5)
+
+    font, font_size = _load_hook_font(target_width, font_scale)
+
+    max_text_width = target_width - (2 * padding_x)
+    lines = _wrap_hook_text_lines(text, font, max_text_width)
+
+    box_width, box_height, text_heights = _measure_hook_lines(
+        lines, font, font_size, line_spacing, padding_x, padding_y, target_width,
+    )
+
+    img, draw_final, canvas_w, canvas_h = _render_hook_box_canvas(box_width, box_height, cornerradius, shadow_offset)
+
+    _draw_hook_text_lines(draw_final, lines, text_heights, font, font_size, box_width, line_spacing, padding_y)
+
     img.save(output_image_path)
     return output_image_path, canvas_w, canvas_h
 

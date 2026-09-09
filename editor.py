@@ -333,16 +333,7 @@ class VideoEditor:
 
         return s
 
-    def apply_edits(self, input_path, output_path, filter_data):
-        """Executes FFmpeg with the generated filter."""
-        
-        if not filter_data or "filter_string" not in filter_data:
-            print("⚠️ No filter string found. Copying original.")
-            subprocess.run(['ffmpeg', '-y', '-i', input_path, '-c', 'copy', output_path], timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
-            return
-
-        filter_string = filter_data["filter_string"]
-        
+    def _probe_input_dimensions(self, input_path):
         # Get input dimensions so we can enforce geometry (avoid broken aspect ratios).
         try:
             probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', input_path]
@@ -353,7 +344,9 @@ class VideoEditor:
         except Exception as e:
             print(f"⚠️ Could not probe resolution: {e}")
             w, h = None, None
+        return w, h
 
+    def _prepare_filter_string(self, filter_string, w, h):
         # Sanitize common expression pitfalls (e.g., t<3 / on>=75) before executing FFmpeg.
         sanitized = self._sanitize_filter_string(filter_string)
         if sanitized != filter_string:
@@ -373,40 +366,24 @@ class VideoEditor:
             if "setsar=" not in filter_string:
                 filter_string = f"{filter_string},setsar=1"
 
-        print(f"🎬 Executing AI Filter: {filter_string}")
-        
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', input_path,
-            '-vf', filter_string,
-            '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
-            '-pix_fmt', 'yuv420p',
-            '-c:a', 'aac', '-b:a', EXPORT_AUDIO_BITRATE,
-            output_path
-        ]
-        
-        # Use explicit environment with UTF-8 to avoid ascii errors in subprocess
-        env = os.environ.copy()
-        # On some minimal docker images, we need to ensure we use a UTF-8 locale
-        # Try C.UTF-8 first, fallback to en_US.UTF-8 if available, but C.UTF-8 is usually safer for minimal
-        env["LANG"] = _LOCALE_UTF8
-        env["LC_ALL"] = _LOCALE_UTF8
-        
+        return filter_string
+
+    def _run_ffmpeg_edit_command(self, cmd, env):
+        # We must encode arguments if filesystem is ascii but we have unicode chars
+        # But subprocess in Python 3 handles unicode args by encoding them with os.fsencode().
+        # If sys.getfilesystemencoding() is ascii, this fails.
+        # We can't change fs encoding at runtime easily.
+        # Workaround: pass bytes directly? subprocess allows bytes in args.
+
+        # Convert command elements to bytes assuming utf-8 if they are strings
+        cmd_bytes = []
+        for arg in cmd:
+            if isinstance(arg, str):
+                cmd_bytes.append(arg.encode('utf-8'))
+            else:
+                cmd_bytes.append(arg)
+
         try:
-            # We must encode arguments if filesystem is ascii but we have unicode chars
-            # But subprocess in Python 3 handles unicode args by encoding them with os.fsencode().
-            # If sys.getfilesystemencoding() is ascii, this fails.
-            # We can't change fs encoding at runtime easily.
-            # Workaround: pass bytes directly? subprocess allows bytes in args.
-            
-            # Convert command elements to bytes assuming utf-8 if they are strings
-            cmd_bytes = []
-            for arg in cmd:
-                if isinstance(arg, str):
-                    cmd_bytes.append(arg.encode('utf-8'))
-                else:
-                    cmd_bytes.append(arg)
-            
             subprocess.run(
                 cmd_bytes, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=FFMPEG_STEP_TIMEOUT_SECONDS,
@@ -423,3 +400,37 @@ class VideoEditor:
             except Exception:
                 pass
             raise e
+
+    def apply_edits(self, input_path, output_path, filter_data):
+        """Executes FFmpeg with the generated filter."""
+
+        if not filter_data or "filter_string" not in filter_data:
+            print("⚠️ No filter string found. Copying original.")
+            subprocess.run(['ffmpeg', '-y', '-i', input_path, '-c', 'copy', output_path], timeout=FFMPEG_STEP_TIMEOUT_SECONDS)
+            return
+
+        filter_string = filter_data["filter_string"]
+
+        w, h = self._probe_input_dimensions(input_path)
+        filter_string = self._prepare_filter_string(filter_string, w, h)
+
+        print(f"🎬 Executing AI Filter: {filter_string}")
+
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', input_path,
+            '-vf', filter_string,
+            '-c:v', 'libx264', '-preset', EXPORT_VIDEO_PRESET, '-crf', EXPORT_VIDEO_CRF,
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', EXPORT_AUDIO_BITRATE,
+            output_path
+        ]
+
+        # Use explicit environment with UTF-8 to avoid ascii errors in subprocess
+        env = os.environ.copy()
+        # On some minimal docker images, we need to ensure we use a UTF-8 locale
+        # Try C.UTF-8 first, fallback to en_US.UTF-8 if available, but C.UTF-8 is usually safer for minimal
+        env["LANG"] = _LOCALE_UTF8
+        env["LC_ALL"] = _LOCALE_UTF8
+
+        self._run_ffmpeg_edit_command(cmd, env)

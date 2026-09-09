@@ -1176,6 +1176,32 @@ async def get_user_data(user_id: str) -> Optional[Dict[str, Any]]:
 	return rows[0] if rows else None
 
 
+def _apply_credit_delta_debt_payment(current_debt: float, delta_credit: float):
+	debt_paid = 0.0
+	if delta_credit > 0 and current_debt > 0:
+		debt_paid = min(current_debt, delta_credit)
+		delta_credit -= debt_paid
+		current_debt = max(0.0, current_debt - debt_paid)
+	return debt_paid, delta_credit, current_debt
+
+
+def _resolve_credit_max_after_topup(current_credit_max: float, credit_delta: float, update_credit_max: bool, new_credit: float) -> float:
+	# Credit top-ups and subscription allocations can redefine the user's ceiling.
+	new_credit_max = max(0.0, current_credit_max)
+	if update_credit_max:
+		new_credit_max = float(_ceil_credit(current_credit_max + float(credit_delta)))
+	if new_credit > new_credit_max:
+		new_credit_max = float(new_credit)
+	return new_credit_max
+
+
+def _resolve_storage_max_after_delta(current_stockage_max: float, storage_delta: float, update_stockage_max: bool) -> float:
+	new_stockage_max = max(0.0, current_stockage_max)
+	if update_stockage_max:
+		new_stockage_max = float(current_stockage_max + float(storage_delta))
+	return new_stockage_max
+
+
 async def upsert_user_data_credits(
 	user_id: str,
 	credit_delta: float,
@@ -1198,25 +1224,12 @@ async def upsert_user_data_credits(
 
 		delta_credit = float(credit_delta)
 		current_debt = float(existing.get("credit_debt", 0) or 0.0)
-		debt_paid = 0.0
-		if delta_credit > 0 and current_debt > 0:
-			debt_paid = min(current_debt, delta_credit)
-			delta_credit -= debt_paid
-			current_debt = max(0.0, current_debt - debt_paid)
+		debt_paid, delta_credit, current_debt = _apply_credit_delta_debt_payment(current_debt, delta_credit)
 
 		new_credit = float(_ceil_credit(current_credit + delta_credit))
 		new_storage = float(current_storage + float(storage_delta))
-		new_credit_max = max(0.0, current_credit_max)
-		new_stockage_max = max(0.0, current_stockage_max)
-
-		if update_credit_max:
-			# Credit top-ups and subscription allocations can redefine the user's ceiling.
-			new_credit_max = float(_ceil_credit(current_credit_max + float(credit_delta)))
-		if update_stockage_max:
-			new_stockage_max = float(current_stockage_max + float(storage_delta))
-
-		if new_credit > new_credit_max:
-			new_credit_max = float(new_credit)
+		new_credit_max = _resolve_credit_max_after_topup(current_credit_max, credit_delta, update_credit_max, new_credit)
+		new_stockage_max = _resolve_storage_max_after_delta(current_stockage_max, storage_delta, update_stockage_max)
 
 		logger.info(f"Updating user data for {user_id}: credit={new_credit}, stockage={new_storage}, credit_max={new_credit_max}, stockage_max={new_stockage_max}")
 
@@ -1261,6 +1274,28 @@ async def upsert_user_data_credits(
 		return rows[0] if rows else payload
 
 
+def _apply_existing_debt_payment(existing_debt: float, clamped_credit: float):
+	debt_paid = min(existing_debt, float(clamped_credit))
+	net_credit = max(0.0, float(clamped_credit) - debt_paid)
+	remaining_debt = max(0.0, existing_debt - debt_paid)
+	return debt_paid, net_credit, remaining_debt
+
+
+def _resolve_balance_max_values(
+	existing: Dict[str, Any], payload: Dict[str, Any], credit_max: Optional[float], storage_max: Optional[float],
+	clamped_credit: float, net_credit: float,
+):
+	next_credit_max = payload["credit_max"]
+	next_storage_max = payload["stockage_max"]
+	if credit_max is None:
+		next_credit_max = _ceil_credit(existing.get("credit_max", existing.get("credit", 0.0)) or 0.0)
+	if storage_max is None:
+		next_storage_max = max(0.0, float(existing.get("stockage_max", max(existing.get("stockage", 0.0), 0.0)) or 0.0))
+	if clamped_credit > next_credit_max:
+		next_credit_max = _ceil_credit(net_credit)
+	return next_credit_max, next_storage_max
+
+
 async def set_user_data_balance(
 	user_id: str,
 	credit: float,
@@ -1289,17 +1324,8 @@ async def set_user_data_balance(
 	existing = await get_user_data(user_id)
 	if existing:
 		existing_debt = float(existing.get("credit_debt", 0) or 0.0)
-		debt_paid = min(existing_debt, float(clamped_credit))
-		net_credit = max(0.0, float(clamped_credit) - debt_paid)
-		remaining_debt = max(0.0, existing_debt - debt_paid)
-		next_credit_max = payload["credit_max"]
-		next_storage_max = payload["stockage_max"]
-		if credit_max is None:
-			next_credit_max = _ceil_credit(existing.get("credit_max", existing.get("credit", 0.0)) or 0.0)
-		if storage_max is None:
-			next_storage_max = max(0.0, float(existing.get("stockage_max", max(existing.get("stockage", 0.0), 0.0)) or 0.0))
-		if clamped_credit > next_credit_max:
-			next_credit_max = _ceil_credit(net_credit)
+		debt_paid, net_credit, remaining_debt = _apply_existing_debt_payment(existing_debt, clamped_credit)
+		next_credit_max, next_storage_max = _resolve_balance_max_values(existing, payload, credit_max, storage_max, clamped_credit, net_credit)
 		response = (
 			await client.table(SUPABASE_USER_DATA_TABLE)
 			.update({
@@ -1334,6 +1360,40 @@ async def set_user_data_balance(
 MAX_CREDIT_DEBT = max(0.0, float(os.environ.get("MAX_CREDIT_DEBT", "0") or "0"))
 
 
+def _plan_credit_deduction(existing: Dict[str, Any], credits: float, storage_delta: float) -> Optional[Dict[str, Any]]:
+	"""Compute the new balance for a deduction, or None if it would violate a limit."""
+	current_credits = float(existing.get("credit", 0) or 0.0)
+	current_debt = float(existing.get("credit_debt", 0) or 0.0)
+	debit_credits = max(0.0, float(credits or 0.0))
+
+	new_credit = current_credits - debit_credits
+	debt_delta = 0.0
+	if new_credit < 0:
+		debt_delta = abs(new_credit)
+		new_credit = 0.0
+
+	new_debt = current_debt + debt_delta
+	if new_debt > MAX_CREDIT_DEBT:
+		return None
+
+	current_storage = float(existing.get("stockage", 0) or 0.0)
+	new_storage = current_storage + float(storage_delta)
+	storage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
+	overage_limit = (storage_max * STORAGE_OVERAGE_TOLERANCE_PERCENT) / 100.0
+	if new_storage < -overage_limit:
+		return None
+
+	return {
+		"current_credits": current_credits,
+		"current_storage": current_storage,
+		"new_credit": new_credit,
+		"new_debt": new_debt,
+		"new_storage": new_storage,
+		"debt_delta": debt_delta,
+		"debit_credits": debit_credits,
+	}
+
+
 async def deduct_user_credits(
 	user_id: str,
 	credits: float,
@@ -1361,38 +1421,21 @@ async def deduct_user_credits(
 		if not existing:
 			return False
 
-		current_credits = float(existing.get("credit", 0) or 0.0)
-		current_debt = float(existing.get("credit_debt", 0) or 0.0)
-		debit_credits = max(0.0, float(credits or 0.0))
-
-		new_credit = current_credits - debit_credits
-		debt_delta = 0.0
-		if new_credit < 0:
-			debt_delta = abs(new_credit)
-			new_credit = 0.0
-
-		new_debt = current_debt + debt_delta
-		if new_debt > MAX_CREDIT_DEBT:
-			return False
-
-		current_storage = float(existing.get("stockage", 0) or 0.0)
-		new_storage = current_storage + float(storage_delta)
-		storage_max = float(existing.get("stockage_max", max(current_storage, 0.0)) or 0.0)
-		overage_limit = (storage_max * STORAGE_OVERAGE_TOLERANCE_PERCENT) / 100.0
-		if new_storage < -overage_limit:
+		plan = _plan_credit_deduction(existing, credits, storage_delta)
+		if plan is None:
 			return False
 
 		response = await (
 			client.table(SUPABASE_USER_DATA_TABLE)
 			.update({
-				"credit":     new_credit,
-				"credit_debt": new_debt,
-				"stockage":   new_storage,
+				"credit":     plan["new_credit"],
+				"credit_debt": plan["new_debt"],
+				"stockage":   plan["new_storage"],
 				"updated_at": datetime.now(timezone.utc).isoformat(),
 			})
 			.eq("user_id", user_id)
-			.eq("credit", current_credits)
-			.eq("stockage", current_storage)
+			.eq("credit", plan["current_credits"])
+			.eq("stockage", plan["current_storage"])
 			.execute()
 		)
 
@@ -1402,15 +1445,15 @@ async def deduct_user_credits(
 			# silently dropping this deduction (classic TOCTOU double-spend).
 			continue
 
-		if debt_delta > 0:
+		if plan["debt_delta"] > 0:
 			await insert_user_credit_bank_entry(
 				user_id=user_id,
 				direction="debt_increase",
-				amount=debt_delta,
-				debt_balance_after=new_debt,
+				amount=plan["debt_delta"],
+				debt_balance_after=plan["new_debt"],
 				operation_type="operation",
 				operation_id="",
-				metadata={"requested_credit_debit": debit_credits},
+				metadata={"requested_credit_debit": plan["debit_credits"]},
 			)
 		return True
 
