@@ -4216,6 +4216,39 @@ async def process_endpoint(
         "status": "queued"
     }
 
+def _scan_partial_clips(output_dir: str, job_id: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(output_dir):
+        return []
+    clip_files = sorted([
+        f for f in os.listdir(output_dir)
+        if f.endswith('.mp4') and not f.startswith('temp_')
+    ])
+    partial_clips = []
+    for i, clip_file in enumerate(clip_files):
+        match = re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file)
+        resolved_clip_index = (int(match.group(1)) - 1) if match else i
+        partial_clips.append({
+            'video_url': f'/videos/{job_id}/{clip_file}',
+            'file': clip_file,
+            'index': resolved_clip_index,
+            'reel_clip_index': resolved_clip_index,
+            'status': 'generated'
+        })
+    return partial_clips
+
+
+def _attach_partial_clips_if_processing(target: Dict[str, Any], status: Optional[str], output_dir: Optional[str], job_id: str) -> None:
+    if status not in ('queued', 'processing') or not output_dir:
+        return
+    try:
+        partial_clips = _scan_partial_clips(output_dir, job_id)
+        if partial_clips:
+            target['partialClips'] = partial_clips
+    except Exception:
+        # Silently fail - don't break the status endpoint
+        pass
+
+
 @app.get("/api/status/{job_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def get_status(job_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     # Best effort read of in-memory runtime state, but the *authorization*
@@ -4226,35 +4259,8 @@ async def get_status(job_id: str, user_id: Annotated[str, Depends(get_user_id_he
 
     supabase_view = await reel_job_manager.get_job_view(job_id, user_id=user_id)
     if supabase_view:
-        if runtime_job and runtime_job.get('status') in ('queued', 'processing') and runtime_job.get('output_dir'):
-            try:
-                output_dir = runtime_job['output_dir']
-                if os.path.exists(output_dir):
-                    clip_files = sorted([
-                        f for f in os.listdir(output_dir)
-                        if f.endswith('.mp4') and not f.startswith('temp_')
-                    ])
-                    if clip_files:
-                        supabase_view['partialClips'] = [
-                            {
-                                'video_url': f'/videos/{job_id}/{clip_file}',
-                                'file': clip_file,
-                                'index': (
-                                    (int(match.group(1)) - 1)
-                                    if (match := re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file))
-                                    else i
-                                ),
-                                'reel_clip_index': (
-                                    (int(match.group(1)) - 1)
-                                    if (match := re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file))
-                                    else i
-                                ),
-                                'status': 'generated'
-                            }
-                            for i, clip_file in enumerate(clip_files)
-                        ]
-            except Exception:
-                pass
+        if runtime_job:
+            _attach_partial_clips_if_processing(supabase_view, runtime_job.get('status'), runtime_job.get('output_dir'), job_id)
         return supabase_view
 
     if job_id not in jobs:
@@ -4270,33 +4276,7 @@ async def get_status(job_id: str, user_id: Annotated[str, Depends(get_user_id_he
         "result": job.get('result')
     }
 
-    # If job is processing, scan for partial clips that have been generated
-    if job['status'] in ('queued', 'processing') and job.get('output_dir'):
-        try:
-            output_dir = job['output_dir']
-            if os.path.exists(output_dir):
-                # Find all generated clips (not temp ones)
-                clip_files = sorted([
-                    f for f in os.listdir(output_dir)
-                    if f.endswith('.mp4') and not f.startswith('temp_')
-                ])
-                if clip_files:
-                    # Build partial result from generated clips
-                    partial_clips = []
-                    for i, clip_file in enumerate(clip_files):
-                        match = re.search(_CLIP_INDEX_SUFFIX_PATTERN, clip_file)
-                        resolved_clip_index = (int(match.group(1)) - 1) if match else i
-                        partial_clips.append({
-                            'video_url': f'/videos/{job_id}/{clip_file}',
-                            'file': clip_file,
-                            'index': resolved_clip_index,
-                            'reel_clip_index': resolved_clip_index,
-                            'status': 'generated'
-                        })
-                    response['partialClips'] = partial_clips
-        except Exception:
-            # Silently fail - don't break the status endpoint
-            pass
+    _attach_partial_clips_if_processing(response, job['status'], job.get('output_dir'), job_id)
 
     return response
 
