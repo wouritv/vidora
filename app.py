@@ -4411,6 +4411,134 @@ def _download_input_url_to_job_dir(input_url: str, job_id: str) -> tuple[str, st
 
     return local_path, filename
 
+def _resolve_edit_clip_input_path(req: "EditRequest", job: Optional[Dict[str, Any]]):
+    # Resolve Input Path: Prefer explict input_filename from frontend (chaining edits)
+    if req.input_filename:
+        # Security: Ensure just a filename, no paths or signed query params
+        safe_name = _sanitize_input_filename(req.input_filename)
+        if not safe_name:
+            raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
+        input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
+        filename = safe_name
+    else:
+        if not job:
+            raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
+        if 'result' not in job or 'clips' not in job['result']:
+            raise HTTPException(status_code=400, detail="Job result not available")
+        # Fallback to original clip
+        clip = job['result']['clips'][req.clip_index]
+        filename = clip['video_url'].split('/')[-1]
+        input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
+
+    # Reels page may provide only a signed URL and no live in-memory job.
+    if not os.path.exists(input_path) and req.input_url:
+        input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
+
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+    return input_path, filename
+
+
+async def _load_transcript_for_edit(job_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        meta_files = glob.glob(os.path.join(OUTPUT_DIR, job_id, _METADATA_JSON_GLOB))
+        if meta_files:
+            async with aiofiles.open(meta_files[0], "r") as f:
+                data = json.loads(await f.read())
+                return data.get("transcript")
+    except Exception as e:
+        print(f"⚠️ Could not load transcript for editing context: {e}")
+    return None
+
+
+def _run_video_edit(final_api_key: str, job_id: str, input_path: str, output_path: str, transcript_for_edit, auto_edit_options):
+    editor = VideoEditor(api_key=final_api_key)
+
+    # SAFE FILE RENAMING STRATEGY (Avoid UnicodeEncodeError in Docker)
+    # Create a safe ASCII filename in the same directory
+    safe_filename = f"temp_input_{job_id}.mp4"
+    safe_input_path = os.path.join(OUTPUT_DIR, job_id, safe_filename)
+
+    # Copy original file to safe path
+    # (Copy is safer than rename if something crashes, we keep original)
+    shutil.copy(input_path, safe_input_path)
+    auto_cleanup_paths: List[str] = []
+
+    try:
+        processed_input_path, media_steps, bad_take_candidates, generated_paths = _apply_auto_edit_media_steps(
+            safe_input_path,
+            job_id,
+            transcript_for_edit,
+            auto_edit_options,
+        )
+        auto_cleanup_paths.extend(generated_paths)
+
+        # 1. Upload (using safe path)
+        vid_file = editor.upload_video(processed_input_path)
+
+        # 2. Get duration
+        import cv2
+        cap = cv2.VideoCapture(processed_input_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration = frame_count / fps if fps else 0
+        cap.release()
+
+        # 3. Get Plan (Filter String)
+        filter_data = editor.get_ffmpeg_filter(
+            vid_file,
+            duration,
+            fps=fps,
+            width=width,
+            height=height,
+            transcript=transcript_for_edit,
+        )
+        filter_data, applied_steps = _apply_auto_edit_options_to_filter_data(filter_data, auto_edit_options)
+
+        # 4. Apply
+        # Use safe output name first
+        safe_output_path = os.path.join(OUTPUT_DIR, job_id, f"temp_output_{job_id}.mp4")
+        editor.apply_edits(processed_input_path, safe_output_path, filter_data)
+
+        # Move result to final destination (rename works even if dest name has unicode if filesystem supports it,
+        # but python might still struggle if locale is broken? No, os.rename usually handles it better than subprocess args)
+        # Actually, output_path is defined above: f"edited_{filename}"
+        # If filename has unicode, output_path has unicode.
+        # Let's hope shutil.move / os.rename works.
+        if os.path.exists(safe_output_path):
+            shutil.move(safe_output_path, output_path)
+
+        return {
+            "filter": filter_data,
+            "applied_steps": applied_steps + media_steps,
+            "bad_take_candidates": bad_take_candidates,
+        }
+    finally:
+        # Cleanup temp safe input
+        if os.path.exists(safe_input_path):
+            os.remove(safe_input_path)
+        for temp_path in auto_cleanup_paths:
+            if temp_path != safe_input_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+
+async def _debit_edit_credits_and_log(user_id: str, req: "EditRequest", edit_required_credits: float) -> None:
+    if not (is_supabase_configured() and edit_required_credits > 0):
+        return
+    await supabase_deduct_user_credits(user_id, edit_required_credits)
+    await supabase_insert_user_data_history(
+        user_id=user_id,
+        credit=edit_required_credits,
+        storage=0.0,
+        operation="output",
+        operation_type="edition_auto",
+        operation_id=f"{req.job_id}:edit:{req.clip_index}",
+    )
+
+
 @app.post("/api/edit", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
 async def edit_clip(
     request: Request,
@@ -4431,30 +4559,7 @@ async def edit_clip(
     job = jobs.get(req.job_id)
 
     try:
-        # Resolve Input Path: Prefer explict input_filename from frontend (chaining edits)
-        if req.input_filename:
-            # Security: Ensure just a filename, no paths or signed query params
-            safe_name = _sanitize_input_filename(req.input_filename)
-            if not safe_name:
-                raise HTTPException(status_code=400, detail=_INVALID_INPUT_FILENAME)
-            input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
-            filename = safe_name
-        else:
-            if not job:
-                raise HTTPException(status_code=404, detail=_JOB_NOT_FOUND)
-            if 'result' not in job or 'clips' not in job['result']:
-                raise HTTPException(status_code=400, detail="Job result not available")
-            # Fallback to original clip
-            clip = job['result']['clips'][req.clip_index]
-            filename = clip['video_url'].split('/')[-1]
-            input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-
-        # Reels page may provide only a signed URL and no live in-memory job.
-        if not os.path.exists(input_path) and req.input_url:
-            input_path, filename = _download_input_url_to_job_dir(req.input_url, req.job_id)
-
-        if not os.path.exists(input_path):
-             raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+        input_path, filename = _resolve_edit_clip_input_path(req, job)
 
         input_size_bytes = float(os.path.getsize(input_path) if os.path.exists(input_path) else 0)
         input_duration_seconds = _probe_local_video_duration_seconds(input_path)
@@ -4474,93 +4579,14 @@ async def edit_clip(
         edited_filename = f"edited_{filename}"
         output_path = os.path.join(OUTPUT_DIR, req.job_id, edited_filename)
 
-        transcript_for_edit = None
-        try:
-            meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, _METADATA_JSON_GLOB))
-            if meta_files:
-                async with aiofiles.open(meta_files[0], "r") as f:
-                    data = json.loads(await f.read())
-                    transcript_for_edit = data.get("transcript")
-        except Exception as e:
-            print(f"⚠️ Could not load transcript for editing context: {e}")
+        transcript_for_edit = await _load_transcript_for_edit(req.job_id)
 
         # Run editing in a thread to avoid blocking main loop
         # Since VideoEditor uses blocking calls (subprocess, API wait)
-        def run_edit():
-            editor = VideoEditor(api_key=final_api_key)
-
-            # SAFE FILE RENAMING STRATEGY (Avoid UnicodeEncodeError in Docker)
-            # Create a safe ASCII filename in the same directory
-            safe_filename = f"temp_input_{req.job_id}.mp4"
-            safe_input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_filename)
-
-            # Copy original file to safe path
-            # (Copy is safer than rename if something crashes, we keep original)
-            shutil.copy(input_path, safe_input_path)
-            auto_cleanup_paths: List[str] = []
-
-            try:
-                processed_input_path, media_steps, bad_take_candidates, generated_paths = _apply_auto_edit_media_steps(
-                    safe_input_path,
-                    req.job_id,
-                    transcript_for_edit,
-                    req.auto_edit_options,
-                )
-                auto_cleanup_paths.extend(generated_paths)
-
-                # 1. Upload (using safe path)
-                vid_file = editor.upload_video(processed_input_path)
-
-                # 2. Get duration
-                import cv2
-                cap = cv2.VideoCapture(processed_input_path)
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                duration = frame_count / fps if fps else 0
-                cap.release()
-
-                # 3. Get Plan (Filter String)
-                filter_data = editor.get_ffmpeg_filter(
-                    vid_file,
-                    duration,
-                    fps=fps,
-                    width=width,
-                    height=height,
-                    transcript=transcript_for_edit,
-                )
-                filter_data, applied_steps = _apply_auto_edit_options_to_filter_data(filter_data, req.auto_edit_options)
-
-                # 4. Apply
-                # Use safe output name first
-                safe_output_path = os.path.join(OUTPUT_DIR, req.job_id, f"temp_output_{req.job_id}.mp4")
-                editor.apply_edits(processed_input_path, safe_output_path, filter_data)
-
-                # Move result to final destination (rename works even if dest name has unicode if filesystem supports it,
-                # but python might still struggle if locale is broken? No, os.rename usually handles it better than subprocess args)
-                # Actually, output_path is defined above: f"edited_{filename}"
-                # If filename has unicode, output_path has unicode.
-                # Let's hope shutil.move / os.rename works.
-                if os.path.exists(safe_output_path):
-                    shutil.move(safe_output_path, output_path)
-
-                return {
-                    "filter": filter_data,
-                    "applied_steps": applied_steps + media_steps,
-                    "bad_take_candidates": bad_take_candidates,
-                }
-            finally:
-                # Cleanup temp safe input
-                if os.path.exists(safe_input_path):
-                    os.remove(safe_input_path)
-                for temp_path in auto_cleanup_paths:
-                    if temp_path != safe_input_path and os.path.exists(temp_path):
-                        os.remove(temp_path)
-
-        # Run in thread pool
         loop = asyncio.get_event_loop()
-        plan = await loop.run_in_executor(None, run_edit)
+        plan = await loop.run_in_executor(
+            None, _run_video_edit, final_api_key, req.job_id, input_path, output_path, transcript_for_edit, req.auto_edit_options,
+        )
 
         # Update clip URL in the job result?
         # Or return new URL and let frontend handle it?
@@ -4572,16 +4598,7 @@ async def edit_clip(
         # Let's update the current one's video_url but keep backup?
         # Or return the new URL to the frontend to display.
 
-        if is_supabase_configured() and edit_required_credits > 0:
-            await supabase_deduct_user_credits(user_id, edit_required_credits)
-            await supabase_insert_user_data_history(
-                user_id=user_id,
-                credit=edit_required_credits,
-                storage=0.0,
-                operation="output",
-                operation_type="edition_auto",
-                operation_id=f"{req.job_id}:edit:{req.clip_index}",
-            )
+        await _debit_edit_credits_and_log(user_id, req, edit_required_credits)
 
         return {
             "success": True,
