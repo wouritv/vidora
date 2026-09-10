@@ -14,22 +14,26 @@ python-dotenv==1.2.2
 # Security: bumped from 0.10.14 (CVE re-audit) -- purely to drop mediapipe's
 # own `protobuf<5` constraint (see the explicit protobuf pin below).
 # mediapipe.python.solutions (mp.solutions.face_detection/face_mesh) was
-# REMOVED starting 0.10.30, not just deprecated -- a first attempt at this
-# bump shipped without checking that and broke `import main` outright
-# (AttributeError: module 'mediapipe' has no attribute 'solutions'). main.py
-# has since been ported to mediapipe.tasks.python.vision
-# (FaceDetector/FaceLandmarker, see _ensure_mediapipe_model and
-# detect_face_candidates/_track_mouth_signals) -- NOT YET VALIDATED against
-# real video content, only smoke-tested (model files load, API calls
-# succeed, correct result shapes) in a sandboxed environment with no real
-# face footage available. Needs a real end-to-end test (smart-crop
-# accuracy, active-speaker mouth tracking) before this reaches production.
-mediapipe==0.10.35
-# Security: mediapipe<0.10.35 transitively forced protobuf<5,>=4.25.3,
-# pinning it to the vulnerable 4.25.9 (CVE re-audit, pip-audit:
-# PYSEC-2026-1805). Newer mediapipe no longer declares a protobuf
-# dependency at all, so pin it here explicitly at a fixed version clear of
-# the known CVEs.
+# REMOVED starting 0.10.30, not just deprecated -- main.py has since been
+# ported to mediapipe.tasks.python.vision (FaceDetector/FaceLandmarker, see
+# _ensure_mediapipe_model and detect_face_candidates/_track_mouth_signals).
+#
+# Pinned to 1.0.1, NOT 0.10.35: PyPI has no linux/aarch64 wheel for
+# mediapipe between 0.10.18 and 1.0.0 (confirmed by a real
+# `docker compose up --build` failure on an Apple Silicon Mac --
+# "Could not find a version that satisfies the requirement
+# mediapipe==0.10.35" -- x86_64 had a 0.10.35 wheel, which is why that
+# gap wasn't visible in this environment's own x86_64 sandbox testing).
+# 1.0.1 has the same Tasks API surface as 0.10.35 (no mp.solutions in
+# either) and the exact same ported main.py code was re-verified
+# end-to-end against it with identical results.
+mediapipe==1.0.1
+# Security: mediapipe<0.10.30ish (pre-Tasks-API-only releases, including
+# the 0.10.14 this was pinned to before) transitively forced
+# protobuf<5,>=4.25.3, pinning it to the vulnerable 4.25.9 (CVE re-audit,
+# pip-audit: PYSEC-2026-1805). Newer mediapipe no longer declares a
+# protobuf dependency at all, so pin it here explicitly at a fixed version
+# clear of the known CVEs.
 protobuf==5.29.6
 boto3==1.43.4
 
