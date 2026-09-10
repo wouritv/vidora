@@ -5466,7 +5466,11 @@ def _probe_video_stream_for_effects(safe_input_path: str):
     probe_result = subprocess.check_output(probe_cmd, timeout=FFPROBE_TIMEOUT_SECONDS).decode().strip()
     probe_data = json.loads(probe_result)
 
-    stream = probe_data.get('streams', [{}])[0]
+    # `.get('streams', [{}])` only supplies the default when the key is
+    # missing entirely -- an existing-but-empty list (a file ffprobe can
+    # read but finds no video stream in) would still index-error here.
+    streams = probe_data.get('streams') or [{}]
+    stream = streams[0]
     width = int(stream.get('width', 1080))
     height = int(stream.get('height', 1920))
 

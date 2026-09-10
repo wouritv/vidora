@@ -6,6 +6,7 @@ import { getApiUrl } from "../config";
 import { normalizeFrontendStatus, statusMeta } from "../lib/status";
 import { readGenerationSession, SESSION_KEY } from "../lib/session";
 import { useTranslation } from "../state/LanguageContext";
+import { getAuthHeaders } from "../lib/apiAuth";
 
 export default function Dashboard() {
 
@@ -34,7 +35,9 @@ export default function Dashboard() {
         let cancelled = false;
         const pollStatus = async () => {
             try {
-                const response = await fetch(getApiUrl(`/api/status/${generationSession.jobId}`));
+                const response = await fetch(getApiUrl(`/api/status/${generationSession.jobId}`), {
+                    headers: getAuthHeaders(user?.id),
+                });
                 if (!response.ok) return;
                 const data = await response.json();
                 if (cancelled) return;

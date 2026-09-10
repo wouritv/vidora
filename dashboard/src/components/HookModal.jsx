@@ -17,8 +17,12 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
     const [size, setSize] = useState('M');
     const [entranceAnimation, setEntranceAnimation] = useState('spring');
     const [displayDuration, setDisplayDuration] = useState(5);
+    const [startSec, setStartSec] = useState(0);
 
     if (!isOpen) return null;
+
+    const clipDuration = durationInSeconds || 30;
+    const maxStartSec = Math.max(0, Math.floor(clipDuration - 1));
 
     // Build hook config for Remotion preview
     const hookConfig = {
@@ -27,6 +31,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
         size,
         entranceAnimation,
         displayDurationSec: displayDuration,
+        startSec: Math.min(startSec, maxStartSec),
     };
 
     const useRemotionPreview = !!videoUrl;
@@ -189,6 +194,25 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                 <span>15s</span>
                             </div>
                         </div>
+
+                        {/* Appearance moment (new) */}
+                        {maxStartSec > 0 ? (
+                            <div>
+                                <label className="text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">{t('hookModal.startTime', 'Apparition')}: {startSec}s</label>
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max={maxStartSec}
+                                    value={Math.min(startSec, maxStartSec)}
+                                    onChange={(e) => setStartSec(parseInt(e.target.value))}
+                                    className="w-full accent-yellow-500"
+                                />
+                                <div className="flex justify-between text-[10px] text-slate-400 dark:text-zinc-500">
+                                    <span>{t('hookModal.startTimeBeginning', 'Debut du clip')}</span>
+                                    <span>{maxStartSec}s</span>
+                                </div>
+                            </div>
+                        ) : null}
 
                         <div className="p-3 bg-white/5 rounded-lg border border-slate-200 dark:border-white/5 text-[11px] text-slate-500 dark:text-zinc-400">
                             <strong>{t('hookModal.tip', 'Tip')}:</strong> {t('hookModal.tipText', 'Keep it short and punchy. Using "POV:" or specific questions works best for retention.')}

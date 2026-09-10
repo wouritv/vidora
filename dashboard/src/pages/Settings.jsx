@@ -364,7 +364,7 @@ export default function SettingsPage() {
     setOauthLoading((prev) => ({ ...prev, [platform]: true }));
     setSocialError('');
     try {
-      const res = await fetch(getApiUrl(`/api/auth/${platform}/connect?user_id=${encodeURIComponent(user.id)}`));
+      const res = await fetch(getApiUrl(`/api/auth/${platform}/connect`), { headers: getAuthHeaders(user.id) });
       if (!res.ok) {
         throw new Error(await res.text());
       }

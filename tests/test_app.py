@@ -1781,6 +1781,25 @@ def test_generate_effects_config_with_input_filename_success(monkeypatch, tmp_pa
     assert_credits.assert_awaited_once()
 
 
+def test_probe_video_stream_for_effects_handles_empty_streams_list(monkeypatch, tmp_path):
+    # Regression test: `probe_data.get('streams', [{}])[0]` only falls back
+    # to [{}] when the 'streams' key is missing entirely -- a file ffprobe
+    # can read but detects no video stream in (streams: []) still indexed
+    # into an empty list and raised IndexError, surfacing as a generic 500
+    # on /api/effects/generate.
+    app = _import_app_with_stubs(monkeypatch)
+    monkeypatch.setattr(
+        app.subprocess,
+        "check_output",
+        lambda _cmd, **_kwargs: b'{"streams":[],"format":{"duration":12.5}}',
+    )
+    width, height, fps, duration = app._probe_video_stream_for_effects(str(tmp_path / "clip.mp4"))
+    assert width == 1080
+    assert height == 1920
+    assert fps == 30.0
+    assert duration == 12.5
+
+
 def test_add_subtitles_dubbed_video_uses_transcription(monkeypatch, tmp_path):
     app = _import_app_with_stubs(monkeypatch)
     monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))

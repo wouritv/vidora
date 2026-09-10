@@ -356,7 +356,6 @@
     "positionY": "Position verticale",
     "positionX": "Position horizontale",
     "resetStyles": "Réinitialiser les styles",
-    "applyToAll": "Appliquer le style à toutes les lignes",
     "selectedWord": "Mot sélectionné",
     "wordColor": "Couleur du mot",
     "inlineWordColor": "Couleur du mot sur la ligne",
@@ -408,6 +407,8 @@
       "large": "Grand"
     },
     "duration": "Duree",
+    "startTime": "Apparition",
+    "startTimeBeginning": "Debut du clip",
     "tip": "Astuce",
     "tipText": "Reste court et percutant. Utiliser \"POV:\" ou une question precise fonctionne bien pour la retention.",
     "generating": "Generation...",
