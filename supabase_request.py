@@ -1091,6 +1091,27 @@ async def count_active_jobs_for_user(user_id: str) -> int:
 	return int(response.count or 0)
 
 
+async def list_active_jobs(limit: int = 1000) -> List[Dict[str, Any]]:
+	"""Return jobs (any user) currently in a non-terminal state.
+
+	Unlike count_active_jobs_for_user, this is not scoped to one user --
+	it's used at process startup to find jobs orphaned by a previous
+	process's restart/crash (runtime execution state lives only in
+	in-memory JobManager.runtime_jobs, which a restart wipes, while these
+	Supabase rows persist and would otherwise count against
+	MAX_ACTIVE_JOBS_PER_USER forever with nothing left to ever complete
+	or retry them)."""
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_JOBS_TABLE)
+		.select(JOB_COLUMNS)
+		.in_("status", list(ACTIVE_JOB_STATUSES))
+		.limit(max(1, limit))
+		.execute()
+	)
+	return response.data or []
+
+
 async def get_latest_job_record_by_project(project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
 	"""Return the latest job row linked to a project for a specific user."""
 	if not project_id or not user_id:

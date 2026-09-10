@@ -263,6 +263,36 @@ def test_cancel_job_updates_status_and_clears_runtime(monkeypatch):
     job_manager.append_job_log.assert_awaited_once_with("job-cancel", "WARN", "Canceled by API")
 
 
+def test_force_fail_orphaned_job_terminates_refunds_and_clears_runtime(monkeypatch):
+    # Regression coverage for the startup reconciliation fix: a job left
+    # created/queued/processing/retry_wait by a previous process's restart
+    # can never actually retry (JobManager.runtime_jobs is wiped on
+    # restart), so this must go straight to a terminal "failed" state with
+    # a full refund -- never "retry_wait" like fail_job() would produce.
+    job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
+    manager = job_manager.JobManager()
+    manager.runtime_jobs["job-orphan"] = {"tmp": True}
+
+    job_manager.update_job_record = AsyncMock()
+    job_manager.append_job_log = AsyncMock()
+    job_manager.supabase_refund_user_credits = AsyncMock(return_value=True)
+    job_manager.supabase_insert_user_data_history = AsyncMock()
+
+    asyncio.run(
+        manager.force_fail_orphaned_job(
+            "job-orphan", "user-orphan", 5.4, operation_type="generation_reel"
+        )
+    )
+
+    assert "job-orphan" not in manager.runtime_jobs
+    _, payload = job_manager.update_job_record.await_args_list[0].args
+    assert payload["status"] == "failed"
+    assert payload["current_step"] == "failed"
+    assert payload["error_code"] == "ORPHANED_ON_RESTART"
+    assert payload["consumed_quota"] == 0.0
+    job_manager.supabase_refund_user_credits.assert_awaited_once_with("user-orphan", 6)
+
+
 def test_get_job_view_returns_row_and_logs(monkeypatch):
     job_manager = _import_job_manager_with_supabase_stub(monkeypatch)
     manager = job_manager.JobManager()

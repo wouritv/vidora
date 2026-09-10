@@ -326,6 +326,36 @@ class JobManager:
         await update_job_record(job_id, {"status": "queued", "current_step": "retry_enqueued"})
         await append_job_log(job_id, "WARN", "Job retry enqueued")
 
+    async def force_fail_orphaned_job(
+        self,
+        job_id: str,
+        user_id: str,
+        reserved_quota: float,
+        operation_type: str,
+        reason: str = "Job orphaned by a service restart",
+    ) -> None:
+        """Terminate a job left in a non-terminal status by a previous
+        process's restart/crash, and refund its reservation in full.
+
+        Unlike fail_job(), this never leaves the job in "retry_wait": a
+        restart wipes JobManager.runtime_jobs, so nothing will ever pick
+        such a job back up regardless of remaining attempts -- retrying it
+        would just recreate the same stuck state.
+        """
+        await update_job_record(
+            job_id,
+            {
+                "status": "failed",
+                "current_step": "failed",
+                "error_code": "ORPHANED_ON_RESTART",
+                "error_message": reason,
+                "consumed_quota": 0.0,
+            },
+        )
+        await append_job_log(job_id, "ERROR", reason, {"error_code": "ORPHANED_ON_RESTART"})
+        self.runtime_jobs.pop(job_id, None)
+        await self.refund_reservation(job_id, user_id, reserved_quota, operation_type=operation_type)
+
     async def cancel_job(self, job_id: str, reason: str = "Canceled by user") -> None:
         await update_job_record(
             job_id,

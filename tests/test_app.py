@@ -292,6 +292,47 @@ def test_api_process_route_is_wired_to_process_endpoint(monkeypatch):
     assert not ({"url", "acknowledged"} & query_param_names)
 
 
+def test_reconcile_orphaned_jobs_on_startup_force_fails_and_refunds(monkeypatch):
+    # Job execution state (JobManager.runtime_jobs) lives only in memory --
+    # a process restart wipes it but leaves the Supabase job row at
+    # whatever non-terminal status it was last in, and that row keeps
+    # counting against MAX_ACTIVE_JOBS_PER_USER forever since nothing will
+    # ever pick it back up. This pins that the startup reconciliation finds
+    # such rows and force-fails+refunds each one, mapping queue_name to the
+    # correct billing operation_type.
+    app = _import_app_with_stubs(monkeypatch)
+
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: True)
+    orphaned_rows = [
+        {"id": "job-reel", "user_id": "user-1", "reserved_quota": 3.0, "queue_name": "reels"},
+        {"id": "job-cap", "user_id": "user-2", "reserved_quota": 1.5, "queue_name": "captions"},
+    ]
+    app.supabase_list_active_jobs = AsyncMock(return_value=orphaned_rows)
+    app.reel_job_manager.force_fail_orphaned_job = AsyncMock()
+
+    asyncio.run(app._reconcile_orphaned_jobs_on_startup())
+
+    assert app.reel_job_manager.force_fail_orphaned_job.await_count == 2
+    calls = {c.args[0]: c for c in app.reel_job_manager.force_fail_orphaned_job.await_args_list}
+    assert calls["job-reel"].args == ("job-reel", "user-1", 3.0)
+    assert calls["job-reel"].kwargs["operation_type"] == "generation_reel"
+    assert calls["job-cap"].args == ("job-cap", "user-2", 1.5)
+    assert calls["job-cap"].kwargs["operation_type"] == "sous_titre"
+
+
+def test_reconcile_orphaned_jobs_on_startup_skips_when_supabase_not_configured(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    monkeypatch.setattr(app, "is_supabase_configured", lambda: False)
+    app.supabase_list_active_jobs = AsyncMock()
+    app.reel_job_manager.force_fail_orphaned_job = AsyncMock()
+
+    asyncio.run(app._reconcile_orphaned_jobs_on_startup())
+
+    app.supabase_list_active_jobs.assert_not_awaited()
+    app.reel_job_manager.force_fail_orphaned_job.assert_not_awaited()
+
+
 def test_resolve_scheduled_datetime_handles_aware_and_naive(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
     aware = app._resolve_scheduled_datetime("2024-01-01T10:00:00Z", "Europe/Paris")

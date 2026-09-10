@@ -92,6 +92,7 @@ from supabase_request import (
 	list_user_souscriptions as supabase_list_user_souscriptions,
 	update_job_record as supabase_update_job_record,
 	count_active_jobs_for_user as supabase_count_active_jobs_for_user,
+	list_active_jobs as supabase_list_active_jobs,
   get_latest_job_record_by_project as supabase_get_latest_job_record_by_project,
 	get_transcription_by_job_clip as supabase_get_transcription_by_job_clip,
 	upsert_transcription as supabase_upsert_transcription,
@@ -1998,6 +1999,47 @@ def _cleanup_expired_uploads(now: float) -> None:
             pass
 
 
+async def _reconcile_orphaned_jobs_on_startup() -> None:
+    """Terminate and refund jobs left non-terminal by a previous process's
+    restart/crash.
+
+    Job execution state (JobManager.runtime_jobs, the in-memory queue) is
+    never persisted -- only the Supabase job row survives a restart. A row
+    still marked created/queued/processing/retry_wait from a prior process
+    lifetime can never actually be resumed or retried (nothing will ever
+    re-enqueue it), yet it keeps counting against MAX_ACTIVE_JOBS_PER_USER
+    forever, eventually locking the affected users out of starting any new
+    job. Runs once at startup, before the queue workers begin accepting
+    new submissions.
+    """
+    if not is_supabase_configured():
+        return
+    try:
+        orphaned = await supabase_list_active_jobs()
+    except Exception as e:
+        print(f"⚠️ Startup job reconciliation: failed to list active jobs: {e}")
+        return
+
+    for row in orphaned:
+        job_id = row.get("id")
+        user_id = row.get("user_id")
+        if not job_id or not user_id:
+            continue
+        operation_type = "sous_titre" if row.get("queue_name") == "captions" else "generation_reel"
+        try:
+            await reel_job_manager.force_fail_orphaned_job(
+                job_id,
+                user_id,
+                float(row.get("reserved_quota") or 0.0),
+                operation_type=operation_type,
+            )
+        except Exception as e:
+            print(f"⚠️ Startup job reconciliation: failed to close orphaned job {job_id}: {e}")
+
+    if orphaned:
+        print(f"🧹 Startup job reconciliation: closed {len(orphaned)} orphaned job(s) from a previous process.")
+
+
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
     import time
@@ -2071,6 +2113,11 @@ async def run_job_wrapper(job_id: str, job_priority: int):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Close out jobs orphaned by a previous process's restart/crash before
+    # accepting new submissions, so they stop counting against
+    # MAX_ACTIVE_JOBS_PER_USER (see _reconcile_orphaned_jobs_on_startup).
+    await _reconcile_orphaned_jobs_on_startup()
+
     # Start worker and cleanup
     worker_tasks = [
         asyncio.create_task(process_queue(f"worker-{idx + 1}"))

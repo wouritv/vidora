@@ -103,7 +103,7 @@ def _import_app_with_stubs(monkeypatch):
         "set_user_data_balance", "deduct_user_credits", "insert_user_data_history",
         "get_user_data_history", "get_latest_user_paid_subscription",
         "update_souscription_row", "list_user_souscriptions", "update_job_record",
-        "count_active_jobs_for_user",
+        "count_active_jobs_for_user", "list_active_jobs",
         "get_latest_job_record_by_project", "get_transcription_by_job_clip",
         "upsert_transcription", "update_transcription_translations_cache",
         "insert_style_edit_version", "list_style_edit_versions",
