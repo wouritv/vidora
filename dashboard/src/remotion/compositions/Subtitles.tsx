@@ -9,6 +9,7 @@ import {
 } from "remotion";
 import type { SubtitleConfig } from "../lib/types";
 import { groupCaptionsIntoBlocks, getActiveWordIndex } from "../lib/captions";
+import { fitBlocksToLineLimit } from "../lib/lineFit";
 import { getFontStack } from "../lib/fonts";
 import { getEmojiForWord } from "../lib/emojiMatcher";
 
@@ -24,16 +25,37 @@ const ACTIVE_WORD_COLORS = [
   "#C77DFF",
 ];
 
+// Matches the SubtitleBlock container below: width 100% with 3.5% padding
+// on each side.
+const BLOCK_HORIZONTAL_PADDING_RATIO = 0.07;
+const BLOCK_WORD_GAP_PX = 14;
+const MAX_SUBTITLE_LINES = 2;
+const WORD_LETTER_SPACING_EM = 0.03;
+
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
-  const { fps } = useVideoConfig();
+  const { fps, width } = useVideoConfig();
   const wordsPerLine = Math.min(
     8,
     Math.max(2, Number(config.style.wordsPerLine) || 4)
   );
-  const blocks = groupCaptionsIntoBlocks(config.captions, {
+  const rawBlocks = groupCaptionsIntoBlocks(config.captions, {
     // Keep a single block large enough to naturally wrap on up to two lines.
     maxChars: Math.max(24, wordsPerLine * 16),
     maxWords: wordsPerLine * 2,
+  });
+  // The char-count heuristic above is font-agnostic and can underestimate a
+  // wide font (e.g. Montserrat Bold), letting a block wrap onto a 3rd line
+  // that then gets clipped by the fixed-height container below. Re-split
+  // any block that would actually render past MAX_SUBTITLE_LINES using real
+  // measured glyph widths for the selected font.
+  const blocks = fitBlocksToLineLimit(rawBlocks, {
+    fontStack: getFontStack(String(config.style.fontFamily || "Arial")),
+    fontSize: config.style.fontSize,
+    bold: Boolean(config.style.bold),
+    maxWidthPx: width * (1 - BLOCK_HORIZONTAL_PADDING_RATIO),
+    gapPx: BLOCK_WORD_GAP_PX,
+    maxLines: MAX_SUBTITLE_LINES,
+    letterSpacingEm: WORD_LETTER_SPACING_EM,
   });
 
   return (
@@ -127,7 +149,10 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           gap: "10px 14px",
           width: "100%",
           maxWidth: "100%",
-          maxHeight: `${Math.round(blockFontSize * 2.7)}px`,
+          // 2 lines at lineHeight 1.34, plus the 10px row gap between them
+          // and a small buffer -- matches WordSpan's actual line-height so a
+          // legitimately-2-line block never gets clipped at its own edge.
+          maxHeight: `${Math.round(blockFontSize * 1.34 * MAX_SUBTITLE_LINES + 14)}px`,
           overflow: "hidden",
           boxShadow: flashPulse > 0
             ? `0 0 ${Math.round(26 * flashPulse)}px rgba(16,185,129,${0.45 * flashPulse})`
