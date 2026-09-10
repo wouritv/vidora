@@ -300,16 +300,16 @@ export default function CaptionProjectsPage() {
                     ))}
                 </div>
 
-                <div className="hidden overflow-x-auto md:block">
-                    <table className="min-w-full text-sm">
+                <div className="hidden md:block">
+                    <table className="w-full table-fixed text-sm">
                         <thead>
                             <tr className="border-b border-slate-300 dark:border-white/10 text-left text-slate-500 dark:text-zinc-400 text-xs md:text-sm">
-                                <th className="px-2 md:px-3 py-3 font-medium">{t("projects.tableName", "Projet")}</th>
-                                <th className="hidden md:table-cell px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableDescription", "Description")}</th>
-                                <th className="hidden sm:table-cell px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableDuration", "Duration")}</th>
-                                <th className="px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableStatus", "Status")}</th>
-                                <th className="hidden lg:table-cell px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableCreatedAt", "Created at")}</th>
-                                <th className="px-2 md:px-3 py-3 font-medium text-right">{t("generatedMedia.tableActions", "Actions")}</th>
+                                <th className="w-[20%] px-2 md:px-3 py-3 font-medium">{t("projects.tableName", "Projet")}</th>
+                                <th className="hidden md:table-cell w-[26%] px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableDescription", "Description")}</th>
+                                <th className="hidden sm:table-cell w-[10%] px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableDuration", "Duration")}</th>
+                                <th className="w-[12%] px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableStatus", "Status")}</th>
+                                <th className="hidden lg:table-cell w-[14%] px-2 md:px-3 py-3 font-medium">{t("generatedMedia.tableCreatedAt", "Created at")}</th>
+                                <th className="w-[18%] px-2 md:px-3 py-3 font-medium text-right">{t("generatedMedia.tableActions", "Actions")}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -334,9 +334,9 @@ export default function CaptionProjectsPage() {
                                     onClick={() => handleOpenProject(item)}
                                 >
                                     <td className="px-2 md:px-3 py-2 md:py-3">
-                                        <p className="font-semibold text-slate-900 dark:text-white line-clamp-2">{item.name || t("generatedMedia.untitled", "Untitled")}</p>
+                                        <p className="font-semibold text-slate-900 dark:text-white line-clamp-2 break-words">{item.name || t("generatedMedia.untitled", "Untitled")}</p>
                                     </td>
-                                    <td className="hidden md:table-cell px-2 md:px-3 py-2 md:py-3 text-slate-700 dark:text-zinc-300 max-w-md"><p className="line-clamp-3">{item.description || "-"}</p></td>
+                                    <td className="hidden md:table-cell px-2 md:px-3 py-2 md:py-3 text-slate-700 dark:text-zinc-300"><p className="line-clamp-3 break-words">{item.description || "-"}</p></td>
                                     <td className="hidden sm:table-cell px-2 md:px-3 py-2 md:py-3 text-slate-700 dark:text-zinc-300">{formatDurationHms(item.source_duration)}</td>
                                     <td className="px-2 md:px-3 py-2 md:py-3">
                                         <span className={`inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.status)}`}>{statusLabel(item.status)}</span>
