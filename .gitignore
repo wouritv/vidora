@@ -7,6 +7,10 @@
 # YOLO model
 *.pt
 
+# MediaPipe Tasks models (downloaded at runtime, see main.py's
+# _ensure_mediapipe_model -- same pattern as the YOLO weights above)
+/mediapipe_models/
+
 # Python virtual environment
 .venv/
 __pycache__/

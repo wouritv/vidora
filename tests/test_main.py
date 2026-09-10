@@ -3,9 +3,48 @@ import math
 import os
 import runpy
 import sys
+import tempfile
 import types
 
 import pytest
+
+
+def _fake_mediapipe_tasks_module(detector, landmarker):
+    """A fake `mediapipe` module exposing just the Tasks API surface
+    main.py's face-detection code uses (mp.Image/ImageFormat,
+    mp.tasks.BaseOptions, mp.tasks.vision.{FaceDetector,FaceDetectorOptions,
+    FaceLandmarker,FaceLandmarkerOptions,RunningMode}), with
+    create_from_options wired to return the given fake detector/landmarker
+    instances regardless of options passed in.
+    """
+    class _FakeMpImage:
+        def __init__(self, image_format=None, data=None):
+            self.data = data
+
+    mp_mod = types.ModuleType("mediapipe")
+    mp_mod.Image = _FakeMpImage
+    mp_mod.ImageFormat = types.SimpleNamespace(SRGB=1)
+    mp_mod.tasks = types.SimpleNamespace(
+        BaseOptions=lambda **kwargs: types.SimpleNamespace(**kwargs),
+        vision=types.SimpleNamespace(
+            FaceDetector=types.SimpleNamespace(create_from_options=lambda _options: detector),
+            FaceDetectorOptions=lambda **kwargs: types.SimpleNamespace(**kwargs),
+            FaceLandmarker=types.SimpleNamespace(create_from_options=lambda _options: landmarker),
+            FaceLandmarkerOptions=lambda **kwargs: types.SimpleNamespace(**kwargs),
+            RunningMode=types.SimpleNamespace(IMAGE="IMAGE", VIDEO="VIDEO"),
+        ),
+    )
+    return mp_mod
+
+
+def _stub_mediapipe_model_dir(monkeypatch, models_dir):
+    """Points main.py's model auto-download at a dir that already has
+    placeholder files, so _ensure_mediapipe_model sees them as already
+    present and skips the real network download during tests."""
+    os.makedirs(models_dir, exist_ok=True)
+    for filename in ("blaze_face_short_range.tflite", "face_landmarker.task"):
+        open(os.path.join(models_dir, filename), "wb").close()
+    monkeypatch.setenv("MEDIAPIPE_MODELS_DIR", models_dir)
 
 
 def _import_main_with_stubs(monkeypatch):
@@ -50,11 +89,29 @@ def _import_main_with_stubs(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "yt_dlp", types.ModuleType("yt_dlp"))
 
-    mp_mod = types.ModuleType("mediapipe")
-    mp_mod.solutions = types.SimpleNamespace(
-        face_detection=types.SimpleNamespace(FaceDetection=lambda *args, **kwargs: object()),
-        face_mesh=object(),
-    )
+    _stub_mediapipe_model_dir(monkeypatch, tempfile.mkdtemp())
+
+    class _FakeFaceDetector:
+        def detect(self, _image):
+            return types.SimpleNamespace(detections=[])
+
+        def close(self):
+            return None
+
+    class _FakeFaceLandmarker:
+        def detect_for_video(self, _image, _timestamp_ms):
+            return types.SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    mp_mod = _fake_mediapipe_tasks_module(_FakeFaceDetector(), _FakeFaceLandmarker())
     monkeypatch.setitem(sys.modules, "mediapipe", mp_mod)
 
     google_mod = types.ModuleType("google")
@@ -347,15 +404,23 @@ def _install_cli_runtime_stubs(monkeypatch, tmp_path, *, shorts_payload=None):
     tqdm_mod.tqdm = lambda value=None, **kwargs: value if value is not None and not isinstance(value, (int, float)) else _TqdmCtx()
     monkeypatch.setitem(sys.modules, "tqdm", tqdm_mod)
 
-    class _DetBBox:
-        xmin, ymin, width, height = 0.1, 0.1, 0.3, 0.3
+    _stub_mediapipe_model_dir(monkeypatch, str(tmp_path / "mediapipe_models"))
 
-    class _Detection:
-        location_data = types.SimpleNamespace(relative_bounding_box=_DetBBox())
+    class _TaskBBox:
+        # Pixel-space equivalent of the old relative_bounding_box
+        # (xmin=ymin=0.1, width=height=0.3) on the 20x10 _Frame default
+        # below: int(0.1*20)=2, int(0.1*10)=1, int(0.3*20)=6, int(0.3*10)=3.
+        origin_x, origin_y, width, height = 2, 1, 6, 3
+
+    class _TaskDetection:
+        bounding_box = _TaskBBox()
 
     class _FaceDet:
-        def process(self, _rgb):
-            return types.SimpleNamespace(detections=[_Detection()])
+        def detect(self, _image):
+            return types.SimpleNamespace(detections=[_TaskDetection()])
+
+        def close(self):
+            return None
 
     class _FaceMesh:
         def __enter__(self):
@@ -364,14 +429,13 @@ def _install_cli_runtime_stubs(monkeypatch, tmp_path, *, shorts_payload=None):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def process(self, _rgb):
-            return types.SimpleNamespace(multi_face_landmarks=[])
+        def detect_for_video(self, _image, _timestamp_ms):
+            return types.SimpleNamespace(face_landmarks=[])
 
-    mp_mod = types.ModuleType("mediapipe")
-    mp_mod.solutions = types.SimpleNamespace(
-        face_detection=types.SimpleNamespace(FaceDetection=lambda *a, **k: _FaceDet()),
-        face_mesh=types.SimpleNamespace(FaceMesh=lambda **k: _FaceMesh()),
-    )
+        def close(self):
+            return None
+
+    mp_mod = _fake_mediapipe_tasks_module(_FaceDet(), _FaceMesh())
     monkeypatch.setitem(sys.modules, "mediapipe", mp_mod)
 
     class _Word:
@@ -1207,24 +1271,27 @@ def test_detection_and_scene_helpers_cover_branches(monkeypatch):
         shape = (100, 200, 3)
 
     class _BBox:
-        def __init__(self, xmin, ymin, width, height):
-            self.xmin = xmin
-            self.ymin = ymin
+        def __init__(self, origin_x, origin_y, width, height):
+            self.origin_x = origin_x
+            self.origin_y = origin_y
             self.width = width
             self.height = height
 
     class _Detection:
         def __init__(self, bbox):
-            self.location_data = types.SimpleNamespace(relative_bounding_box=bbox)
+            self.bounding_box = bbox
 
+    # Pixel-space equivalents of the old relative boxes on a 200x100 frame:
+    # (0.1,0.1,0.4,0.4) -> (20,10,80,40); (0.2,0.2,0.0,0.2) -> (40,20,0,20)
+    # (the second one has width=0, so it's still filtered out below).
     detections = [
-        _Detection(_BBox(0.1, 0.1, 0.4, 0.4)),
-        _Detection(_BBox(0.2, 0.2, 0.0, 0.2)),
+        _Detection(_BBox(20, 10, 80, 40)),
+        _Detection(_BBox(40, 20, 0, 20)),
     ]
     monkeypatch.setattr(main.cv2, "COLOR_BGR2RGB", 1, raising=False)
     monkeypatch.setattr(main.cv2, "cvtColor", lambda frame, code: frame, raising=False)
     monkeypatch.setattr(main, "MIN_FACE_AREA_RATIO", 0.01)
-    monkeypatch.setattr(main, "face_detection", types.SimpleNamespace(process=lambda _rgb: types.SimpleNamespace(detections=detections)))
+    monkeypatch.setattr(main, "face_detection", types.SimpleNamespace(detect=lambda _image: types.SimpleNamespace(detections=detections)))
     out = main.detect_face_candidates(_Frame())
     assert len(out) == 1
 
@@ -1785,11 +1852,15 @@ def test_mouth_tracking_and_correlation_paths(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def process(self, _rgb):
-            lm = types.SimpleNamespace(landmark=[types.SimpleNamespace(x=0.1, y=0.1)] * 400)
-            return types.SimpleNamespace(multi_face_landmarks=[lm])
+        def detect_for_video(self, _image, _timestamp_ms):
+            landmarks = [types.SimpleNamespace(x=0.1, y=0.1)] * 400
+            return types.SimpleNamespace(face_landmarks=[landmarks])
 
-    monkeypatch.setattr(main, "mp_face_mesh", types.SimpleNamespace(FaceMesh=lambda **_k: _Mesh()))
+    monkeypatch.setattr(
+        main._mp_vision,
+        "FaceLandmarker",
+        types.SimpleNamespace(create_from_options=lambda _options: _Mesh()),
+    )
     monkeypatch.setattr(main, "_landmarks_to_box", lambda *_a: [0, 0, 1, 1])
     monkeypatch.setattr(main, "_best_matching_face_id", lambda *_a: 0)
     monkeypatch.setattr(main, "_mouth_aspect_ratio", lambda *_a: 0.4)
@@ -1935,11 +2006,13 @@ def test_remaining_non_cli_branches(monkeypatch):
     monkeypatch.setattr(main.cv2, "COLOR_BGR2RGB", 1, raising=False)
     monkeypatch.setattr(main.cv2, "cvtColor", lambda frame, code: frame, raising=False)
     frame = types.SimpleNamespace(shape=(100, 100, 3))
-    monkeypatch.setattr(main, "face_detection", types.SimpleNamespace(process=lambda _rgb: types.SimpleNamespace(detections=[])))
+    monkeypatch.setattr(main, "face_detection", types.SimpleNamespace(detect=lambda _image: types.SimpleNamespace(detections=[])))
     assert main.detect_face_candidates(frame) == []
-    bbox = types.SimpleNamespace(xmin=0.1, ymin=0.1, width=0.01, height=0.01)
-    det = types.SimpleNamespace(location_data=types.SimpleNamespace(relative_bounding_box=bbox))
-    monkeypatch.setattr(main, "face_detection", types.SimpleNamespace(process=lambda _rgb: types.SimpleNamespace(detections=[det])))
+    # Pixel-space equivalent of the old relative box (0.1,0.1,0.01,0.01) on
+    # this 100x100 frame: (10,10,1,1) -- still filtered out by area below.
+    bbox = types.SimpleNamespace(origin_x=10, origin_y=10, width=1, height=1)
+    det = types.SimpleNamespace(bounding_box=bbox)
+    monkeypatch.setattr(main, "face_detection", types.SimpleNamespace(detect=lambda _image: types.SimpleNamespace(detections=[det])))
     monkeypatch.setattr(main, "MIN_FACE_AREA_RATIO", 0.1)
     assert main.detect_face_candidates(frame) == []
 
