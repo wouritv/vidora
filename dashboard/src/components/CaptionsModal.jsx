@@ -248,13 +248,19 @@ export default function CaptionsModal({
   const [emojiSearch, setEmojiSearch] = useState('');
 
   const selectedLine = useMemo(() => lines.find((line) => line.id === selectedLineId) || null, [lines, selectedLineId]);
-  const selectedLineStyle = useMemo(() => ({ ...DEFAULT_STYLE, ...(selectedLine?.style || {}) }), [selectedLine]);
   const flattenedCaptions = useMemo(() => flattenLines(lines), [lines]);
+
+  // A single style applies to the whole video: Subtitles.tsx (both the
+  // dashboard preview and the render-service export renderer) only ever
+  // reads one SubtitleStyle for the whole composition, not one per line.
+  // Every line's `.style` is kept in sync on every edit so that
+  // subtitleConfig.style, sourced from lines[0].style, always reflects it.
+  const currentStyle = useMemo(() => ({ ...DEFAULT_STYLE, ...(lines[0]?.style || {}) }), [lines]);
 
   const subtitleConfig = useMemo(() => ({
     captions: flattenedCaptions,
-    style: { ...DEFAULT_STYLE, ...(lines[0]?.style || {}) },
-  }), [flattenedCaptions, lines]);
+    style: currentStyle,
+  }), [flattenedCaptions, currentStyle]);
 
   const visibleEmojis = useMemo(() => {
     const term = String(emojiSearch || '').trim();
@@ -266,13 +272,12 @@ export default function CaptionsModal({
     setLines((prev) => prev.map((line) => (line.id === lineId ? updater(line) : line)));
   };
 
-  const updateLineStyle = (lineId, patch) => {
-    updateLine(lineId, (line) => ({ ...line, style: { ...DEFAULT_STYLE, ...(line.style || {}), ...patch } }));
+  const updateAllLinesStyle = (patch) => {
+    setLines((prev) => prev.map((line) => ({ ...line, style: { ...DEFAULT_STYLE, ...(line.style || {}), ...patch } })));
   };
 
-  const resetSelectedLineStyle = () => {
-    if (!selectedLine) return;
-    updateLineStyle(selectedLine.id, { ...DEFAULT_STYLE });
+  const resetStyle = () => {
+    setLines((prev) => prev.map((line) => ({ ...line, style: { ...DEFAULT_STYLE } })));
   };
 
   const applyWordsPerLine = (nextWordsPerLine) => {
@@ -287,7 +292,7 @@ export default function CaptionsModal({
       ...line,
       style: {
         ...DEFAULT_STYLE,
-        ...(selectedLine ? selectedLine.style : {}),
+        ...(lines[0]?.style || {}),
         wordsPerLine: size,
       },
     }));
@@ -301,17 +306,8 @@ export default function CaptionsModal({
     previewRef.current?.seekToMs?.(line.startMs || 0);
   };
 
-  const applySelectedStyleToAll = () => {
-    if (!selectedLine) return;
-    const sourceStyle = { ...DEFAULT_STYLE, ...(selectedLine.style || {}) };
-    setLines((prev) => prev.map((line) => ({ ...line, style: { ...sourceStyle } })));
-  };
-
-  const applyLineStyleToAll = (lineId) => {
-    const sourceLine = lines.find((line) => line.id === lineId);
-    if (!sourceLine) return;
-    const sourceStyle = { ...DEFAULT_STYLE, ...(sourceLine.style || {}) };
-    setLines((prev) => prev.map((line) => ({ ...line, style: { ...sourceStyle } })));
+  const focusSelectedPreview = () => {
+    if (selectedLine) focusPreviewLine(selectedLine.id);
   };
 
   const updateWordText = (lineId, wordId, text) => {
@@ -474,10 +470,10 @@ export default function CaptionsModal({
   };
 
   useEffect(() => {
-    if (showStyleEditor && !selectedLine) {
+    if (showStyleEditor && lines.length === 0) {
       setShowStyleEditor(false);
     }
-  }, [showStyleEditor, selectedLine]);
+  }, [showStyleEditor, lines.length]);
 
   if (!isOpen) return null;
 
@@ -489,7 +485,7 @@ export default function CaptionsModal({
         </button>
 
         <div className="w-full md:w-[50%] rounded-xl border border-slate-300 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 md:p-5 overflow-y-auto overflow-x-hidden custom-scrollbar">
-          {showStyleEditor && selectedLine ? (
+          {showStyleEditor && lines.length > 0 ? (
             <>
               <div className="mb-4 flex items-center justify-between gap-2">
                 <button onClick={() => setShowStyleEditor(false)} className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
@@ -502,11 +498,11 @@ export default function CaptionsModal({
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.freePosition', 'Free position (X/Y)')}</label>
                   <div className="mt-2 space-y-2">
-                    <label className="block text-[11px] text-slate-600 dark:text-slate-300">X ({selectedLineStyle.positionX}%)
-                      <input type="range" min="5" max="95" value={selectedLineStyle.positionX} onChange={(e) => { updateLineStyle(selectedLine.id, { positionX: Number(e.target.value) || 50 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-300">X ({currentStyle.positionX}%)
+                      <input type="range" min="5" max="95" value={currentStyle.positionX} onChange={(e) => { updateAllLinesStyle({ positionX: Number(e.target.value) || 50 }); focusSelectedPreview(); }} className="mt-1 w-full accent-emerald-500" />
                     </label>
-                    <label className="block text-[11px] text-slate-600 dark:text-slate-300">Y ({selectedLineStyle.positionY}%)
-                      <input type="range" min="5" max="95" value={selectedLineStyle.positionY} onChange={(e) => { updateLineStyle(selectedLine.id, { positionY: Number(e.target.value) || 82 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-300">Y ({currentStyle.positionY}%)
+                      <input type="range" min="5" max="95" value={currentStyle.positionY} onChange={(e) => { updateAllLinesStyle({ positionY: Number(e.target.value) || 82 }); focusSelectedPreview(); }} className="mt-1 w-full accent-emerald-500" />
                     </label>
                   </div>
                 </div>
@@ -519,14 +515,14 @@ export default function CaptionsModal({
                       { key: 'bold', label: t('captionsModal.bold', 'Bold'), patch: { bold: true, italic: false } },
                       { key: 'italic', label: t('captionsModal.italic', 'Italic'), patch: { bold: false, italic: true } },
                     ].map((opt) => {
-                      const isActive = (opt.key === 'normal' && !selectedLineStyle.bold && !selectedLineStyle.italic)
-                        || (opt.key === 'bold' && selectedLineStyle.bold && !selectedLineStyle.italic)
-                        || (opt.key === 'italic' && selectedLineStyle.italic && !selectedLineStyle.bold);
+                      const isActive = (opt.key === 'normal' && !currentStyle.bold && !currentStyle.italic)
+                        || (opt.key === 'bold' && currentStyle.bold && !currentStyle.italic)
+                        || (opt.key === 'italic' && currentStyle.italic && !currentStyle.bold);
                       return (
                         <button
-                          key={`${selectedLine.id}-emph-${opt.key}`}
+                          key={`style-emph-${opt.key}`}
                           type="button"
-                          onClick={() => { updateLineStyle(selectedLine.id, opt.patch); focusPreviewLine(selectedLine.id); }}
+                          onClick={() => { updateAllLinesStyle(opt.patch); focusSelectedPreview(); }}
                           className={`rounded-md border px-2 py-1.5 text-xs ${isActive ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}
                         >
                           {opt.label}
@@ -541,10 +537,10 @@ export default function CaptionsModal({
                       { value: 'lowercase', label: t('captionsModal.caseLower', 'lower') },
                     ].map((opt) => (
                       <button
-                        key={`${selectedLine.id}-case-${opt.value}`}
+                        key={`style-case-${opt.value}`}
                         type="button"
-                        onClick={() => { updateLineStyle(selectedLine.id, { textCase: opt.value }); focusPreviewLine(selectedLine.id); }}
-                        className={`rounded-md border px-2 py-1.5 text-xs ${selectedLineStyle.textCase === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}
+                        onClick={() => { updateAllLinesStyle({ textCase: opt.value }); focusSelectedPreview(); }}
+                        className={`rounded-md border px-2 py-1.5 text-xs ${currentStyle.textCase === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}
                       >
                         {opt.label}
                       </button>
@@ -556,7 +552,7 @@ export default function CaptionsModal({
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.animation', 'Animation')}</label>
                   <div className="mt-2 grid grid-cols-2 gap-2">
                     {ANIMATION_OPTIONS.map((opt) => (
-                      <button key={`${selectedLine.id}-anim-${opt.value}`} type="button" onClick={() => { updateLineStyle(selectedLine.id, { animation: opt.value }); focusPreviewLine(selectedLine.id); }} className={`rounded-md border px-2 py-1.5 text-left ${selectedLineStyle.animation === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}>
+                      <button key={`style-anim-${opt.value}`} type="button" onClick={() => { updateAllLinesStyle({ animation: opt.value }); focusSelectedPreview(); }} className={`rounded-md border px-2 py-1.5 text-left ${currentStyle.animation === opt.value ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 text-slate-700 dark:text-slate-300'}`}>
                         <div className="text-xs font-medium">{opt.label}</div>
                         <div className="mt-0.5 text-[10px] leading-tight opacity-80">{opt.desc}</div>
                       </button>
@@ -566,7 +562,7 @@ export default function CaptionsModal({
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.fontFamily', 'Font family')}</label>
-                  <select value={selectedLineStyle.fontFamily} onChange={(e) => { updateLineStyle(selectedLine.id, { fontFamily: e.target.value }); focusPreviewLine(selectedLine.id); }} className="mt-2 w-full bg-white dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1.5 text-xs text-slate-900 dark:text-zinc-100">
+                  <select value={currentStyle.fontFamily} onChange={(e) => { updateAllLinesStyle({ fontFamily: e.target.value }); focusSelectedPreview(); }} className="mt-2 w-full bg-white dark:bg-black/40 border border-slate-300 dark:border-white/10 rounded-md px-2 py-1.5 text-xs text-slate-900 dark:text-zinc-100">
                     {[...new Set(FONT_OPTIONS.map((opt) => opt.category))].map((cat) => (
                       <optgroup key={cat} label={cat}>{FONT_OPTIONS.filter((opt) => opt.category === cat).map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}</optgroup>
                     ))}
@@ -574,19 +570,19 @@ export default function CaptionsModal({
                 </div>
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
-                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.lineSize', 'Line size')} ({selectedLineStyle.fontSize}px)</label>
-                  <input type="range" min="28" max="96" value={selectedLineStyle.fontSize} onChange={(e) => { updateLineStyle(selectedLine.id, { fontSize: Number(e.target.value) || 52 }); focusPreviewLine(selectedLine.id); }} className="mt-2 w-full accent-emerald-500" />
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.lineSize', 'Line size')} ({currentStyle.fontSize}px)</label>
+                  <input type="range" min="28" max="96" value={currentStyle.fontSize} onChange={(e) => { updateAllLinesStyle({ fontSize: Number(e.target.value) || 52 }); focusSelectedPreview(); }} className="mt-2 w-full accent-emerald-500" />
                 </div>
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.textColor', 'Text color')}</label>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     {COLOR_PRESETS.map((preset) => (
-                      <button key={`${selectedLine.id}-${preset.color}`} type="button" onClick={() => { updateLineStyle(selectedLine.id, { fontColor: preset.color }); focusPreviewLine(selectedLine.id); }} className={`h-6 w-6 rounded-full border-2 ${selectedLineStyle.fontColor === preset.color ? 'border-white scale-110' : 'border-slate-400 dark:border-white/20'}`} style={{ backgroundColor: preset.color }} />
+                      <button key={`style-${preset.color}`} type="button" onClick={() => { updateAllLinesStyle({ fontColor: preset.color }); focusSelectedPreview(); }} className={`h-6 w-6 rounded-full border-2 ${currentStyle.fontColor === preset.color ? 'border-white scale-110' : 'border-slate-400 dark:border-white/20'}`} style={{ backgroundColor: preset.color }} />
                     ))}
                     <label className="relative h-6 w-6 rounded-full border border-dashed border-slate-400/80 overflow-hidden" title={t('captionsModal.customColor', 'Custom color')}>
                       <span className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-300">+</span>
-                      <input type="color" value={selectedLineStyle.fontColor} onChange={(e) => { updateLineStyle(selectedLine.id, { fontColor: e.target.value }); focusPreviewLine(selectedLine.id); }} className="absolute inset-0 opacity-0 cursor-pointer" />
+                      <input type="color" value={currentStyle.fontColor} onChange={(e) => { updateAllLinesStyle({ fontColor: e.target.value }); focusSelectedPreview(); }} className="absolute inset-0 opacity-0 cursor-pointer" />
                     </label>
                   </div>
                 </div>
@@ -595,11 +591,11 @@ export default function CaptionsModal({
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.highlightColor', 'Highlight color')}</label>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     {HIGHLIGHT_COLOR_PRESETS.map((preset) => (
-                      <button key={`${selectedLine.id}-hl-${preset.color}`} type="button" onClick={() => { updateLineStyle(selectedLine.id, { highlightColor: preset.color }); focusPreviewLine(selectedLine.id); }} className={`h-6 w-6 rounded-full border-2 ${selectedLineStyle.highlightColor === preset.color ? 'border-white scale-110' : 'border-slate-400 dark:border-white/20'}`} style={{ backgroundColor: preset.color }} />
+                      <button key={`style-hl-${preset.color}`} type="button" onClick={() => { updateAllLinesStyle({ highlightColor: preset.color }); focusSelectedPreview(); }} className={`h-6 w-6 rounded-full border-2 ${currentStyle.highlightColor === preset.color ? 'border-white scale-110' : 'border-slate-400 dark:border-white/20'}`} style={{ backgroundColor: preset.color }} />
                     ))}
                     <label className="relative h-6 w-6 rounded-full border border-dashed border-slate-400/80 overflow-hidden" title={t('captionsModal.customColor', 'Custom color')}>
                       <span className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-300">+</span>
-                      <input type="color" value={selectedLineStyle.highlightColor} onChange={(e) => { updateLineStyle(selectedLine.id, { highlightColor: e.target.value }); focusPreviewLine(selectedLine.id); }} className="absolute inset-0 opacity-0 cursor-pointer" />
+                      <input type="color" value={currentStyle.highlightColor} onChange={(e) => { updateAllLinesStyle({ highlightColor: e.target.value }); focusSelectedPreview(); }} className="absolute inset-0 opacity-0 cursor-pointer" />
                     </label>
                   </div>
                 </div>
@@ -608,18 +604,18 @@ export default function CaptionsModal({
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.shadowColor', 'Shadow color')}</label>
                   <div className="mt-2 flex items-center gap-3 rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 p-2">
                     <label className="relative h-7 w-7 rounded border border-slate-300 dark:border-white/10 overflow-hidden" title={t('captionsModal.shadowColor', 'Shadow color')}>
-                      <div className="h-full w-full" style={{ backgroundColor: selectedLineStyle.textShadowColor }} />
-                      <input type="color" value={selectedLineStyle.textShadowColor} onChange={(e) => { updateLineStyle(selectedLine.id, { textShadowColor: e.target.value }); focusPreviewLine(selectedLine.id); }} className="absolute inset-0 opacity-0 cursor-pointer" />
+                      <div className="h-full w-full" style={{ backgroundColor: currentStyle.textShadowColor }} />
+                      <input type="color" value={currentStyle.textShadowColor} onChange={(e) => { updateAllLinesStyle({ textShadowColor: e.target.value }); focusSelectedPreview(); }} className="absolute inset-0 opacity-0 cursor-pointer" />
                     </label>
                     <div className="grid flex-1 grid-cols-3 gap-2 text-[10px] text-slate-400">
-                      <label>{t('captionsModal.blur', 'Blur')} {selectedLineStyle.shadowBlur}px
-                        <input type="range" min="0" max="24" value={selectedLineStyle.shadowBlur} onChange={(e) => { updateLineStyle(selectedLine.id, { shadowBlur: Number(e.target.value) || 0 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
+                      <label>{t('captionsModal.blur', 'Blur')} {currentStyle.shadowBlur}px
+                        <input type="range" min="0" max="24" value={currentStyle.shadowBlur} onChange={(e) => { updateAllLinesStyle({ shadowBlur: Number(e.target.value) || 0 }); focusSelectedPreview(); }} className="mt-1 w-full accent-emerald-500" />
                       </label>
-                      <label>{t('captionsModal.offsetX', 'Offset X')} {selectedLineStyle.shadowOffsetX}px
-                        <input type="range" min="-20" max="20" value={selectedLineStyle.shadowOffsetX} onChange={(e) => { updateLineStyle(selectedLine.id, { shadowOffsetX: Number(e.target.value) || 0 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
+                      <label>{t('captionsModal.offsetX', 'Offset X')} {currentStyle.shadowOffsetX}px
+                        <input type="range" min="-20" max="20" value={currentStyle.shadowOffsetX} onChange={(e) => { updateAllLinesStyle({ shadowOffsetX: Number(e.target.value) || 0 }); focusSelectedPreview(); }} className="mt-1 w-full accent-emerald-500" />
                       </label>
-                      <label>{t('captionsModal.offsetY', 'Offset Y')} {selectedLineStyle.shadowOffsetY}px
-                        <input type="range" min="-20" max="20" value={selectedLineStyle.shadowOffsetY} onChange={(e) => { updateLineStyle(selectedLine.id, { shadowOffsetY: Number(e.target.value) || 0 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
+                      <label>{t('captionsModal.offsetY', 'Offset Y')} {currentStyle.shadowOffsetY}px
+                        <input type="range" min="-20" max="20" value={currentStyle.shadowOffsetY} onChange={(e) => { updateAllLinesStyle({ shadowOffsetY: Number(e.target.value) || 0 }); focusSelectedPreview(); }} className="mt-1 w-full accent-emerald-500" />
                       </label>
                     </div>
                   </div>
@@ -629,28 +625,27 @@ export default function CaptionsModal({
                   <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.border', 'Border')}</label>
                   <div className="mt-2 flex items-center gap-3 rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 p-2">
                     <label className="relative h-7 w-7 rounded border border-slate-300 dark:border-white/10 overflow-hidden" title={t('captionsModal.borderColor', 'Border color')}>
-                      <div className="h-full w-full" style={{ backgroundColor: selectedLineStyle.borderColor }} />
-                      <input type="color" value={selectedLineStyle.borderColor} onChange={(e) => { updateLineStyle(selectedLine.id, { borderColor: e.target.value }); focusPreviewLine(selectedLine.id); }} className="absolute inset-0 opacity-0 cursor-pointer" />
+                      <div className="h-full w-full" style={{ backgroundColor: currentStyle.borderColor }} />
+                      <input type="color" value={currentStyle.borderColor} onChange={(e) => { updateAllLinesStyle({ borderColor: e.target.value }); focusSelectedPreview(); }} className="absolute inset-0 opacity-0 cursor-pointer" />
                     </label>
-                    <label className="flex-1 text-[10px] text-slate-400">{t('captionsModal.thickness', 'Thickness')} ({selectedLineStyle.borderWidth})
-                      <input type="range" min="0" max="6" value={selectedLineStyle.borderWidth} onChange={(e) => { updateLineStyle(selectedLine.id, { borderWidth: Number(e.target.value) || 0 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
+                    <label className="flex-1 text-[10px] text-slate-400">{t('captionsModal.thickness', 'Thickness')} ({currentStyle.borderWidth})
+                      <input type="range" min="0" max="6" value={currentStyle.borderWidth} onChange={(e) => { updateAllLinesStyle({ borderWidth: Number(e.target.value) || 0 }); focusSelectedPreview(); }} className="mt-1 w-full accent-emerald-500" />
                     </label>
                   </div>
                 </div>
 
                 <div className="rounded-lg border border-slate-300 dark:border-white/10 bg-white/[0.03] px-3 py-3">
-                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.wordsPerLine', 'Words per line')} ({selectedLineStyle.wordsPerLine || 4})</label>
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{t('captionsModal.wordsPerLine', 'Words per line')} ({currentStyle.wordsPerLine || 4})</label>
                   <input
                     type="range"
                     min="2"
                     max="8"
-                    value={selectedLineStyle.wordsPerLine || 4}
+                    value={currentStyle.wordsPerLine || 4}
                     onChange={(e) => {
                       const value = clamp(Number(e.target.value) || 4, 2, 8);
                       setWordsPerLineTouched(true);
-                      updateLineStyle(selectedLine.id, { wordsPerLine: value });
                       applyWordsPerLine(value);
-                      focusPreviewLine(selectedLine.id);
+                      focusSelectedPreview();
                     }}
                     className="mt-2 w-full accent-emerald-500"
                   />
@@ -661,28 +656,28 @@ export default function CaptionsModal({
                     <span>{t('captionsModal.backgroundBox', 'Background box')}</span>
                     <input
                       type="checkbox"
-                      checked={selectedLineStyle.bgOpacity > 0}
+                      checked={currentStyle.bgOpacity > 0}
                       onChange={(e) => {
-                        updateLineStyle(selectedLine.id, { bgOpacity: e.target.checked ? 0.5 : 0 });
-                        focusPreviewLine(selectedLine.id);
+                        updateAllLinesStyle({ bgOpacity: e.target.checked ? 0.5 : 0 });
+                        focusSelectedPreview();
                       }}
                     />
                   </div>
-                  {selectedLineStyle.bgOpacity > 0 ? (
+                  {currentStyle.bgOpacity > 0 ? (
                     <div className="mt-3 flex items-center gap-3">
                       <label className="relative h-7 w-7 rounded border border-slate-300 dark:border-white/10 overflow-hidden" title={t('captionsModal.backgroundColor', 'Background color')}>
-                        <div className="h-full w-full" style={{ backgroundColor: selectedLineStyle.bgColor }} />
-                        <input type="color" value={selectedLineStyle.bgColor} onChange={(e) => { updateLineStyle(selectedLine.id, { bgColor: e.target.value }); focusPreviewLine(selectedLine.id); }} className="absolute inset-0 opacity-0 cursor-pointer" />
+                        <div className="h-full w-full" style={{ backgroundColor: currentStyle.bgColor }} />
+                        <input type="color" value={currentStyle.bgColor} onChange={(e) => { updateAllLinesStyle({ bgColor: e.target.value }); focusSelectedPreview(); }} className="absolute inset-0 opacity-0 cursor-pointer" />
                       </label>
-                      <label className="flex-1 text-[10px] text-slate-400">{t('captionsModal.opacity', 'Opacity')} ({Math.round((selectedLineStyle.bgOpacity || 0) * 100)}%)
-                        <input type="range" min="10" max="100" value={Math.round((selectedLineStyle.bgOpacity || 0) * 100)} onChange={(e) => { updateLineStyle(selectedLine.id, { bgOpacity: (Number(e.target.value) || 0) / 100 }); focusPreviewLine(selectedLine.id); }} className="mt-1 w-full accent-emerald-500" />
+                      <label className="flex-1 text-[10px] text-slate-400">{t('captionsModal.opacity', 'Opacity')} ({Math.round((currentStyle.bgOpacity || 0) * 100)}%)
+                        <input type="range" min="10" max="100" value={Math.round((currentStyle.bgOpacity || 0) * 100)} onChange={(e) => { updateAllLinesStyle({ bgOpacity: (Number(e.target.value) || 0) / 100 }); focusSelectedPreview(); }} className="mt-1 w-full accent-emerald-500" />
                       </label>
                     </div>
                   ) : null}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <button type="button" onClick={resetSelectedLineStyle} className="rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300">
+                  <button type="button" onClick={resetStyle} className="rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300">
                     {t('captionsModal.resetStyles', 'Reset styles')}
                   </button>
                 </div>
@@ -699,7 +694,7 @@ export default function CaptionsModal({
                   <button
                     type="button"
                     onClick={() => setShowStyleEditor(true)}
-                    disabled={!selectedLine}
+                    disabled={lines.length === 0}
                     className="rounded-lg border border-slate-300 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-40"
                   >
                     {t('captionsModal.styleEditor', 'Edition de style')}
@@ -767,9 +762,6 @@ export default function CaptionsModal({
                           className="rounded-md border border-slate-300 dark:border-white/10 bg-white dark:bg-black/30 px-2 py-1 text-[11px] text-slate-700 dark:text-slate-200"
                         >
                           {t('captionsModal.addEmoji', 'Add emoji')}
-                        </button>
-                        <button type="button" onClick={(e) => { e.stopPropagation(); applyLineStyleToAll(line.id); }} className="rounded-md border border-emerald-300 bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-200 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-200 dark:hover:bg-emerald-500/25">
-                          {t('captionsModal.applyToAll', 'Appliquer a tous')}
                         </button>
                         <button type="button" onClick={(e) => { e.stopPropagation(); setLines((prev) => prev.filter((item) => item.id !== line.id)); }} className="rounded-md border border-rose-300 bg-rose-100 px-2 py-1 text-[11px] font-semibold text-rose-800 hover:bg-rose-200 dark:border-rose-500/40 dark:bg-rose-500/15 dark:text-rose-200 dark:hover:bg-rose-500/25">
                           {t('captionsModal.deleteLine', 'Delete line')}
