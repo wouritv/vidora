@@ -5276,7 +5276,6 @@ async def _persist_style_edit_version_after_captions(
         print(f"⚠️ Failed to persist style edit version: {e}")
 
 
-@app.post("/api/reels/{job_id}/{clip_index}/captions/persist", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 def _validate_captioned_reel_upload(file: Optional[UploadFile]) -> None:
     if not file:
         raise HTTPException(status_code=400, detail="Missing rendered video file")
@@ -5317,6 +5316,7 @@ async def _assert_credits_or_cleanup_output(user_id: str, caption_required_credi
         raise
 
 
+@app.post("/api/reels/{job_id}/{clip_index}/captions/persist", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
 async def persist_captioned_reel(
     job_id: str,
     clip_index: int,

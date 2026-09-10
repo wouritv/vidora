@@ -325,6 +325,31 @@ def test_api_process_route_is_wired_to_process_endpoint(monkeypatch):
     assert not ({"url", "acknowledged"} & query_param_names)
 
 
+def test_captions_persist_route_is_wired_to_persist_captioned_reel(monkeypatch):
+    # Regression test: the same decorator-detachment bug as
+    # test_api_process_route_is_wired_to_process_endpoint above, this time on
+    # /api/reels/{job_id}/{clip_index}/captions/persist -- the
+    # @app.post(...) decorator was left on _validate_captioned_reel_upload
+    # (a small helper immediately above the real handler) instead of on
+    # persist_captioned_reel. FastAPI registered that helper as the route
+    # handler: it validates the upload and returns None, so every real
+    # persist request silently no-op'd -- nothing was written to
+    # metadata.json or Supabase (no style_edit_versions row, no
+    # original_video_url), and any edit was lost on reload. Existing
+    # persist_captioned_reel tests called the function directly and so
+    # never caught this, since they bypass FastAPI's route dispatch.
+    app = _import_app_with_stubs(monkeypatch)
+
+    route = next(
+        r for r in app.app.routes
+        if getattr(r, "path", None) == "/api/reels/{job_id}/{clip_index}/captions/persist"
+    )
+    assert route.endpoint is app.persist_captioned_reel
+
+    body_param_names = {p.name for p in route.dependant.body_params}
+    assert "file" in body_param_names
+
+
 def test_build_social_post_url_per_platform(monkeypatch):
     # Regression test: the dashboard used to build the "view post" link as
     # https://<platform-host>/<external_id>, but external_id is whatever
