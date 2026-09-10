@@ -5534,6 +5534,8 @@ async def generate_effects_config(
     x_gemini_key: Annotated[Optional[str], Header(alias="X-Gemini-Key")] = None,
 ):
     """Generate structured EffectsConfig JSON for Remotion rendering via Gemini AI."""
+    await _require_job_ownership(req.job_id, user_id)
+
     final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
 
     if not final_api_key:
@@ -6468,16 +6470,14 @@ def get_languages():
     }
 
 
-async def _resolve_translation_cache_and_owner(request: Request, job_id: str, clip_index: int, translation_cache: Dict[str, Any]):
-    request_user_id = _get_authenticated_user_id_optional(request) or ""
-    owner_user_id = request_user_id or await _resolve_job_owner_user_id(job_id, clip_index)
+async def _resolve_translation_cache_and_owner(user_id: str, job_id: str, clip_index: int, translation_cache: Dict[str, Any]):
     transcription_row = None
-    if owner_user_id and is_supabase_configured():
-        transcription_row = await _load_cached_transcription(owner_user_id, job_id, clip_index)
+    if is_supabase_configured():
+        transcription_row = await _load_cached_transcription(user_id, job_id, clip_index)
         db_cache = (transcription_row or {}).get("translations_cache") or {}
         if isinstance(db_cache, dict) and db_cache:
             translation_cache = db_cache
-    return owner_user_id, transcription_row, translation_cache
+    return user_id, transcription_row, translation_cache
 
 
 async def _persist_translation_usage_billing(
@@ -6515,8 +6515,9 @@ async def _persist_translation_usage_billing(
 
 
 @app.post("/api/translate/captions", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
-async def translate_captions(req: TranslateRequest, request: Request):
+async def translate_captions(req: TranslateRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Translate reel transcript into Remotion-friendly timed word captions."""
+    await _require_job_ownership(req.job_id, user_id)
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
     if not metadata_path or not data:
         raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
@@ -6541,7 +6542,7 @@ async def translate_captions(req: TranslateRequest, request: Request):
         raise HTTPException(status_code=400, detail="No transcript segments found for this clip range")
 
     owner_user_id, transcription_row, translation_cache = await _resolve_translation_cache_and_owner(
-        request, req.job_id, normalized_clip_index, translation_cache,
+        user_id, req.job_id, normalized_clip_index, translation_cache,
     )
 
     loop = asyncio.get_event_loop()
@@ -6646,11 +6647,12 @@ def _update_clip_after_translation(job: Optional[Dict[str, Any]], job_id: str, c
 
 
 @app.post("/api/translate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}, 500: {"description": "Internal Server Error"}})
-async def translate_clip(req: TranslateRequest, request: Request):
+async def translate_clip(req: TranslateRequest, user_id: Annotated[str, Depends(get_user_id_header)]):
     """
     Translate subtitles only (OpenAI first, Gemini fallback),
     keep original voice/audio track unchanged.
     """
+    await _require_job_ownership(req.job_id, user_id)
     job = jobs.get(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     metadata_path, data = await _get_or_build_job_metadata(req.job_id, req.clip_index, req.input_url)
@@ -6658,7 +6660,7 @@ async def translate_clip(req: TranslateRequest, request: Request):
         raise HTTPException(status_code=404, detail=_METADATA_NOT_FOUND)
     translation_cache = _get_translation_cache(data)
     owner_user_id, transcription_row, translation_cache = await _resolve_translation_cache_and_owner(
-        request, req.job_id, req.clip_index, translation_cache,
+        user_id, req.job_id, req.clip_index, translation_cache,
     )
 
     clips = data.get("shorts", [])
@@ -7299,7 +7301,7 @@ def thumbnail_publish(
 
     # Generate a unique ID for this publish job so the frontend can poll
     publish_id = str(uuid.uuid4())
-    publish_jobs[publish_id] = {"status": "uploading", "result": None, "error": None}
+    publish_jobs[publish_id] = {"status": "uploading", "result": None, "error": None, "user_id": user_id}
 
     def do_upload():
         """Runs in a thread via BackgroundTasks — does the actual multipart upload."""
@@ -7338,12 +7340,18 @@ def thumbnail_publish(
     return {"publish_id": publish_id, "status": "uploading"}
 
 
-@app.get("/api/thumbnail/publish/status/{publish_id}", responses={404: {"description": "Not Found"}})
-def thumbnail_publish_status(publish_id: str):
+@app.get("/api/thumbnail/publish/status/{publish_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
+def thumbnail_publish_status(publish_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     """Poll the status of a background publish job."""
-    if publish_id not in publish_jobs:
+    job = publish_jobs.get(publish_id)
+    # Security: unlike its sibling /api/render/{render_id}, this endpoint had
+    # no auth at all -- anyone holding a publish_id (a UUID4, but still)
+    # could read another user's publish result. 404 (not 403) on a mismatch
+    # so a caller can't tell a real-but-foreign publish_id apart from one
+    # that was never created.
+    if not job or job.get("user_id") != user_id:
         raise HTTPException(status_code=404, detail="Publish job not found")
-    return publish_jobs[publish_id]
+    return {"status": job.get("status"), "result": job.get("result"), "error": job.get("error")}
 
 
 # --- Reels API (Supabase-backed only) ---

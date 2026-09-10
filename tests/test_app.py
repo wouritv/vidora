@@ -1758,7 +1758,8 @@ def test_generate_effects_config_with_input_filename_success(monkeypatch, tmp_pa
     app = _import_app_with_stubs(monkeypatch)
     monkeypatch.setenv("GEMINI_API_KEY", "env-key")
     monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path / "output"))
-    input_dir = tmp_path / "output" / "j-effects"
+    app.jobs["eeffeeff-eeff-eeff-eeff-eeffeeffeeff"] = {"user_id": "u1"}
+    input_dir = tmp_path / "output" / "eeffeeff-eeff-eeff-eeff-eeffeeffeeff"
     input_dir.mkdir(parents=True, exist_ok=True)
     input_file = input_dir / "clip.mp4"
     input_file.write_bytes(b"video")
@@ -1795,7 +1796,7 @@ def test_generate_effects_config_with_input_filename_success(monkeypatch, tmp_pa
     with TestClient(app.app) as client:
         resp = client.post(
             "/api/effects/generate",
-            json={"job_id": "j-effects", "clip_index": 0, "input_filename": "clip.mp4"},
+            json={"job_id": "eeffeeff-eeff-eeff-eeff-eeffeeffeeff", "clip_index": 0, "input_filename": "clip.mp4"},
             headers=_auth_headers("u1"),
         )
 
@@ -1804,6 +1805,117 @@ def test_generate_effects_config_with_input_filename_success(monkeypatch, tmp_pa
     assert payload["effects"]["layers"][0]["type"] == "zoom"
     assert payload["applied_steps"] == ["normalized"]
     assert_credits.assert_awaited_once()
+
+
+def test_generate_effects_config_rejects_cross_tenant_job_id(monkeypatch):
+    # Regression test: unlike its siblings /api/edit, /api/subtitle and
+    # /api/hook, this endpoint never called _require_job_ownership, so any
+    # authenticated user who knew or guessed another user's job_id could
+    # have their own video analyzed by Gemini and returned to them.
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs["00000000-0000-0000-0000-000000000001"] = {"user_id": "victim"}
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/effects/generate",
+            json={"job_id": "00000000-0000-0000-0000-000000000001", "clip_index": 0, "input_filename": "clip.mp4"},
+            headers=_auth_headers("attacker"),
+        )
+
+    assert resp.status_code == 404
+
+
+def test_translate_captions_requires_authentication(monkeypatch):
+    # Regression test: /api/translate/captions took `request: Request`
+    # instead of a Depends(get_user_id_header) parameter, so it ran without
+    # any authentication at all -- an anonymous caller supplying a real
+    # job_id/clip_index could trigger paid OpenAI/Gemini translation calls
+    # billed to that job's real owner, with no credit check anywhere.
+    app = _import_app_with_stubs(monkeypatch)
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/translate/captions",
+            json={"job_id": "some-job", "clip_index": 0, "target_language": "fr"},
+        )
+
+    assert resp.status_code == 401
+
+
+def test_translate_captions_rejects_cross_tenant_job_id(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs["00000000-0000-0000-0000-000000000001"] = {"user_id": "victim"}
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/translate/captions",
+            json={"job_id": "00000000-0000-0000-0000-000000000001", "clip_index": 0, "target_language": "fr"},
+            headers=_auth_headers("attacker"),
+        )
+
+    assert resp.status_code == 404
+
+
+def test_translate_clip_requires_authentication(monkeypatch):
+    # Same gap as translate_captions above, on the sibling endpoint that
+    # actually burns a translated video to disk and updates job metadata.
+    app = _import_app_with_stubs(monkeypatch)
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/translate",
+            json={"job_id": "some-job", "clip_index": 0, "target_language": "fr"},
+        )
+
+    assert resp.status_code == 401
+
+
+def test_translate_clip_rejects_cross_tenant_job_id(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.jobs["00000000-0000-0000-0000-000000000001"] = {"user_id": "victim"}
+
+    with TestClient(app.app) as client:
+        resp = client.post(
+            "/api/translate",
+            json={"job_id": "00000000-0000-0000-0000-000000000001", "clip_index": 0, "target_language": "fr"},
+            headers=_auth_headers("attacker"),
+        )
+
+    assert resp.status_code == 404
+
+
+def test_thumbnail_publish_status_requires_authentication(monkeypatch):
+    # Regression test: unlike its sibling /api/render/{render_id}, this
+    # endpoint had no auth dependency at all, so anyone holding a publish_id
+    # could poll another user's publish result.
+    app = _import_app_with_stubs(monkeypatch)
+    app.publish_jobs["pub-1"] = {"status": "done", "result": {"video_id": "v1"}, "error": None, "user_id": "owner"}
+
+    with TestClient(app.app) as client:
+        resp = client.get("/api/thumbnail/publish/status/pub-1")
+
+    assert resp.status_code == 401
+
+
+def test_thumbnail_publish_status_rejects_cross_tenant_publish_id(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.publish_jobs["pub-1"] = {"status": "done", "result": {"video_id": "v1"}, "error": None, "user_id": "owner"}
+
+    with TestClient(app.app) as client:
+        resp = client.get("/api/thumbnail/publish/status/pub-1", headers=_auth_headers("attacker"))
+
+    assert resp.status_code == 404
+
+
+def test_thumbnail_publish_status_returns_status_for_owner(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+    app.publish_jobs["pub-1"] = {"status": "done", "result": {"video_id": "v1"}, "error": None, "user_id": "owner"}
+
+    with TestClient(app.app) as client:
+        resp = client.get("/api/thumbnail/publish/status/pub-1", headers=_auth_headers("owner"))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "done", "result": {"video_id": "v1"}, "error": None}
 
 
 def test_probe_video_stream_for_effects_handles_empty_streams_list(monkeypatch, tmp_path):
