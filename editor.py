@@ -19,7 +19,12 @@ from google.genai import types
 class VideoEditor:
     def __init__(self, api_key):
         self.client = genai.Client(api_key=api_key)
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        # Every other Gemini call site in this codebase (thumbnail.py,
+        # main.py, app.py's translation endpoint) reads GEMINI_MODEL with no
+        # fallback -- this file was the only one guessing a hardcoded model
+        # name when the env var is unset, which silently diverges from
+        # whatever model is actually configured/working elsewhere.
+        self.model_name = os.getenv("GEMINI_MODEL")
 
     def upload_video(self, video_path):
         """Uploads video to Gemini File API."""
