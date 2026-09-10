@@ -9,6 +9,7 @@ import {
 } from "remotion";
 import type { SubtitleConfig } from "../lib/types";
 import { groupCaptionsIntoBlocks, getActiveWordIndex } from "../lib/captions";
+import { fitBlocksToLineLimit } from "../lib/lineFit";
 import { getFontStack } from "../lib/fonts";
 import { getEmojiForWord } from "../lib/emojiMatcher";
 
@@ -16,11 +17,33 @@ interface SubtitlesProps {
   config: SubtitleConfig;
 }
 
+// Matches the SubtitleBlock container below: gap and maxWidth used when
+// laying out words.
+const BLOCK_MAX_WIDTH_RATIO = 0.85;
+const BLOCK_WORD_GAP_PX = 14;
+const MAX_SUBTITLE_LINES = 2;
+const WORD_LETTER_SPACING_EM = 0.02;
+const WORD_LINE_HEIGHT = 1.28;
+
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
-  const { fps } = useVideoConfig();
-  const blocks = groupCaptionsIntoBlocks(config.captions, {
+  const { fps, width } = useVideoConfig();
+  const rawBlocks = groupCaptionsIntoBlocks(config.captions, {
     maxChars: Math.max(10, config.style.wordsPerLine * 7),
     maxWords: config.style.wordsPerLine,
+  });
+  // The char-count heuristic above is font-agnostic and can underestimate a
+  // wide font (e.g. Montserrat Bold), letting a block wrap past
+  // MAX_SUBTITLE_LINES with no clipping safety net. Re-split any block that
+  // would actually render past the line limit using real measured glyph
+  // widths for the selected font.
+  const blocks = fitBlocksToLineLimit(rawBlocks, {
+    fontStack: getFontStack(config.style.fontFamily),
+    fontSize: config.style.fontSize,
+    bold: Boolean(config.style.bold),
+    maxWidthPx: width * BLOCK_MAX_WIDTH_RATIO,
+    gapPx: BLOCK_WORD_GAP_PX,
+    maxLines: MAX_SUBTITLE_LINES,
+    letterSpacingEm: WORD_LETTER_SPACING_EM,
   });
 
   return (
@@ -102,6 +125,12 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           justifyContent: "center",
           gap: "10px 14px",
           maxWidth: "85%",
+          // Safety net matching WordSpan's actual line-height, in case a
+          // single word alone is too wide to split further (see lineFit.ts).
+          maxHeight: `${Math.round(
+            style.fontSize * WORD_LINE_HEIGHT * MAX_SUBTITLE_LINES + 14
+          )}px`,
+          overflow: "hidden",
           ...bgStyle,
         }}
       >
