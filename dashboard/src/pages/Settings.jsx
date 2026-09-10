@@ -7,9 +7,17 @@ import { useAuth } from '../state/AuthContext';
 import { useTheme } from '../state/ThemeContext';
 import { useUserCredits } from '../state/UserCreditsContext';
 import ServiceUsage from "../components/ServiceUsage.jsx";
-import { getApiUrl } from '../config';
+import { API_BASE_URL, getApiUrl } from '../config';
 import { getAuthHeaders } from '../lib/apiAuth';
 import { useTranslation } from '../state/LanguageContext';
+
+// The OAuth popup navigates to a backend-served callback page (app.py's
+// _oauth_popup_response) which posts the result back via window.opener --
+// that page's origin is the API origin, not necessarily this frontend's own
+// origin (they can differ, e.g. api.example.com vs app.example.com).
+const OAUTH_MESSAGE_ORIGIN = API_BASE_URL
+  ? new URL(API_BASE_URL, window.location.origin).origin
+  : window.location.origin;
 
 const SOCIAL_NETWORKS = [
   {
@@ -390,6 +398,13 @@ export default function SettingsPage() {
         }, 500);
 
         function handleMessage(event) {
+          // Security: the OAuth callback page that posts this message is
+          // served by our own backend (see app.py's _oauth_popup_response),
+          // not the frontend itself -- without this check, any window this
+          // tab happens to hold a reference to (the popup, after any
+          // redirect within it) could postMessage a spoofed
+          // oauth_success/oauth_page_selection payload into this handler.
+          if (event.origin !== OAUTH_MESSAGE_ORIGIN) return;
           const data = event.data || {};
           if (data.platform !== platform) return;
 
