@@ -7,7 +7,11 @@ on:
     branches: [main]
 
 env:
-  NEXUS_REGISTRY: nexus.wouri.tv:8082
+  # Le connecteur Docker interne de Nexus (port 8082) n'a jamais été
+  # exposé en TLS -- nginx le reverse-proxifie désormais en HTTPS sur un
+  # port dédié (8446) plutôt que sur son propre port, qui reste réservé
+  # au trafic interne loopback.
+  NEXUS_REGISTRY: nexus.wouri.tv:8446
   IMAGE_PREFIX: vireel
 
 # Security: least-privilege default for GITHUB_TOKEN. This pipeline only
@@ -153,11 +157,13 @@ jobs:
         uses: actions/checkout@v4
 
       # Audit finding H11 (résolu) : le registre Nexus sert désormais du
-      # HTTPS valide sur un nom de domaine public (nexus.wouri.tv), donc
-      # docker/buildx n'ont plus besoin de la configuration
+      # HTTPS valide via nginx sur nexus.wouri.tv:8446 (voir NEXUS_REGISTRY
+      # ci-dessus -- le connecteur Docker interne de Nexus, port 8082,
+      # n'a lui jamais été exposé en TLS et reste réservé au loopback),
+      # donc docker/buildx n'ont plus besoin de la configuration
       # insecure-registries qui était ici auparavant -- ce contournement
       # est retiré volontairement ; ne le réintroduire que si le registre
-      # revient un jour derrière une adresse IP nue sans TLS.
+      # revient un jour derrière une adresse sans TLS.
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 

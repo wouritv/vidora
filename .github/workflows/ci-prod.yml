@@ -10,7 +10,11 @@ on:
         type: string
 
 env:
-  NEXUS_REGISTRY: nexus.wouri.tv:8082
+  # Le connecteur Docker interne de Nexus (port 8082) n'a jamais été
+  # exposé en TLS -- nginx le reverse-proxifie désormais en HTTPS sur un
+  # port dédié (8446) plutôt que sur son propre port, qui reste réservé
+  # au trafic interne loopback.
+  NEXUS_REGISTRY: nexus.wouri.tv:8446
   IMAGE_PREFIX: vireel
 
 jobs:
