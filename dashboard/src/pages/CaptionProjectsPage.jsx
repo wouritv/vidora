@@ -8,6 +8,16 @@ import { useTranslation } from "../state/LanguageContext";
 import { statusClass, statusLabel } from "../lib/status";
 import { getAuthHeaders } from "../lib/apiAuth";
 
+// Hard character cap with an ellipsis, on top of the CSS line-clamp: a
+// single long unbroken word (no spaces to wrap on) can still stretch a
+// table-fixed column and force horizontal scroll even with overflow
+// clipping, so the string itself needs to be cut down.
+function truncateText(value, maxLength) {
+    const text = String(value || "").trim();
+    if (!text || text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength).trimEnd()}…`;
+}
+
 function formatDurationHms(value) {
     const total = Number(value || 0);
     if (!Number.isFinite(total) || total <= 0) return "-";
@@ -334,9 +344,18 @@ export default function CaptionProjectsPage() {
                                     onClick={() => handleOpenProject(item)}
                                 >
                                     <td className="px-2 md:px-3 py-2 md:py-3">
-                                        <p className="font-semibold text-slate-900 dark:text-white line-clamp-2 break-words">{item.name || t("generatedMedia.untitled", "Untitled")}</p>
+                                        <p
+                                            className="font-semibold text-slate-900 dark:text-white line-clamp-2 break-words"
+                                            title={item.name || t("generatedMedia.untitled", "Untitled")}
+                                        >
+                                            {truncateText(item.name, 60) || t("generatedMedia.untitled", "Untitled")}
+                                        </p>
                                     </td>
-                                    <td className="hidden md:table-cell px-2 md:px-3 py-2 md:py-3 text-slate-700 dark:text-zinc-300"><p className="line-clamp-3 break-words">{item.description || "-"}</p></td>
+                                    <td className="hidden md:table-cell px-2 md:px-3 py-2 md:py-3 text-slate-700 dark:text-zinc-300">
+                                        <p className="line-clamp-3 break-words" title={item.description || ""}>
+                                            {truncateText(item.description, 140) || "-"}
+                                        </p>
+                                    </td>
                                     <td className="hidden sm:table-cell px-2 md:px-3 py-2 md:py-3 text-slate-700 dark:text-zinc-300">{formatDurationHms(item.source_duration)}</td>
                                     <td className="px-2 md:px-3 py-2 md:py-3">
                                         <span className={`inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.status)}`}>{statusLabel(item.status)}</span>
