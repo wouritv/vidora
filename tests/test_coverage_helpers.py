@@ -139,10 +139,42 @@ def test_main_utils_coverage():
 
     sys.modules["yt_dlp"] = types.ModuleType("yt_dlp")
 
+    mediapipe_models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mediapipe_models")
+    os.makedirs(mediapipe_models_dir, exist_ok=True)
+    for filename in ("blaze_face_short_range.tflite", "face_landmarker.task"):
+        open(os.path.join(mediapipe_models_dir, filename), "wb").close()
+    os.environ["MEDIAPIPE_MODELS_DIR"] = mediapipe_models_dir
+
+    class _FakeMpImage:
+        def __init__(self, image_format=None, data=None):
+            self.data = data
+
+    class _FakeFaceDetector:
+        def detect(self, _image):
+            return types.SimpleNamespace(detections=[])
+
+    class _FakeFaceLandmarker:
+        def detect_for_video(self, _image, _timestamp_ms):
+            return types.SimpleNamespace(face_landmarks=[])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     mp_mod = types.ModuleType("mediapipe")
-    mp_mod.solutions = types.SimpleNamespace(
-        face_detection=types.SimpleNamespace(FaceDetection=lambda *args, **kwargs: object()),
-        face_mesh=object(),
+    mp_mod.Image = _FakeMpImage
+    mp_mod.ImageFormat = types.SimpleNamespace(SRGB=1)
+    mp_mod.tasks = types.SimpleNamespace(
+        BaseOptions=lambda **kwargs: types.SimpleNamespace(**kwargs),
+        vision=types.SimpleNamespace(
+            FaceDetector=types.SimpleNamespace(create_from_options=lambda _options: _FakeFaceDetector()),
+            FaceDetectorOptions=lambda **kwargs: types.SimpleNamespace(**kwargs),
+            FaceLandmarker=types.SimpleNamespace(create_from_options=lambda _options: _FakeFaceLandmarker()),
+            FaceLandmarkerOptions=lambda **kwargs: types.SimpleNamespace(**kwargs),
+            RunningMode=types.SimpleNamespace(IMAGE="IMAGE", VIDEO="VIDEO"),
+        ),
     )
     sys.modules["mediapipe"] = mp_mod
 

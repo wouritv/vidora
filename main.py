@@ -87,11 +87,55 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
 model = YOLO('yolov8n.pt')
 
-# --- MediaPipe Setup ---
-# Use standard Face Detection (BlazeFace) for speed
-mp_face_detection = mp.solutions.face_detection
-mp_face_mesh = mp.solutions.face_mesh
-face_detection = mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+# --- MediaPipe Setup (Tasks API) ---
+# mediapipe 0.10.30+ removed the legacy mp.solutions API this file used to
+# use (mp.solutions.face_detection / mp.solutions.face_mesh) -- ported to
+# the newer mediapipe.tasks.python.vision API, which -- unlike Solutions --
+# needs its model files fetched explicitly rather than bundling them.
+_MEDIAPIPE_MODELS_DIR = os.environ.get(
+    "MEDIAPIPE_MODELS_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mediapipe_models"),
+)
+# Official Google-hosted model URLs (storage.googleapis.com/mediapipe-models),
+# the same ones the mediapipe Tasks API documentation points to -- fixed,
+# hardcoded targets, not derived from any user/request input.
+_FACE_DETECTOR_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+_FACE_LANDMARKER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+
+
+def _ensure_mediapipe_model(url: str, filename: str) -> str:
+    """Downloads a MediaPipe Tasks model file to a local cache dir on first
+    use, mirroring the YOLO('yolov8n.pt') auto-download pattern just above.
+    Returns the local file path."""
+    os.makedirs(_MEDIAPIPE_MODELS_DIR, exist_ok=True)
+    local_path = os.path.join(_MEDIAPIPE_MODELS_DIR, filename)
+    if not os.path.exists(local_path):
+        import urllib.request
+        print(f"⬇️  Downloading MediaPipe model {filename}...")
+        urllib.request.urlretrieve(url, local_path)
+    return local_path
+
+
+_mp_vision = mp.tasks.vision
+_mp_base_options = mp.tasks.BaseOptions
+
+# Lightweight BlazeFace detector (short-range model = old model_selection=0)
+# for per-frame face candidate boxes used to drive smart-crop scoring.
+face_detection = _mp_vision.FaceDetector.create_from_options(
+    _mp_vision.FaceDetectorOptions(
+        base_options=_mp_base_options(
+            model_asset_path=_ensure_mediapipe_model(_FACE_DETECTOR_MODEL_URL, "blaze_face_short_range.tflite")
+        ),
+        running_mode=_mp_vision.RunningMode.IMAGE,
+        min_detection_confidence=0.5,
+    )
+)
+
+# Resolved once here (download-if-missing is a no-op after the first call);
+# _track_mouth_signals below still builds a fresh FaceLandmarker per call,
+# same as the old `with mp_face_mesh.FaceMesh(...)` pattern, since
+# num_faces varies per call with the number of tracked faces in that scene.
+_FACE_LANDMARKER_MODEL_PATH = _ensure_mediapipe_model(_FACE_LANDMARKER_MODEL_URL, "face_landmarker.task")
 
 # Scene analysis thresholds
 MIN_FACE_AREA_RATIO = 0.01
@@ -292,7 +336,8 @@ def detect_face_candidates(frame):
     """
     height, width, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_detection.process(rgb_frame)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    results = face_detection.detect(mp_image)
 
     candidates = []
 
@@ -300,11 +345,10 @@ def detect_face_candidates(frame):
         return candidates
 
     for detection in results.detections:
-        bbox = detection.location_data.relative_bounding_box
-        x = int(bbox.xmin * width)
-        y = int(bbox.ymin * height)
-        w = int(bbox.width * width)
-        h = int(bbox.height * height)
+        # Tasks API's BoundingBox is already in absolute pixels (unlike
+        # Solutions' relative_bounding_box, which needed *width/*height).
+        bbox = detection.bounding_box
+        x, y, w, h = bbox.origin_x, bbox.origin_y, bbox.width, bbox.height
 
         # Filter invalid / tiny detections (noise, logos, artifacts).
         if w <= 0 or h <= 0:
@@ -643,11 +687,13 @@ def _track_mouth_signals(cap, start_f, end_f, tracked_boxes_template):
     """
     signals = {i: [] for i in range(len(tracked_boxes_template))}
 
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=False,
-        max_num_faces=max(1, len(tracked_boxes_template)),
-        refine_landmarks=True,
-        min_detection_confidence=0.5,
+    with _mp_vision.FaceLandmarker.create_from_options(
+        _mp_vision.FaceLandmarkerOptions(
+            base_options=_mp_base_options(model_asset_path=_FACE_LANDMARKER_MODEL_PATH),
+            running_mode=_mp_vision.RunningMode.VIDEO,
+            num_faces=max(1, len(tracked_boxes_template)),
+            min_face_detection_confidence=0.5,
+        )
     ) as face_mesh:
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
@@ -660,16 +706,20 @@ def _track_mouth_signals(cap, start_f, end_f, tracked_boxes_template):
 
             h, w, _ = frame.shape
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(rgb)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            # VIDEO mode needs strictly increasing timestamps within this
+            # detector instance's lifetime -- absolute video time doesn't
+            # matter here (nothing else reads it), just monotonicity.
+            results = face_mesh.detect_for_video(mp_image, current_f - start_f)
 
             frame_values = {i: np.nan for i in signals}
 
-            if results.multi_face_landmarks:
-                for face_landmarks in results.multi_face_landmarks:
-                    box = _landmarks_to_box(face_landmarks.landmark, w, h)
+            if results.face_landmarks:
+                for face_landmarks in results.face_landmarks:
+                    box = _landmarks_to_box(face_landmarks, w, h)
                     best_id = _best_matching_face_id(box, tracked_boxes_template)
                     if best_id is not None:
-                        frame_values[best_id] = _mouth_aspect_ratio(face_landmarks.landmark, w, h)
+                        frame_values[best_id] = _mouth_aspect_ratio(face_landmarks, w, h)
 
             for i in signals:
                 signals[i].append(frame_values[i])

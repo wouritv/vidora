@@ -38,6 +38,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender1 \
     curl \
+    # mediapipe's Tasks API (mediapipe.tasks.python.vision, used by
+    # main.py's face detection/landmarking) loads a native lib that needs
+    # these at runtime even for CPU-only inference -- libgl1 alone isn't
+    # enough; without them, FaceDetector/FaceLandmarker.create_from_options
+    # fails with "OSError: libGLESv2.so.2: cannot open shared object file".
+    libgles2 \
+    libegl1 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -78,6 +85,13 @@ RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 # via the group bit, never write.
 COPY --chown=root:appuser --chmod=750 *.py ./
 COPY --chown=root:appuser --chmod=750 fonts/ ./fonts/
+
+# Pré-télécharger les modèles MediaPipe Tasks (face detector + face
+# landmarker, voir main.py's _ensure_mediapipe_model) pendant le build,
+# comme pour YOLO ci-dessus -- évite toute dépendance réseau au premier
+# vrai `import main` en prod. Doit rester APRÈS le COPY (les URLs des
+# modèles vivent dans main.py, pas dupliquées ici).
+RUN python -c "import main"
 
 EXPOSE 8000
 

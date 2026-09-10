@@ -133,6 +133,37 @@ def _auth_headers(user_id="u1"):
     return {"Authorization": f"Bearer {token}", "X-User-Id": user_id}
 
 
+def test_encrypt_decrypt_token_round_trip(monkeypatch):
+    # Regression/CVE-bump coverage: _encrypt_token/_decrypt_token (the
+    # AES-256-GCM scheme storing social-platform OAuth tokens) had no direct
+    # test at all before this -- added while bumping the `cryptography`
+    # dependency (41.0.7 -> 49.0.0, CVE re-audit) specifically to prove the
+    # real AESGCM/HKDF primitives still round-trip correctly on the new
+    # version, not just that the module imports.
+    app = _import_app_with_stubs(monkeypatch)
+    token = "super-secret-oauth-token-12345"
+
+    encrypted = app._encrypt_token(token)
+    assert encrypted.startswith("v1:")
+    assert token not in encrypted
+
+    assert app._decrypt_token(encrypted) == token
+
+
+def test_decrypt_token_rejects_legacy_and_tampered_values(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app._decrypt_token("") == ""
+    assert app._decrypt_token(None) == ""
+    # Pre-AES-GCM (legacy XOR) tokens have no "v1:" prefix and must be
+    # treated as unusable, not best-effort decoded.
+    assert app._decrypt_token("some-legacy-plaintext-token") == ""
+
+    encrypted = app._encrypt_token("another-token")
+    tampered = encrypted[:-1] + ("A" if encrypted[-1] != "A" else "B")
+    assert app._decrypt_token(tampered) == ""
+
+
 def test_verify_supabase_jwt_accepts_valid_hs256_token(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
     import jwt as pyjwt

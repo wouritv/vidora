@@ -11,14 +11,37 @@ bgutil-ytdlp-pot-provider
 faster-whisper==1.2.1
 google-genai==1.75.0
 python-dotenv==1.2.2
-mediapipe==0.10.14
+# Security: bumped from 0.10.14 (CVE re-audit) -- purely to drop mediapipe's
+# own `protobuf<5` constraint (see the explicit protobuf pin below).
+# mediapipe.python.solutions (mp.solutions.face_detection/face_mesh) was
+# REMOVED starting 0.10.30, not just deprecated -- a first attempt at this
+# bump shipped without checking that and broke `import main` outright
+# (AttributeError: module 'mediapipe' has no attribute 'solutions'). main.py
+# has since been ported to mediapipe.tasks.python.vision
+# (FaceDetector/FaceLandmarker, see _ensure_mediapipe_model and
+# detect_face_candidates/_track_mouth_signals) -- NOT YET VALIDATED against
+# real video content, only smoke-tested (model files load, API calls
+# succeed, correct result shapes) in a sandboxed environment with no real
+# face footage available. Needs a real end-to-end test (smart-crop
+# accuracy, active-speaker mouth tracking) before this reaches production.
+mediapipe==0.10.35
+# Security: mediapipe<0.10.35 transitively forced protobuf<5,>=4.25.3,
+# pinning it to the vulnerable 4.25.9 (CVE re-audit, pip-audit:
+# PYSEC-2026-1805). Newer mediapipe no longer declares a protobuf
+# dependency at all, so pin it here explicitly at a fixed version clear of
+# the known CVEs.
+protobuf==5.29.6
 boto3==1.43.4
 
 fastapi==0.136.1
 uvicorn==0.46.0
-python-multipart==0.0.27
+# Security: bumped from 0.0.27 (CVE re-audit, pip-audit) -- this package
+# parses every multipart/form-data upload this app accepts, i.e. it sits
+# directly in the path of attacker-controlled input on every upload endpoint.
+python-multipart==0.0.31
 httpx==0.28.1
-Pillow==12.2.0
+# Security: bumped from 12.2.0 (CVE re-audit, pip-audit).
+Pillow==12.3.0
 beautifulsoup4==4.14.3
 
 # Security: pinned exact versions instead of open-ended '>=' ranges (audit
@@ -35,7 +58,15 @@ sib-api-v3-sdk==7.6.0
 # -- bumped from 2.10.1 after pinning supabase to an exact version caused a
 # pip dependency-resolution conflict (ResolutionImpossible) at build time.
 PyJWT==2.13.0
-cryptography==41.0.7
+# Security: bumped from 41.0.7 (CVE re-audit, pip-audit) -- this is the
+# library behind the AES-GCM OAuth token encryption (see AESGCM/HKDF usage
+# in app.py), so keeping it current matters more than most dependencies
+# here. 49.0.0 cleared every CVE flagged against 41.0.7, but pip-audit then
+# surfaced PYSEC-2026-3552 against 49.0.0 itself (fixed in 50.0.0), so this
+# is pinned to the latest release instead of the bare minimum. Only
+# cryptography.hazmat.primitives (AESGCM, HKDF, hashes) is used, which has
+# been a stable surface across this whole version range.
+cryptography==50.0.1
 # Async file I/O for upload/download paths inside async def endpoints
 # (audit: SonarQube python:S7493 -- avoid blocking the event loop with
 # synchronous open()/read()/write() in async request handlers).
