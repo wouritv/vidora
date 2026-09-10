@@ -1,3 +1,5 @@
+import { getCachedAccessToken } from "./apiAuth";
+
 /**
  * Extract the filename portion from a video URL.
  * Returns undefined for blob URLs, empty strings, or parse failures.
@@ -23,6 +25,14 @@ export function inputFilenameFromVideoUrl(videoUrl) {
  * - External URLs are proxied through the backend to avoid CORS issues
  *   during browser-side Remotion rendering.
  *
+ * /api/media/proxy requires an authenticated caller (see app.py's
+ * proxy_media -- it's an SSRF-sensitive endpoint). This URL ends up
+ * directly in <video>/<img> src attributes and Remotion inputs, which the
+ * browser fetches natively without ever attaching an Authorization header,
+ * so the caller's JWT is passed as a `token` query parameter instead
+ * (accepted by get_user_id_header_or_query_token) -- without it, every
+ * such request 401s and playback stays black.
+ *
  * @param {string} videoUrl
  * @returns {string}
  */
@@ -38,6 +48,8 @@ export function toBrowserSafeMediaUrl(videoUrl) {
 
         const proxyUrl = new URL('/api/media/proxy', window.location.origin);
         proxyUrl.searchParams.set('url', videoUrl);
+        const accessToken = getCachedAccessToken();
+        if (accessToken) proxyUrl.searchParams.set('token', accessToken);
         return proxyUrl.toString();
     } catch {
         return videoUrl;

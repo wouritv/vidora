@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { inputFilenameFromVideoUrl, toResultCardClip } from '../clips';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { inputFilenameFromVideoUrl, toBrowserSafeMediaUrl, toResultCardClip } from '../clips';
+import { setCachedAccessToken } from '../apiAuth';
 
 describe('inputFilenameFromVideoUrl', () => {
     it('returns undefined for empty string', () => {
@@ -20,6 +21,51 @@ describe('inputFilenameFromVideoUrl', () => {
 
     it('returns undefined when URL has no filename part', () => {
         expect(inputFilenameFromVideoUrl('https://cdn.example.com/')).toBeUndefined();
+    });
+});
+
+describe('toBrowserSafeMediaUrl', () => {
+    beforeEach(() => {
+        setCachedAccessToken(null);
+    });
+
+    it('returns blob URLs unchanged', () => {
+        expect(toBrowserSafeMediaUrl('blob:https://example.com/abc123')).toBe('blob:https://example.com/abc123');
+    });
+
+    it('returns empty string for empty input', () => {
+        expect(toBrowserSafeMediaUrl('')).toBe('');
+    });
+
+    it('returns same-origin URLs unchanged (no proxy, no token needed)', () => {
+        const sameOrigin = `${window.location.origin}/videos/job1/clip.mp4`;
+        expect(toBrowserSafeMediaUrl(sameOrigin)).toBe(sameOrigin);
+    });
+
+    it('proxies external URLs through /api/media/proxy', () => {
+        const result = toBrowserSafeMediaUrl('https://cdn.example.com/clip.mp4');
+        const url = new URL(result);
+        expect(url.pathname).toBe('/api/media/proxy');
+        expect(url.searchParams.get('url')).toBe('https://cdn.example.com/clip.mp4');
+    });
+
+    it('appends the cached access token so <video>/<img> markup can authenticate', () => {
+        // Regression test: /api/media/proxy requires a verified caller (it's
+        // an SSRF-sensitive endpoint proxying an attacker-controlled URL),
+        // but this URL is loaded directly by <video src>/Remotion, which
+        // never attaches an Authorization header -- without a token query
+        // param carrying the same JWT, every such request 401s and preview
+        // playback stays black.
+        setCachedAccessToken('token-abc');
+        const result = toBrowserSafeMediaUrl('https://cdn.example.com/clip.mp4');
+        const url = new URL(result);
+        expect(url.searchParams.get('token')).toBe('token-abc');
+    });
+
+    it('omits the token query param when no token is cached', () => {
+        const result = toBrowserSafeMediaUrl('https://cdn.example.com/clip.mp4');
+        const url = new URL(result);
+        expect(url.searchParams.has('token')).toBe(false);
     });
 });
 

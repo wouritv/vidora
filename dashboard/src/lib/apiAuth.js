@@ -68,3 +68,17 @@ export function getAuthHeaders(userId) {
     if (cachedAccessToken) headers["Authorization"] = `Bearer ${cachedAccessToken}`;
     return headers;
 }
+
+/**
+ * The current Supabase access token, for the handful of endpoints the
+ * browser loads directly from markup (<video src>, <img src>) rather than
+ * via fetch() -- those requests never carry an Authorization header, so
+ * such endpoints accept the same JWT as a `token` query parameter instead
+ * (see app.py's get_user_id_header_or_query_token).
+ *
+ * @returns {string|null}
+ */
+export function getCachedAccessToken() {
+    ensureTokenCacheInitialized();
+    return cachedAccessToken;
+}

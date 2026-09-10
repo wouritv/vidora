@@ -599,6 +599,28 @@ def get_user_id_header(
     return _verify_supabase_jwt(token)
 
 
+def get_user_id_header_or_query_token(
+    request: Request,
+    authorization: Annotated[Optional[str], Header()] = None,
+    token: Annotated[Optional[str], Query()] = None,
+) -> str:
+    """Same verified-JWT identity check as get_user_id_header, but also
+    accepts the token via a `token` query parameter.
+
+    Reserved for endpoints the browser loads directly from markup (<video
+    src>, <img src>) rather than via fetch() -- those requests never carry
+    custom headers, including Authorization, so the header-only check would
+    always reject real playback. Every caller is still required to present
+    a genuinely valid Supabase JWT either way; only the transport differs.
+    """
+    scheme, _, header_token = (authorization or "").partition(" ")
+    if scheme.lower() == "bearer" and header_token:
+        return _verify_supabase_jwt(header_token)
+    if token:
+        return _verify_supabase_jwt(token)
+    raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
+
+
 def _get_authenticated_user_id_optional(request: Request) -> Optional[str]:
     """Best-effort verified caller identity for endpoints that use it only as a
     lookup hint (never for access control). Returns None rather than raising
@@ -2187,7 +2209,7 @@ async def _close_proxy_stream(upstream, client):
 
 
 @app.get("/api/media/proxy", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}})
-async def proxy_media(request: Request, url: str, user_id: Annotated[str, Depends(get_user_id_header)]):
+async def proxy_media(request: Request, url: str, user_id: Annotated[str, Depends(get_user_id_header_or_query_token)]):
     """Proxy remote media through the backend so browser-side Remotion can fetch it same-origin.
 
     Security: this endpoint performs a server-side HTTP request to a URL the
@@ -2195,6 +2217,12 @@ async def proxy_media(request: Request, url: str, user_id: Annotated[str, Depend
     reachable without authentication, and every request (including redirect
     hops) must go through _validate_download_url so it cannot be used to
     reach cloud metadata endpoints or internal/loopback services.
+
+    Auth is verified via get_user_id_header_or_query_token rather than the
+    usual header-only dependency: this URL is loaded directly by <video>/
+    <img> markup (preview players, Remotion), which never attaches an
+    Authorization header, so the frontend instead appends the caller's JWT
+    as a `token` query parameter (see toBrowserSafeMediaUrl).
     """
     import httpx
 
@@ -6826,7 +6854,11 @@ async def _publish_social_post_now(
 
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-        await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
+        post_url = _build_social_post_url(platform_name, platform_result)
+        await _insert_publish_job(
+            user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority,
+            payload={"post_url": post_url} if post_url else None,
+        )
         return {
             "success": True,
             "result": platform_result,
@@ -7285,8 +7317,12 @@ def thumbnail_publish(
             publish_jobs[publish_id]["status"] = "done"
             publish_jobs[publish_id]["result"] = result
             external_id = str(result.get("video_id") or result.get("id") or "n/a")
+            post_url = _build_social_post_url("youtube", result)
             publish_priority = asyncio.run(_resolve_user_job_priority(user_id))
-            asyncio.run(_insert_publish_job(user_id=user_id, platform="youtube", external_id=external_id, status="done", priority=publish_priority))
+            asyncio.run(_insert_publish_job(
+                user_id=user_id, platform="youtube", external_id=external_id, status="done", priority=publish_priority,
+                payload={"post_url": post_url} if post_url else None,
+            ))
 
         except Exception as e:
             err = str(e)
@@ -7971,7 +8007,8 @@ async def _publish_caption_now(user_id: str, platform_name: str, publish_priorit
         )
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-        await _update_publish_job_status(publish_job_id, "done", external_id=external_id)
+        post_url = _build_social_post_url(platform_name, platform_result)
+        await _update_publish_job_status(publish_job_id, "done", external_id=external_id, post_url=post_url)
         return {
             "success": True,
             "result": platform_result,
@@ -8345,7 +8382,11 @@ async def _publish_reel_now(user_id: str, platform_name: str, publish_priority: 
         )
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-        await _insert_publish_job(user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority)
+        post_url = _build_social_post_url(platform_name, platform_result)
+        await _insert_publish_job(
+            user_id=user_id, platform=platform_name, external_id=external_id, status="done", priority=publish_priority,
+            payload={"post_url": post_url} if post_url else None,
+        )
         return {
             "success": True,
             "result": platform_result,
@@ -8785,7 +8826,8 @@ async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
 
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
-        await _update_publish_job_status(job_id, "done", external_id=external_id, error_message=None)
+        post_url = _build_social_post_url(platform, platform_result)
+        await _update_publish_job_status(job_id, "done", external_id=external_id, post_url=post_url, error_message=None)
 
         await _debit_scheduled_publish_credits(user_id, task_payload, job_id)
     except Exception as exc:
@@ -8824,6 +8866,7 @@ async def _update_publish_job_status(
     status: str,
     error_message: Optional[str] = None,
     external_id: Optional[str] = None,
+    post_url: Optional[str] = None,
 ) -> None:
     if not publish_job_id:
         return
@@ -8835,6 +8878,8 @@ async def _update_publish_job_status(
         payload["error_message"] = error_message
     if external_id is not None:
         payload["external_id"] = external_id
+    if post_url:
+        payload["payload"] = {"post_url": post_url}
     if status in {"done", "failed"}:
         payload["completed_at"] = _utcnow_iso()
     await client.table(SUPABASE_SOCIAL_PUBLISH_JOBS_TABLE).update(payload).eq("id", publish_job_id).execute()
@@ -9978,7 +10023,26 @@ async def _publish_instagram_container(
     async with httpx.AsyncClient(timeout=30.0) as client:
         publish_response = await client.post(f"{base_url}/media_publish", data={"creation_id": creation_id, "access_token": token})
     await _raise_for_status_or_502(publish_response, "Instagram")
-    return publish_response.json()
+    result = publish_response.json()
+
+    # The publish response only carries the internal media id -- the public
+    # permalink (instagram.com/p/<shortcode> or /reel/<shortcode>) requires
+    # a separate lookup. Best-effort: a failure here must not fail the
+    # publish itself, since the post already went live.
+    media_id = result.get("id")
+    if media_id:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                permalink_response = await client.get(
+                    f"https://graph.instagram.com/v19.0/{media_id}",
+                    params={"fields": "permalink", "access_token": token},
+                )
+            if permalink_response.status_code == 200:
+                result["permalink"] = permalink_response.json().get("permalink")
+        except Exception as e:
+            logger.warning("Instagram permalink lookup failed for media %s: %s", media_id, e)
+
+    return result
 
 
 async def _poll_instagram_container_status(token: str, creation_id: str, max_attempts: int = 20) -> str:
@@ -10267,6 +10331,44 @@ _PLATFORM_HANDLERS = {
     "youtube": _publish_youtube_platform,
     "tiktok": _publish_tiktok_platform,
 }
+
+
+def _build_social_post_url(platform: str, platform_result: Dict[str, Any]) -> Optional[str]:
+    """Best-effort real permalink for a post that was just published.
+
+    Each platform's publish API returns a different kind of identifier (an
+    internal video id, a share URN, a media container id, ...) -- none of
+    which are the same thing as "https://<platform>.com/<id>", despite
+    that being what the frontend used to assume (producing a 404 for the
+    viewer even though the post genuinely published). Returns None when no
+    reliable permalink can be derived, which the frontend treats as "no
+    link available" rather than guessing wrong.
+    """
+    platform = (platform or "").lower()
+    if platform == "youtube":
+        # publish_to_youtube already returns the correct watch URL.
+        url = platform_result.get("url")
+        return str(url) if url else None
+    if platform == "facebook":
+        post_id = platform_result.get("id")
+        if not post_id:
+            return None
+        # A feed/text post id already comes back as "<page_id>_<post_id>",
+        # which facebook.com/<id> resolves directly. A video post id is a
+        # bare numeric video id and needs the /watch path instead.
+        if "_" in str(post_id):
+            return f"https://www.facebook.com/{post_id}"
+        return f"https://www.facebook.com/watch/?v={post_id}"
+    if platform == "instagram":
+        permalink = platform_result.get("permalink")
+        return str(permalink) if permalink else None
+    if platform == "linkedin":
+        post_id = platform_result.get("id")
+        return f"https://www.linkedin.com/feed/update/{post_id}/" if post_id else None
+    # TikTok's publish/status APIs don't reliably return a public video id
+    # or the account's @handle (only its display name), so there's no safe
+    # way to build a real tiktok.com/@handle/video/<id> link here.
+    return None
 
 
 async def publish_post(account: Dict[str, Any], content) -> Dict[str, Any]:

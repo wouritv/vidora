@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getAuthHeaders, setCachedAccessToken } from '../apiAuth';
+import { getAuthHeaders, getCachedAccessToken, setCachedAccessToken } from '../apiAuth';
 
 describe('getAuthHeaders', () => {
     beforeEach(() => {
@@ -38,5 +38,20 @@ describe('getAuthHeaders', () => {
         const headers = getAuthHeaders();
         expect(headers['X-User-Id']).toBeUndefined();
         expect(headers['Authorization']).toBe('Bearer token-abc');
+    });
+});
+
+describe('getCachedAccessToken', () => {
+    beforeEach(() => {
+        setCachedAccessToken(null);
+    });
+
+    it('returns null when no token has been cached', () => {
+        expect(getCachedAccessToken()).toBeNull();
+    });
+
+    it('returns the cached token', () => {
+        setCachedAccessToken('token-abc');
+        expect(getCachedAccessToken()).toBe('token-abc');
     });
 });

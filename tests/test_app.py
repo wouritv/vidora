@@ -270,6 +270,39 @@ def test_get_user_id_header_success_and_missing(monkeypatch):
         app.get_user_id_header(None, authorization=None)
 
 
+def test_get_user_id_header_or_query_token_accepts_header_or_query(monkeypatch):
+    # Regression test: /api/media/proxy is loaded directly by <video src>/
+    # <img src> markup (preview players, Remotion) -- the browser never
+    # attaches an Authorization header to those requests, so requiring one
+    # (get_user_id_header) made every real playback 401 with a black
+    # preview even though the caller was genuinely authenticated. This
+    # dependency accepts the same verified JWT via a `token` query param as
+    # a fallback, used only by that endpoint.
+    app = _import_app_with_stubs(monkeypatch)
+    import jwt as pyjwt
+
+    token = pyjwt.encode(
+        {"sub": "u-1", "aud": "authenticated", "exp": 9999999999},
+        "unit-test-supabase-jwt-secret",
+        algorithm="HS256",
+    )
+
+    assert app.get_user_id_header_or_query_token(None, authorization=f"Bearer {token}") == "u-1"
+    assert app.get_user_id_header_or_query_token(None, authorization=None, token=token) == "u-1"
+    # Authorization header still wins when both are somehow present.
+    assert app.get_user_id_header_or_query_token(None, authorization=f"Bearer {token}", token="garbage") == "u-1"
+    with pytest.raises(app.HTTPException):
+        app.get_user_id_header_or_query_token(None, authorization=None, token=None)
+
+
+def test_proxy_media_route_uses_header_or_query_token(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    route = next(r for r in app.app.routes if getattr(r, "path", None) == "/api/media/proxy")
+    dependency_names = {getattr(d.call, "__name__", None) for d in route.dependant.dependencies}
+    assert "get_user_id_header_or_query_token" in dependency_names
+
+
 def test_api_process_route_is_wired_to_process_endpoint(monkeypatch):
     # Regression test: a refactor once inserted a new helper function
     # (_resolve_process_endpoint_url_and_ack) directly above the real
@@ -290,6 +323,37 @@ def test_api_process_route_is_wired_to_process_endpoint(monkeypatch):
     query_param_names = {p.name for p in route.dependant.query_params}
     assert {"file", "url", "acknowledged"} <= body_param_names
     assert not ({"url", "acknowledged"} & query_param_names)
+
+
+def test_build_social_post_url_per_platform(monkeypatch):
+    # Regression test: the dashboard used to build the "view post" link as
+    # https://<platform-host>/<external_id>, but external_id is whatever
+    # the platform's publish API happened to return as an id -- an internal
+    # video id, a media container id, a share URN -- almost never the same
+    # thing as a real permalink, so the link 404'd even though the post
+    # itself published successfully. This pins the real per-platform
+    # permalink construction (and that platforms/shapes we can't reliably
+    # resolve return None rather than a guessed, likely-broken URL).
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app._build_social_post_url("youtube", {"video_id": "abc", "url": "https://youtube.com/watch?v=abc"}) == "https://youtube.com/watch?v=abc"
+    assert app._build_social_post_url("youtube", {}) is None
+
+    # Facebook video post: bare numeric video id -> /watch/?v=
+    assert app._build_social_post_url("facebook", {"id": "123456789"}) == "https://www.facebook.com/watch/?v=123456789"
+    # Facebook feed/text post: "<page_id>_<post_id>" already resolves directly
+    assert app._build_social_post_url("facebook", {"id": "111_222"}) == "https://www.facebook.com/111_222"
+    assert app._build_social_post_url("facebook", {}) is None
+
+    assert app._build_social_post_url("instagram", {"id": "179...", "permalink": "https://www.instagram.com/reel/Cxyz/"}) == "https://www.instagram.com/reel/Cxyz/"
+    assert app._build_social_post_url("instagram", {"id": "179..."}) is None
+
+    assert app._build_social_post_url("linkedin", {"id": "urn:li:share:123"}) == "https://www.linkedin.com/feed/update/urn:li:share:123/"
+    assert app._build_social_post_url("linkedin", {}) is None
+
+    # TikTok's publish/status APIs don't reliably expose a public video id
+    # or the account's real @handle -- no safe link can be built.
+    assert app._build_social_post_url("tiktok", {"publish_id": "p123", "status": "PUBLISH_COMPLETE"}) is None
 
 
 def test_reconcile_orphaned_jobs_on_startup_force_fails_and_refunds(monkeypatch):

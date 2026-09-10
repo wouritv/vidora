@@ -51,17 +51,6 @@ const PlatformBrandIcon = ({ platform }) => {
     );
 };
 
-const getPlatformHost = (platform) => {
-    const hosts = {
-        facebook: "facebook.com",
-        instagram: "instagram.com",
-        tiktok: "tiktok.com",
-        youtube: "youtube.com",
-        linkedin: "linkedin.com",
-    };
-    return hosts[platform] || "youtube.com";
-};
-
 const getStatusBadge = (status) => {
     const badges = {
         pending: { bg: "bg-amber-100 dark:bg-yellow-500/10", border: "border-amber-300 dark:border-yellow-500/20", text: "text-amber-800 dark:text-yellow-400", label: "En attente" },
@@ -138,13 +127,22 @@ const SocialPublicationCard = ({ pub, badge, t, deletingId, onDeletePublication 
 };
 
 const SocialPublicationActions = ({ pub, deletingId, onDeletePublication, t }) => {
-    const canViewPublication = pub.external_id && ["done", "processing"].includes(pub.status);
+    // The backend stores the real per-platform permalink (fetched/derived
+    // from the publish API response) in payload.post_url once available --
+    // https://<platform-host>/<external_id> is NOT a valid post URL for
+    // most platforms (external_id can be an internal video id, a media
+    // container id, a share URN...), which used to send viewers to a 404
+    // even though the post itself published successfully. No post_url
+    // means no reliable link could be derived, so nothing is shown rather
+    // than guessing wrong.
+    const postUrl = pub.payload?.post_url;
+    const canViewPublication = Boolean(postUrl) && ["done", "processing"].includes(pub.status);
 
     return (
         <div className="flex gap-2 pt-2">
             {canViewPublication && (
                 <a
-                    href={`https://${getPlatformHost(pub.platform)}/${pub.external_id}`}
+                    href={postUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex-1 flex items-center justify-center gap-1 px-2 py-2 rounded-lg border border-sky-300 dark:border-primary/30 bg-sky-100 dark:bg-primary/10 hover:bg-sky-200 dark:hover:bg-primary/20 text-sky-800 dark:text-primary text-xs font-medium transition-colors shadow-sm"
