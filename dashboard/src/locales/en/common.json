@@ -406,6 +406,8 @@
       "large": "Large"
     },
     "duration": "Duration",
+    "startTime": "Appears at",
+    "startTimeBeginning": "Start of clip",
     "tip": "Tip",
     "tipText": "Keep it short and punchy. Using \"POV:\" or specific questions works best for retention.",
     "generating": "Generating...",

@@ -407,6 +407,8 @@
       "large": "Grand"
     },
     "duration": "Duree",
+    "startTime": "Apparition",
+    "startTimeBeginning": "Debut du clip",
     "tip": "Astuce",
     "tipText": "Reste court et percutant. Utiliser \"POV:\" ou une question precise fonctionne bien pour la retention.",
     "generating": "Generation...",

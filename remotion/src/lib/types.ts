@@ -58,6 +58,8 @@ export interface HookConfig {
   size: HookSize;
   entranceAnimation: HookEntrance;
   displayDurationSec: number;
+  /** When the hook appears, in seconds from the start of the clip. Defaults to 0 (start). */
+  startSec?: number;
 }
 
 // --- Effects config ---
@@ -139,6 +141,7 @@ export const hookConfigSchema = z.object({
   size: z.enum(["S", "M", "L"]),
   entranceAnimation: z.enum(["spring", "fade", "slide-up", "none"]),
   displayDurationSec: z.number().positive(),
+  startSec: z.number().min(0).optional(),
 });
 
 export const effectSegmentSchema = z.object({

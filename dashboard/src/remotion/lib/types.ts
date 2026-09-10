@@ -79,6 +79,8 @@ export interface HookConfig {
   size: HookSize;
   entranceAnimation: HookEntrance;
   displayDurationSec: number;
+  /** When the hook appears, in seconds from the start of the clip. Defaults to 0 (start). */
+  startSec?: number;
 }
 
 // --- Effects config ---
