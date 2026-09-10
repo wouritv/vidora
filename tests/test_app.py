@@ -270,6 +270,28 @@ def test_get_user_id_header_success_and_missing(monkeypatch):
         app.get_user_id_header(None, authorization=None)
 
 
+def test_api_process_route_is_wired_to_process_endpoint(monkeypatch):
+    # Regression test: a refactor once inserted a new helper function
+    # (_resolve_process_endpoint_url_and_ack) directly above the real
+    # process_endpoint route, and the Edit that did it accidentally left the
+    # @app.post("/api/process") decorator attached to that new helper
+    # instead of to process_endpoint. FastAPI then registered the helper as
+    # the route handler, whose plain `url`/`acknowledged` params (no Form())
+    # got classified as required query params -- every real call failed
+    # with a 422 "Field required" for query.url/query.acknowledged. This
+    # pins both the correct handler and the correct (body, not query)
+    # parameter classification.
+    app = _import_app_with_stubs(monkeypatch)
+
+    route = next(r for r in app.app.routes if getattr(r, "path", None) == "/api/process")
+    assert route.endpoint is app.process_endpoint
+
+    body_param_names = {p.name for p in route.dependant.body_params}
+    query_param_names = {p.name for p in route.dependant.query_params}
+    assert {"file", "url", "acknowledged"} <= body_param_names
+    assert not ({"url", "acknowledged"} & query_param_names)
+
+
 def test_resolve_scheduled_datetime_handles_aware_and_naive(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
     aware = app._resolve_scheduled_datetime("2024-01-01T10:00:00Z", "Europe/Paris")

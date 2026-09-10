@@ -3945,7 +3945,6 @@ def _apply_auto_edit_media_steps(
 
     return current_path, steps, bad_take_candidates, cleanup_paths
 
-@app.post("/api/process", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
 async def _resolve_process_endpoint_url_and_ack(request: Request, url: Optional[str], acknowledged: Optional[str]):
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
 
@@ -4215,6 +4214,7 @@ async def _enqueue_process_endpoint_job(
     await enqueue_reel_job(job_id, priority=job_priority)
 
 
+@app.post("/api/process", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 403: {"description": "Forbidden"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
 async def process_endpoint(
     request: Request,
     user_id: Annotated[str, Depends(get_user_id_header)],
