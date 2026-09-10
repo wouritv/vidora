@@ -11,18 +11,23 @@ bgutil-ytdlp-pot-provider
 faster-whisper==1.2.1
 google-genai==1.75.0
 python-dotenv==1.2.2
-# Security: bumped from 0.10.14 (CVE re-audit) -- purely to drop mediapipe's
-# own `protobuf<5` constraint (see the explicit protobuf pin below); this
-# stays on the same 0.10.x minor series as before, deliberately avoiding the
-# 1.0.x major jump, since the app only uses the long-stable
-# mp.solutions.face_detection/face_mesh legacy API (main.py), not anything
-# from mediapipe's newer Tasks API that a major bump could have touched.
-mediapipe==0.10.35
-# Security: mediapipe<0.10.35 transitively forced protobuf<5,>=4.25.3,
-# pinning it to the vulnerable 4.25.9 (CVE re-audit, pip-audit). Newer
-# mediapipe no longer declares a protobuf dependency at all, so pin it here
-# explicitly at a fixed version clear of the known CVEs.
-protobuf==5.29.6
+# NOT bumped, despite forcing a vulnerable transitive protobuf==4.25.9
+# (CVE re-audit, pip-audit: PYSEC-2026-1805, fixed in protobuf>=5.29.6).
+# main.py uses the legacy mp.solutions.face_detection/face_mesh API for
+# smart-crop face tracking (module-level, unguarded). That whole API was
+# REMOVED (not just deprecated) starting mediapipe 0.10.30 -- verified by
+# inspecting wheels across the 0.10.x range: every release that drops the
+# `protobuf<5` constraint has already dropped `mediapipe.python.solutions`
+# too, there is no version with both. A validation pass on a first attempt
+# at this bump (0.10.35) confirmed `import main` crashes immediately with
+# `AttributeError: module 'mediapipe' has no attribute 'solutions'`.
+# Fixing this for real means porting main.py's face detection to
+# mediapipe.tasks.python.vision (FaceDetector/FaceLandmarker, which do
+# exist in 0.10.35+) -- a real code change needing verification against
+# actual video content, not something to do blind in this pass. Left as
+# tracked technical debt; do not bump mediapipe past 0.10.2x without that
+# port done and tested first.
+mediapipe==0.10.14
 boto3==1.43.4
 
 fastapi==0.136.1
