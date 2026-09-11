@@ -27,7 +27,7 @@ services:
     image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-latest}
     container_name: vireel-frontend
     ports:
-      - "4001:5173"
+      - "4001:8080"
     restart: unless-stopped
     depends_on:
       - backend
