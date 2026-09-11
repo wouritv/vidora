@@ -193,7 +193,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             value={hook}
                             onChange={(e) => setHook(e.target.value)}
                             rows={2}
-                            className="w-full resize-y rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-3 text-sm text-white focus:outline-none focus:border-primary/60"
+                            className="input-field w-full resize-y"
                         />
                     </div>
 
@@ -205,7 +205,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             value={introduction}
                             onChange={(e) => setIntroduction(e.target.value)}
                             rows={3}
-                            className="w-full resize-y rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-3 text-sm text-white focus:outline-none focus:border-primary/60"
+                            className="input-field w-full resize-y"
                         />
                     </div>
 
@@ -217,7 +217,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             value={story}
                             onChange={(e) => setStory(e.target.value)}
                             rows={12}
-                            className="w-full resize-y rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-3 text-sm text-white focus:outline-none focus:border-primary/60"
+                            className="input-field w-full resize-y"
                         />
                     </div>
 
@@ -232,7 +232,7 @@ export default function AnonymousStoryProjectDetailPage() {
                                     key={index}
                                     value={question}
                                     onChange={(e) => updateQuestion(index, e.target.value)}
-                                    className="w-full rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-3 text-sm text-white focus:outline-none focus:border-primary/60"
+                                    className="input-field w-full"
                                 />
                             ))}
                         </div>
@@ -244,7 +244,7 @@ export default function AnonymousStoryProjectDetailPage() {
                         <label className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-zinc-500">
                             {t("anonymousStories.fullPreviewLabel", "Texte complet")}
                         </label>
-                        <div className="max-h-80 overflow-y-auto whitespace-pre-wrap rounded-xl border border-slate-300 dark:border-white/10 bg-black/30 p-3 text-sm text-zinc-200">
+                        <div className="max-h-80 overflow-y-auto whitespace-pre-wrap rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-black/30 p-3 text-sm text-slate-900 dark:text-zinc-200">
                             {fullText}
                         </div>
 
@@ -263,7 +263,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             type="button"
                             onClick={handleSave}
                             disabled={saving}
-                            className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-zinc-200 transition hover:bg-white/10 disabled:opacity-50"
+                            className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm transition hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-50"
                         >
                             {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
                             {savedFlash ? t("anonymousStories.savedConfirmation", "Modifications enregistrees") : t("anonymousStories.saveButton", "Enregistrer")}
@@ -272,7 +272,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             type="button"
                             onClick={handleRegenerate}
                             disabled={regenerating}
-                            className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-zinc-200 transition hover:bg-white/10 disabled:opacity-50"
+                            className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm transition hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-50"
                         >
                             {regenerating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
                             {t("anonymousStories.regenerateButton", "Regenerer")}
