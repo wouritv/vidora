@@ -8065,7 +8065,7 @@ async def create_anonymous_story(
     os.makedirs(output_dir, exist_ok=True)
 
     if file:
-        _validate_video_extension(file.filename if file else "", context_label="temoignage")
+        _validate_video_extension(file.filename if file else "", context_label="histoire anonyme")
         source_name = os.path.basename(str(file.filename or "story_source.mp4"))
         input_path = os.path.join(output_dir, f"story_input_{int(time.time())}_{source_name}")
         limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
@@ -8192,12 +8192,12 @@ async def _run_anonymous_story_job(
     except anonymous_stories.StoryValidationError as exc:
         await reel_job_manager.fail_job(job_id, str(exc), error_code=exc.code)
         await _mark_anonymous_story_job_failed(job_id, user_id, story_id, project_id, exc.code, str(exc))
-        await reel_job_manager.refund_reservation(job_id, user_id, story_required_credits, operation_type="temoignage")
+        await reel_job_manager.refund_reservation(job_id, user_id, story_required_credits, operation_type=anonymous_stories.CREDIT_OPERATION_TYPE)
     except Exception as exc:  # noqa: BLE001 -- any unexpected failure must still fail the job and refund the user
         logger.exception(f"Anonymous story job {job_id} failed")
         await reel_job_manager.fail_job(job_id, "Technical failure while generating the story", error_code="GENERATION_INVALID")
         await _mark_anonymous_story_job_failed(job_id, user_id, story_id, project_id, "GENERATION_INVALID", str(exc))
-        await reel_job_manager.refund_reservation(job_id, user_id, story_required_credits, operation_type="temoignage")
+        await reel_job_manager.refund_reservation(job_id, user_id, story_required_credits, operation_type=anonymous_stories.CREDIT_OPERATION_TYPE)
     finally:
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir, ignore_errors=True)
@@ -8309,7 +8309,7 @@ async def _finalize_anonymous_story_job(
                 job_id=job_id,
                 user_id=user_id,
                 credits=final_credits,
-                operation_type="temoignage",
+                operation_type=anonymous_stories.CREDIT_OPERATION_TYPE,
                 reserved_credits=story_required_credits,
             )
             if not debit_ok:
@@ -8452,7 +8452,7 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
     try:
         story_content = await anonymous_stories.generate_story_from_transcript(transcript_text)
     except anonymous_stories.StoryValidationError as exc:
-        await reel_job_manager.refund_reservation(job_id, user_id, regen_credits, operation_type="temoignage_regen")
+        await reel_job_manager.refund_reservation(job_id, user_id, regen_credits, operation_type=anonymous_stories.CREDIT_OPERATION_TYPE)
         await supabase_update_anonymous_story(story_id, user_id, {
             "status": anonymous_stories.AnonymousStoryStatus.FAILED,
             "error_code": exc.code,
@@ -8483,7 +8483,7 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
 
     await reel_job_manager.debit_credits_for_job(
         job_id=job_id, user_id=user_id, credits=regen_credits,
-        operation_type="temoignage_regen", reserved_credits=regen_credits,
+        operation_type=anonymous_stories.CREDIT_OPERATION_TYPE, reserved_credits=regen_credits,
     )
     return _normalize_anonymous_story_row(updated, include_content=True)
 

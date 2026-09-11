@@ -8,6 +8,22 @@ import anonymous_stories as stories
 
 
 # ---------------------------------------------------------------------------
+# Credit history operation_type
+# ---------------------------------------------------------------------------
+
+def test_credit_operation_type_is_histoire_anonyme():
+    # app.py's credit debits/refunds for this feature (creation and
+    # regeneration alike) all reference this single constant rather than
+    # a literal string, so the credit history always labels them
+    # consistently as "Histoire Anonyme" (see Settings.jsx's
+    # operation_type -> label rendering).
+    assert stories.CREDIT_OPERATION_TYPE == "histoire_anonyme"
+    # A second underscore would render badly in the credit history table
+    # (Settings.jsx only replaces the first "_" before CSS-capitalizing).
+    assert stories.CREDIT_OPERATION_TYPE.count("_") <= 1
+
+
+# ---------------------------------------------------------------------------
 # build_final_text
 # ---------------------------------------------------------------------------
 

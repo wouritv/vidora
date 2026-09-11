@@ -22,6 +22,15 @@ class AnonymousStorySourceType:
     YOUTUBE = "youtube"
 
 
+# Single source of truth for the credit/storage history `operation_type`
+# (see supabase_request.insert_user_data_history), matching the "Histoires
+# anonymes" feature name -- used for every debit/refund tied to this
+# feature (creation and regeneration alike) so the credit history always
+# labels them consistently, the same way "sous_titre"/"generation_reel"
+# do for captions/reels.
+CREDIT_OPERATION_TYPE = "histoire_anonyme"
+
+
 class AnonymousStoryStatus:
     DRAFT = "draft"
     QUEUED = "queued"
