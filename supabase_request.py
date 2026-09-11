@@ -424,6 +424,14 @@ async def soft_delete_project(project_id: str, user_id: str) -> bool:
 		.execute()
 	)
 
+	# Delete all anonymous stories associated with this project
+	await (
+		client.table(SUPABASE_ANONYMOUS_STORIES_TABLE)
+		.delete()
+		.eq("project_id", project_id)
+		.execute()
+	)
+
 	# Delete the project itself
 	response = (
 		await client.table(SUPABASE_PROJECTS_TABLE)
@@ -457,6 +465,20 @@ async def get_captions_by_project(project_id: str) -> List[Dict[str, Any]]:
 	client = await get_client()
 	response = (
 		await client.table(SUPABASE_CAPTIONS_TABLE)
+		.select("*")
+		.eq("project_id", project_id)
+		.execute()
+	)
+	return response.data or []
+
+
+async def get_anonymous_stories_by_project(project_id: str) -> List[Dict[str, Any]]:
+	"""Get all anonymous stories associated with a project."""
+	if not project_id:
+		return []
+	client = await get_client()
+	response = (
+		await client.table(SUPABASE_ANONYMOUS_STORIES_TABLE)
 		.select("*")
 		.eq("project_id", project_id)
 		.execute()

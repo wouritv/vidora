@@ -47,8 +47,8 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
     },
     {
         key: "anonymous-stories",
-        title: "Témoignages",
-        sidebarLabel: "Témoignages",
+        title: "Histoires anonymes",
+        sidebarLabel: "Histoires anonymes",
         icon: Quote,
         activeClassName: "bg-pink-500/10 text-pink-400",
         inactiveClassName: "text-slate-500 dark:text-zinc-400 hover:text-white hover:bg-white/5",

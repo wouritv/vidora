@@ -15,12 +15,13 @@ export default function AnonymousStoryCreatePage() {
     const { t } = useTranslation();
     const navigate = useNavigate();
     const location = useLocation();
-    const jobIdFromUrl = useMemo(() => new URLSearchParams(location.search || "").get("job_id") || "", [location.search]);
+    const projectIdFromUrl = useMemo(() => new URLSearchParams(location.search || "").get("project_id") || "", [location.search]);
 
-    const [jobId, setJobId] = useState(jobIdFromUrl);
-    const [storyId, setStoryId] = useState("");
-    const [status, setStatus] = useState(jobIdFromUrl ? "processing" : "idle");
+    const [projectId, setProjectId] = useState(projectIdFromUrl);
+    const [jobId, setJobId] = useState("");
+    const [status, setStatus] = useState(projectIdFromUrl ? "processing" : "idle");
     const [error, setError] = useState("");
+    const [projectJobLoading, setProjectJobLoading] = useState(false);
     const pollFailureCountRef = useRef(0);
 
     const hasCredits = Number(credits || 0) > 0;
@@ -34,6 +35,54 @@ export default function AnonymousStoryCreatePage() {
             { key: "generation", label: t("anonymousStories.stepGeneration", "Redaction du temoignage"), state: s === "complete" ? "done" : s === "error" ? "error" : "pending" },
         ];
     }, [status, t]);
+
+    // Resume an in-progress (or just-failed) project opened back from the
+    // projects list -- same recovery flow as NewCaptionPage.
+    useEffect(() => {
+        if (!projectIdFromUrl || !user?.id) return undefined;
+        let cancelled = false;
+        const restoreProjectJob = async () => {
+            setProjectJobLoading(true);
+            try {
+                const response = await fetch(getApiUrl(`/api/projects/${projectIdFromUrl}/job`), {
+                    headers: getAuthHeaders(user.id),
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (cancelled) return;
+                if (!response.ok) {
+                    setStatus("error");
+                    setError(payload?.detail || t("anonymousStories.genericError", "Une erreur est survenue."));
+                    return;
+                }
+                const linkedJob = payload?.job;
+                if (linkedJob?.id) {
+                    setJobId(String(linkedJob.id));
+                    setStatus(normalizeStatus(linkedJob.status || payload?.project_status || "processing"));
+                    if (linkedJob.status === "failed") {
+                        setError(errorMessageForCode(t, linkedJob?.error?.code, linkedJob?.error?.message || t("anonymousStories.genericError", "Une erreur est survenue.")));
+                    }
+                    return;
+                }
+                const projectStatus = normalizeStatus(payload?.project_status || "processing");
+                if (projectStatus === "complete") {
+                    navigate(`/dashboard/anonymous-stories/projects/${projectIdFromUrl}`);
+                    return;
+                }
+                setStatus(projectStatus === "error" ? "error" : "processing");
+            } catch {
+                if (!cancelled) {
+                    setStatus("error");
+                    setError(t("anonymousStories.genericError", "Une erreur est survenue."));
+                }
+            } finally {
+                if (!cancelled) setProjectJobLoading(false);
+            }
+        };
+        restoreProjectJob();
+        return () => {
+            cancelled = true;
+        };
+    }, [projectIdFromUrl, user?.id, navigate, t]);
 
     useEffect(() => {
         if (!jobId) return undefined;
@@ -60,10 +109,10 @@ export default function AnonymousStoryCreatePage() {
                 }
 
                 if (data.status === "completed") {
-                    const resultStoryId = data?.result?.story_id || storyId;
+                    const resultProjectId = data?.result?.project_id || projectId;
                     setTimeout(() => {
-                        if (resultStoryId) {
-                            navigate(`/dashboard/anonymous-stories/${resultStoryId}`);
+                        if (resultProjectId) {
+                            navigate(`/dashboard/anonymous-stories/projects/${resultProjectId}`);
                         } else {
                             navigate("/dashboard/anonymous-stories");
                         }
@@ -80,7 +129,7 @@ export default function AnonymousStoryCreatePage() {
             cancelled = true;
             if (timerId) globalThis.clearInterval(timerId);
         };
-    }, [jobId, user?.id, navigate, storyId, t]);
+    }, [jobId, user?.id, navigate, projectId, t]);
 
     const handleProcess = async (data) => {
         if (!user?.id) {
@@ -132,7 +181,7 @@ export default function AnonymousStoryCreatePage() {
 
             const payload = await response.json();
             setJobId(payload.job_id || "");
-            setStoryId(payload.story_id || "");
+            setProjectId(payload.project_id || "");
             setStatus("processing");
         } catch (err) {
             setStatus("error");
@@ -146,7 +195,7 @@ export default function AnonymousStoryCreatePage() {
         <div className="flex-1 overflow-y-auto p-8 space-y-6">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
-                    <h1 className="text-3xl font-black tracking-tight">{t("anonymousStories.createTitle", "Creer un temoignage")}</h1>
+                    <h1 className="text-3xl font-black tracking-tight">{t("anonymousStories.createTitle", "Creer une histoire anonyme")}</h1>
                     <p className="mt-2 text-sm text-slate-500 dark:text-zinc-400">{t("anonymousStories.createSubtitle", "Importe une video ou colle un lien YouTube.")}</p>
                 </div>
                 <button
@@ -155,11 +204,11 @@ export default function AnonymousStoryCreatePage() {
                     className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10"
                 >
                     <ArrowLeft size={14} />
-                    {t("anonymousStories.backToList", "Retour aux temoignages")}
+                    {t("anonymousStories.backToList", "Retour aux histoires anonymes")}
                 </button>
             </div>
 
-            {!jobId ? (
+            {!jobId && !projectIdFromUrl ? (
                 <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
                     {error ? (
                         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
@@ -179,17 +228,17 @@ export default function AnonymousStoryCreatePage() {
                         isCreditBlocked={!hasCredits}
                         disableActions={!hasCredits}
                         creditWarning={!hasCredits ? t("common.insufficientCreditsStart", "Credits insuffisants pour initier cette operation.") : ""}
-                        submitLabel={t("anonymousStories.generateCta", "Generer le temoignage")}
+                        submitLabel={t("anonymousStories.generateCta", "Generer l'histoire")}
                         processingLabel={t("mediaInput.processing", "Processing Video...")}
                     />
                 </section>
             ) : (
                 <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
                     <div className="flex items-center justify-between">
-                        <p className="text-sm text-slate-400">{t("anonymousStories.processingTitle", "Generation de ton temoignage")}</p>
+                        <p className="text-sm text-slate-400">{t("anonymousStories.processingTitle", "Generation de ton histoire")}</p>
                         <div className="inline-flex items-center gap-2 rounded-full border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-1 text-xs text-zinc-300">
                             <Activity size={14} className={isProcessing ? "animate-pulse text-primary" : "text-slate-400"} />
-                            {normalizeStatus(status)}
+                            {projectJobLoading ? t("app.loading", "Chargement...") : normalizeStatus(status)}
                         </div>
                     </div>
 

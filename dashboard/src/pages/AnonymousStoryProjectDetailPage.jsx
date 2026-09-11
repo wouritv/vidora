@@ -7,12 +7,18 @@ import { useAuth } from "../state/AuthContext";
 import { useTranslation } from "../state/LanguageContext";
 import { buildFullText, errorMessageForCode } from "../lib/anonymousStories";
 
-export default function AnonymousStoryEditorPage() {
-    const { storyId } = useParams();
+// Same "project detail" role as ReelProjectDetailPage / CaptionProjectDetailPage:
+// resolves the single anonymous story generated for this project, then
+// renders the same editor (hook/introduction/story/questions, copy, save,
+// regenerate) reels/captions don't need because their content is
+// video-based rather than text-based.
+export default function AnonymousStoryProjectDetailPage() {
+    const { projectId } = useParams();
     const { user } = useAuth();
     const { t } = useTranslation();
     const navigate = useNavigate();
 
+    const [storyId, setStoryId] = useState("");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [saving, setSaving] = useState(false);
@@ -26,12 +32,22 @@ export default function AnonymousStoryEditorPage() {
     const [story, setStory] = useState("");
     const [questions, setQuestions] = useState([""]);
 
+    const applyStory = (data) => {
+        const content = data.edited_content && Object.keys(data.edited_content).length ? data.edited_content : data.generated_content || {};
+        setStoryId(data.id || "");
+        setTitle(data.title || "");
+        setHook(content.hook || "");
+        setIntroduction(content.introduction || "");
+        setStory(content.story || "");
+        setQuestions(content.questions && content.questions.length ? content.questions : [""]);
+    };
+
     const loadStory = async () => {
-        if (!storyId || !user?.id) return;
+        if (!projectId || !user?.id) return;
         setLoading(true);
         setError("");
         try {
-            const response = await fetch(getApiUrl(`/api/anonymous-stories/${storyId}`), {
+            const response = await fetch(getApiUrl(`/api/projects/${projectId}/anonymous-stories`), {
                 headers: getAuthHeaders(user.id),
             });
             const data = await response.json();
@@ -39,12 +55,12 @@ export default function AnonymousStoryEditorPage() {
                 setError(errorMessageForCode(t, data?.detail, data?.detail || t("anonymousStories.genericError", "Une erreur est survenue.")));
                 return;
             }
-            const content = data.edited_content && Object.keys(data.edited_content).length ? data.edited_content : data.generated_content || {};
-            setTitle(data.title || "");
-            setHook(content.hook || "");
-            setIntroduction(content.introduction || "");
-            setStory(content.story || "");
-            setQuestions(content.questions && content.questions.length ? content.questions : [""]);
+            const found = Array.isArray(data.anonymous_stories) ? data.anonymous_stories[0] : null;
+            if (!found) {
+                setError(t("anonymousStories.genericError", "Une erreur est survenue."));
+                return;
+            }
+            applyStory(found);
         } catch (err) {
             setError(err.message || t("anonymousStories.genericError", "Une erreur est survenue."));
         } finally {
@@ -55,7 +71,7 @@ export default function AnonymousStoryEditorPage() {
     useEffect(() => {
         loadStory();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [storyId, user?.id]);
+    }, [projectId, user?.id]);
 
     const fullText = buildFullText(hook, introduction, story, questions);
 
@@ -70,7 +86,7 @@ export default function AnonymousStoryEditorPage() {
     };
 
     const handleSave = async () => {
-        if (!user?.id) return;
+        if (!user?.id || !storyId) return;
         setSaving(true);
         setError("");
         try {
@@ -100,7 +116,7 @@ export default function AnonymousStoryEditorPage() {
     };
 
     const handleRegenerate = async () => {
-        if (!user?.id) return;
+        if (!user?.id || !storyId) return;
         setRegenerating(true);
         setError("");
         try {
@@ -156,7 +172,7 @@ export default function AnonymousStoryEditorPage() {
                     className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm hover:bg-slate-200 dark:hover:bg-white/10"
                 >
                     <ArrowLeft size={14} />
-                    {t("anonymousStories.backToList", "Retour aux temoignages")}
+                    {t("anonymousStories.backToList", "Retour aux histoires anonymes")}
                 </button>
             </div>
 

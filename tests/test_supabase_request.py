@@ -496,6 +496,7 @@ def test_soft_delete_project_deletes_reels_captions_and_project(monkeypatch):
     fake_client = _FakeClient({
         supabase_request.SUPABASE_REELS_TABLE: [_FakeResponse(data=[])],
         supabase_request.SUPABASE_CAPTIONS_TABLE: [_FakeResponse(data=[])],
+        supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE: [_FakeResponse(data=[])],
         # Two responses: the ownership-verification SELECT done before any
         # cascading delete (security hardening, audit finding H5), then the
         # final project DELETE.
@@ -508,6 +509,7 @@ def test_soft_delete_project_deletes_reels_captions_and_project(monkeypatch):
 
     result = asyncio.run(supabase_request.soft_delete_project("p1", "u1"))
     assert result is True
+    assert _event_count(fake_client.events, supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE, "delete") == 1
 
 
 def test_get_reels_by_project_returns_empty_list_when_not_found(monkeypatch):
@@ -535,6 +537,23 @@ def test_get_captions_by_project_returns_empty_list(monkeypatch):
     _patch_get_client(monkeypatch, supabase_request, fake_client)
 
     result = asyncio.run(supabase_request.get_captions_by_project("p-y"))
+    assert result == []
+
+
+def test_get_anonymous_stories_by_project_returns_rows(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE: [_FakeResponse(data=[{"id": "s1"}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    result = asyncio.run(supabase_request.get_anonymous_stories_by_project("p-1"))
+    assert result == [{"id": "s1"}]
+
+
+def test_get_anonymous_stories_by_project_returns_empty_for_empty_id(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    result = asyncio.run(supabase_request.get_anonymous_stories_by_project(""))
     assert result == []
 
 
