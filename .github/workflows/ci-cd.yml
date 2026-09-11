@@ -174,15 +174,29 @@ jobs:
           username: ${{ secrets.NEXUS_USERNAME }}
           password: ${{ secrets.NEXUS_PASSWORD }}
 
-      - name: Build et push de l'image Docker
+      # Versioning strategy: every push to main overwrites the single
+      # `:snapshot` tag for each module (backend/frontend/renderer) --
+      # there is deliberately no per-commit SHA tag anymore, since that was
+      # exactly what filled Nexus with an ever-growing list of images that
+      # were never cleaned up. The commit is instead recorded as an OCI
+      # label on the image itself (inspectable via `docker inspect`, or
+      # `crane config`/`skopeo inspect` against the registry, without
+      # needing a dedicated tag). Promoting a validated snapshot to the
+      # single `:release` tag happens in the separate promote-release.yml
+      # workflow, via `docker buildx imagetools create` (no rebuild, so
+      # `:release` is always byte-for-byte the snapshot that was promoted).
+      - name: Build et push de l'image Docker (snapshot)
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.path }}
           file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
-            ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:latest
+            ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:snapshot
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
           build-args: |
             VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL }}
             VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
@@ -190,7 +204,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------
-  # 3. DEPLOIEMENT SUR LE VPS
+  # 3. DEPLOIEMENT STAGING (toujours le dernier snapshot)
   # ---------------------------------------------------------
   deploy:
     needs: build-and-push
@@ -210,16 +224,20 @@ jobs:
           source: "docker-compose.staging.yml"
           target: "/var/apps/vireel"
 
+      # Staging always runs the snapshot -- it's the environment where a
+      # newly built snapshot gets validated before someone runs
+      # promote-release.yml to turn it into the release that production
+      # deploys (see ci-prod.yml).
       - name: Déployer via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: NEXUS_REGISTRY,IMAGE_PREFIX,GITHUB_SHA
+          envs: NEXUS_REGISTRY,IMAGE_PREFIX
           script: |
             cd /var/apps/vireel
-            export IMAGE_TAG=${{ github.sha }}
+            export IMAGE_TAG=snapshot
             echo "${{ secrets.NEXUS_PASSWORD }}" | docker login ${{ env.NEXUS_REGISTRY }} -u ${{ secrets.NEXUS_USERNAME }} --password-stdin
             docker compose -f docker-compose.staging.yml pull
             docker compose -f docker-compose.staging.yml up -d --remove-orphans

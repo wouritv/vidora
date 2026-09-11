@@ -1,9 +1,14 @@
 ## Fichier de config pour le deploiement de l'application sur le VPS
 ## Pour deploiement dans un environnement donne (Staging ou prod), modifier le port ainsi que le container_name et c'est correct
+##
+## Staging suit toujours le dernier snapshot (image mutable reconstruite a
+## chaque push sur main, voir .github/workflows/ci-cd.yml). IMAGE_TAG=snapshot
+## par defaut ci-dessous ; ne jamais pointer ce fichier vers `release` ou un
+## SHA de commit, c'est le role de docker-compose.prod.yml.
 
 services:
   backend:
-    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-backend:${IMAGE_TAG:-latest}
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-backend:${IMAGE_TAG:-snapshot}
     container_name: vireel-backend
     ports:
       - "4000:8000"
@@ -24,7 +29,7 @@ services:
     cpus: ${BACKEND_CPU_LIMIT:-4}
 
   frontend:
-    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-latest}
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-snapshot}
     container_name: vireel-frontend
     ports:
       - "4001:8080"
@@ -37,7 +42,7 @@ services:
     cpus: ${FRONTEND_CPU_LIMIT:-1}
 
   renderer:
-    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-latest}
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-snapshot}
     container_name: vireel-renderer
     ports:
       # Bound to loopback only: render-service has no per-user auth of its

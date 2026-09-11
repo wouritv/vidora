@@ -1,0 +1,42 @@
+name: Nexus cleanup (purge old image tags)
+
+# Manual, opt-in workflow: purges every tag other than `snapshot` and
+# `release` from Nexus for each module (backend/frontend/renderer). See
+# scripts/nexus-cleanup.sh for details on what it does and why.
+#
+# Requires a repository/organization secret `NEXUS_URL` (Nexus's own
+# web/admin URL, e.g. https://nexus.example.com -- NOT the Docker registry
+# connector used elsewhere) and a `NEXUS_REPOSITORY` variable (the Nexus
+# repository name that hosts the docker images, e.g. docker-hosted). Both
+# need to be set once (Settings > Secrets and variables > Actions) before
+# this workflow can run -- it will fail with a clear message otherwise.
+#
+# Always run with dry_run=true first to see what would be deleted.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (n'efface rien, affiche seulement ce qui serait supprime)"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Purge des tags Nexus autres que snapshot/release
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_REPOSITORY: ${{ vars.NEXUS_REPOSITORY }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+        run: ./scripts/nexus-cleanup.sh
