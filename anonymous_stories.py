@@ -351,23 +351,23 @@ def download_youtube_source(url: str, output_dir: str) -> Dict[str, str]:
     """Download a YouTube video to `output_dir`.
 
     Returns {"path": local_path, "title": video_title}. Synchronous (call
-    via asyncio.to_thread from an async caller) -- mirrors main.py's own
-    download_youtube_video, kept separate for the same reason as
-    transcribe_video above.
+    via asyncio.to_thread from an async caller). Delegates to
+    youtube_download.download_youtube_video -- the same proxy/cookies/
+    PO-Token strategy reels already use -- instead of a bare yt-dlp call:
+    a default yt-dlp invocation resolves the 'web' client, which needs a
+    local JS runtime to pass YouTube's bot challenge ("No supported
+    JavaScript runtime could be found") and fails or drops formats far
+    more often than the mobile-client-first strategy the shared module
+    uses. That module has no heavy dependency of its own (see its
+    docstring), so importing it here doesn't pull in main.py's CV/ML stack.
     """
-    import yt_dlp
+    import youtube_download
 
     os.makedirs(output_dir, exist_ok=True)
-    ydl_opts = {
-        "outtmpl": os.path.join(output_dir, "source.%(ext)s"),
-        "format": "mp4/bestaudio/best",
-        "quiet": True,
-        "noplaylist": True,
-        "noprogress": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return {
-            "path": ydl.prepare_filename(info),
-            "title": str((info or {}).get("title") or "").strip(),
-        }
+    path, sanitized_title = youtube_download.download_youtube_video(url, output_dir)
+    # sanitized_title is filename-safe (spaces -> underscores) since that's
+    # what download_youtube_video's other caller (main.py) needs it for;
+    # turn it back into something readable for the placeholder title shown
+    # before the AI-generated one replaces it (see app.py's
+    # _finalize_anonymous_story_job).
+    return {"path": path, "title": sanitized_title.replace("_", " ").strip()}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowLeft, CheckCircle2, Clock3, Loader2 } from "lucide-react";
+import { Activity, AlertCircle, ArrowLeft, CheckCircle2, Clock3, Loader2 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { getApiUrl } from "../config";
 import { getAuthHeaders } from "../lib/apiAuth";
@@ -7,7 +7,74 @@ import { useAuth } from "../state/AuthContext";
 import { useUserCredits } from "../state/UserCreditsContext";
 import { useTranslation } from "../state/LanguageContext";
 import MediaInput from "../components/MediaInput";
-import { errorMessageForCode, normalizeStoryJobStatus as normalizeStatus } from "../lib/anonymousStories";
+import {
+    buildAnonymousStoryProcessSteps,
+    errorMessageForCode,
+    normalizeStoryJobStatus as normalizeStatus,
+} from "../lib/anonymousStories";
+
+// Same "Suivi du processus" card (eyebrow + title + status pill, progress
+// bar, step cards with icon/label/description) as App.jsx's
+// ProcessingChecklist for reels -- kept as its own small component here
+// since ProcessingChecklist itself is wired to reel-specific data
+// (visibleClips/processingMedia), but the visual presentation matches.
+function StepStatusIcon({ state }) {
+    if (state === "done") return <CheckCircle2 size={16} className="text-green-400" />;
+    if (state === "active") return <Loader2 size={16} className="text-primary animate-spin" />;
+    if (state === "error") return <AlertCircle size={16} className="text-red-400" />;
+    return <Clock3 size={16} className="text-slate-400 dark:text-zinc-500" />;
+}
+
+function ProcessingChecklist({ status, currentStep, isLoadingStatus, t }) {
+    const steps = useMemo(() => buildAnonymousStoryProcessSteps({ status, currentStep, t }), [status, currentStep, t]);
+    const doneCount = steps.filter((step) => step.state === "done").length;
+    const totalCount = steps.length;
+    const progressPercent = Math.round((doneCount / totalCount) * 100);
+
+    return (
+        <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/[0.03] p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-zinc-500">
+                        {t("reels.processFollowup", "Suivi du processus")}
+                    </p>
+                    <h3 className="title-contrast mt-1 text-lg font-bold">{t("anonymousStories.processingTitle", "Generation de ton histoire")}</h3>
+                </div>
+                <div className="flex items-center gap-2 rounded-full border border-slate-300 dark:border-white/10 bg-black/20 px-3 py-1.5 text-xs text-slate-700 dark:text-zinc-300">
+                    <Activity size={14} className={status === "processing" ? "text-primary animate-pulse" : "text-slate-500 dark:text-zinc-400"} />
+                    <span>{isLoadingStatus ? t("app.loading", "Chargement...") : status}</span>
+                </div>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-slate-300 dark:border-white/10 bg-black/20 p-3">
+                <div className="mb-2 flex items-center justify-between text-xs">
+                    <span className="text-slate-500 dark:text-zinc-400">{t("reels.progress", "Progression")}</span>
+                    <span className="font-medium text-zinc-200">{doneCount}/{totalCount} {t("reel.step", "etapes")} ({progressPercent}%)</span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
+                    <div
+                        className="h-full rounded-full bg-primary transition-all duration-500"
+                        style={{ width: `${progressPercent}%` }}
+                    />
+                </div>
+            </div>
+
+            <div className="mt-5 space-y-3">
+                {steps.map((step) => (
+                    <div key={step.key} className="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-white/5 bg-black/20 px-4 py-3">
+                        <div className="mt-0.5 shrink-0">
+                            <StepStatusIcon state={step.state} />
+                        </div>
+                        <div className="min-w-0">
+                            <p className="text-sm font-semibold text-white">{step.label}</p>
+                            <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-zinc-400">{step.description}</p>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </section>
+    );
+}
 
 export default function AnonymousStoryCreatePage() {
     const { user } = useAuth();
@@ -20,21 +87,12 @@ export default function AnonymousStoryCreatePage() {
     const [projectId, setProjectId] = useState(projectIdFromUrl);
     const [jobId, setJobId] = useState("");
     const [status, setStatus] = useState(projectIdFromUrl ? "processing" : "idle");
+    const [currentStep, setCurrentStep] = useState("");
     const [error, setError] = useState("");
     const [projectJobLoading, setProjectJobLoading] = useState(false);
     const pollFailureCountRef = useRef(0);
 
     const hasCredits = Number(credits || 0) > 0;
-
-    const processSteps = useMemo(() => {
-        const s = normalizeStatus(status);
-        return [
-            { key: "upload", label: t("anonymousStories.stepUpload", "Reception de la video"), state: s === "idle" ? "pending" : "done" },
-            { key: "transcription", label: t("anonymousStories.stepTranscription", "Transcription de l'audio"), state: s === "complete" || s === "processing" ? "done" : "pending" },
-            { key: "analysis", label: t("anonymousStories.stepAnalysis", "Verification de l'histoire"), state: s === "complete" ? "done" : s === "processing" ? "active" : s === "error" ? "error" : "pending" },
-            { key: "generation", label: t("anonymousStories.stepGeneration", "Redaction du temoignage"), state: s === "complete" ? "done" : s === "error" ? "error" : "pending" },
-        ];
-    }, [status, t]);
 
     // Resume an in-progress (or just-failed) project opened back from the
     // projects list -- same recovery flow as NewCaptionPage.
@@ -57,6 +115,7 @@ export default function AnonymousStoryCreatePage() {
                 const linkedJob = payload?.job;
                 if (linkedJob?.id) {
                     setJobId(String(linkedJob.id));
+                    setCurrentStep(String(linkedJob.current_step || ""));
                     setStatus(normalizeStatus(linkedJob.status || payload?.project_status || "processing"));
                     if (linkedJob.status === "failed") {
                         setError(errorMessageForCode(t, linkedJob?.error?.code, linkedJob?.error?.message || t("anonymousStories.genericError", "Une erreur est survenue.")));
@@ -103,6 +162,7 @@ export default function AnonymousStoryCreatePage() {
                 if (cancelled) return;
                 pollFailureCountRef.current = 0;
                 setStatus(normalizeStatus(data.status));
+                setCurrentStep(String(data.current_step || ""));
 
                 if (data.status === "failed") {
                     setError(errorMessageForCode(t, data?.error?.code, data?.error?.message || t("anonymousStories.genericError", "Une erreur est survenue.")));
@@ -145,6 +205,7 @@ export default function AnonymousStoryCreatePage() {
 
         setError("");
         setStatus("processing");
+        setCurrentStep("");
         try {
             const headers = getAuthHeaders(user.id);
             let body;
@@ -233,31 +294,18 @@ export default function AnonymousStoryCreatePage() {
                     />
                 </section>
             ) : (
-                <section className="rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 p-4 md:p-5 space-y-4">
-                    <div className="flex items-center justify-between">
-                        <p className="text-sm text-slate-400">{t("anonymousStories.processingTitle", "Generation de ton histoire")}</p>
-                        <div className="inline-flex items-center gap-2 rounded-full border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-1 text-xs text-zinc-300">
-                            <Activity size={14} className={isProcessing ? "animate-pulse text-primary" : "text-slate-400"} />
-                            {projectJobLoading ? t("app.loading", "Chargement...") : normalizeStatus(status)}
-                        </div>
-                    </div>
-
+                <div className="space-y-4">
                     {error ? (
                         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
                     ) : null}
 
-                    <div className="space-y-2">
-                        {processSteps.map((step) => (
-                            <div key={step.key} className="flex items-center gap-2 rounded-lg border border-slate-300 dark:border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-300">
-                                {step.state === "done" ? <CheckCircle2 size={14} className="text-green-400" /> : null}
-                                {step.state === "active" ? <Loader2 size={14} className="animate-spin text-primary" /> : null}
-                                {step.state === "pending" ? <Clock3 size={14} className="text-slate-500" /> : null}
-                                {step.state === "error" ? <Clock3 size={14} className="text-red-400" /> : null}
-                                <span>{step.label}</span>
-                            </div>
-                        ))}
-                    </div>
-                </section>
+                    <ProcessingChecklist
+                        status={normalizeStatus(status)}
+                        currentStep={currentStep}
+                        isLoadingStatus={projectJobLoading}
+                        t={t}
+                    />
+                </div>
             )}
         </div>
     );

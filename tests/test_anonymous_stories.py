@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import types
 from unittest.mock import MagicMock
 
@@ -246,3 +247,27 @@ def test_transcribe_video_raises_when_api_key_missing(monkeypatch):
     monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         asyncio.run(stories.transcribe_video("/tmp/does-not-matter.mp4"))
+
+
+# ---------------------------------------------------------------------------
+# download_youtube_source (delegates to the shared reels mechanism)
+# ---------------------------------------------------------------------------
+
+def test_download_youtube_source_delegates_to_shared_youtube_download(monkeypatch, tmp_path):
+    fake_module = types.ModuleType("youtube_download")
+    calls = []
+
+    def fake_download_youtube_video(url, output_dir):
+        calls.append((url, output_dir))
+        return (f"{output_dir}/My_Video_Title.mp4", "My_Video_Title")
+
+    fake_module.download_youtube_video = fake_download_youtube_video
+    monkeypatch.setitem(sys.modules, "youtube_download", fake_module)
+
+    result = stories.download_youtube_source("https://youtu.be/xyz", str(tmp_path))
+
+    assert calls == [("https://youtu.be/xyz", str(tmp_path))]
+    assert result["path"] == f"{tmp_path}/My_Video_Title.mp4"
+    # sanitize_filename replaces spaces with underscores for the on-disk
+    # name; the placeholder title shown in the UI should read naturally.
+    assert result["title"] == "My Video Title"

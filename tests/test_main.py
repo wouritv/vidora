@@ -88,6 +88,11 @@ def _import_main_with_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "tqdm", tqdm_mod)
 
     monkeypatch.setitem(sys.modules, "yt_dlp", types.ModuleType("yt_dlp"))
+    # See the matching comment in _install_cli_runtime_stubs: youtube_download
+    # caches its own `import yt_dlp` at first import, so it must be dropped
+    # here too or it keeps whatever yt_dlp stub was current the first time
+    # any test imported it.
+    monkeypatch.delitem(sys.modules, "youtube_download", raising=False)
 
     _stub_mediapipe_model_dir(monkeypatch, tempfile.mkdtemp())
 
@@ -507,6 +512,12 @@ def _install_cli_runtime_stubs(monkeypatch, tmp_path, *, shorts_payload=None):
     ydl_mod.YoutubeDL = _YDL
     ydl_mod.version = types.SimpleNamespace(__version__="1.0")
     monkeypatch.setitem(sys.modules, "yt_dlp", ydl_mod)
+    # youtube_download.py does its own top-level `import yt_dlp`, resolved
+    # once at its first import and cached in sys.modules like any module --
+    # it won't pick up a yt_dlp stub installed *after* that first import.
+    # Dropping it here forces main.py's `from youtube_download import ...`
+    # to re-import it fresh against the stub set above.
+    monkeypatch.delitem(sys.modules, "youtube_download", raising=False)
 
     import subprocess as _sp
 
@@ -578,14 +589,6 @@ def test_classify_scene_strategy_thresholds(monkeypatch):
     assert main._classify_scene_strategy(2) == "MULTI_SPEAKER"
     assert main._classify_scene_strategy(4) == "MULTI_SPEAKER"
     assert main._classify_scene_strategy(5) == "GENERAL"
-
-
-def test_looks_like_netscape_cookies(monkeypatch):
-    main = _import_main_with_stubs(monkeypatch)
-    assert main._looks_like_netscape_cookies("") is False
-    assert main._looks_like_netscape_cookies("# Netscape HTTP Cookie File\n") is True
-    assert main._looks_like_netscape_cookies("example.com\tTRUE\t/\tFALSE\t0\tname\tvalue") is True
-    assert main._looks_like_netscape_cookies("invalid line") is False
 
 
 def test_get_video_resolution_success_and_failure(monkeypatch):
@@ -869,20 +872,6 @@ def test_smooth_strategies_with_single_flip(monkeypatch):
     assert result == ["TRACK", "GENERAL"]
 
 
-def test_looks_like_netscape_cookies_recognizes_format(monkeypatch):
-    main = _import_main_with_stubs(monkeypatch)
-
-    # Valid Netscape format with header
-    assert main._looks_like_netscape_cookies("# Netscape HTTP Cookie File\n") is True
-
-    # Valid Netscape format with tab-separated data
-    assert main._looks_like_netscape_cookies("example.com\tTRUE\t/\tFALSE\t0\tname\tvalue") is True
-
-    # Invalid format
-    assert main._looks_like_netscape_cookies("invalid line") is False
-    assert main._looks_like_netscape_cookies("") is False
-
-
 def test_mount_resolution_edge_cases(monkeypatch):
     main = _import_main_with_stubs(monkeypatch)
 
@@ -950,97 +939,6 @@ def test_compute_separator_thickness_bounds_and_even(monkeypatch):
     value = main._compute_separator_thickness(1001)
     assert 2 <= value <= 12
     assert value % 2 == 0
-
-
-def test_resolve_cookiefile_from_env_path_and_inline(monkeypatch, tmp_path):
-    main = _import_main_with_stubs(monkeypatch)
-
-    cookies_file = tmp_path / "cookies.txt"
-    cookies_file.write_text("# Netscape HTTP Cookie File\nexample.com\tTRUE\t/\tFALSE\t0\tname\tvalue\n")
-    monkeypatch.setenv("YOUTUBE_COOKIES", str(cookies_file))
-    assert main._resolve_cookiefile_from_env() == str(cookies_file)
-
-    monkeypatch.setenv("YOUTUBE_COOKIES", "example.com\\tTRUE\\t/\\tFALSE\\t0\\tname\\tvalue")
-    monkeypatch.setattr(main, "_looks_like_netscape_cookies", lambda text: True)
-    monkeypatch.setattr(main.os.path, "getsize", lambda p: 10)
-    written = {}
-
-    class _F:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def write(self, data):
-            written["data"] = data
-
-    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: _F())
-    assert main._resolve_cookiefile_from_env() == "/app/cookies.txt"
-    assert "Netscape HTTP Cookie File" in written["data"]
-
-
-def test_build_ytdlp_opts_proxy_cookie_modes(monkeypatch):
-    main = _import_main_with_stubs(monkeypatch)
-    monkeypatch.setenv("YOUTUBE_PROXY", "http://user:pass@proxy:8080")
-    opts = main._build_ytdlp_opts(True, "/tmp/c.txt", "abc123")
-    assert opts["cookiefile"] == "/tmp/c.txt"
-    assert "__sessid.abc123" in opts["proxy"]
-    assert opts["extractor_args"]["youtube"]["player_client"] == ["mweb", "web"]
-
-    opts2 = main._build_ytdlp_opts(False, None, None)
-    assert opts2["cookiefile"] is None
-    assert opts2["extractor_args"]["youtube"]["player_client"] == ["android", "ios"]
-
-
-def test_make_job_cookies_copy(monkeypatch, tmp_path):
-    main = _import_main_with_stubs(monkeypatch)
-    src = tmp_path / "master.txt"
-    src.write_text("cookie")
-    monkeypatch.setenv("YOUTUBE_COOKIES", str(src))
-    copied = main._make_job_cookies_copy()
-    assert copied is not None
-    assert os.path.exists(copied)
-    os.remove(copied)
-
-
-def test_extract_info_with_fallback(monkeypatch):
-    main = _import_main_with_stubs(monkeypatch)
-
-    calls = {"n": 0}
-
-    class _YDL:
-        def __init__(self, opts):
-            self.opts = opts
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def extract_info(self, url, download=False):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("first fail")
-            return {"title": "ok"}
-
-    monkeypatch.setattr(main.yt_dlp, "YoutubeDL", _YDL, raising=False)
-    info, opts = main._extract_info_with_fallback("https://y.t", None, "sess")
-    assert info["title"] == "ok"
-    assert "extractor_args" in opts
-
-
-def test_locate_downloaded_file_prefers_exact_then_fallback(monkeypatch, tmp_path):
-    main = _import_main_with_stubs(monkeypatch)
-    out_dir = str(tmp_path)
-    exact = tmp_path / "video.mp4"
-    exact.write_text("x")
-    assert main._locate_downloaded_file(out_dir, "video").endswith("video.mp4")
-
-    exact.unlink()
-    (tmp_path / "video.abc.mp4").write_text("x")
-    assert main._locate_downloaded_file(out_dir, "video").endswith("video.abc.mp4")
 
 
 def test_cleanup_existing_outputs_handles_missing_files(monkeypatch):
@@ -1231,39 +1129,6 @@ def test_process_video_to_vertical_success_and_fail(monkeypatch):
     assert main.process_video_to_vertical("in.mp4", "out.mp4") is False
 
 
-def test_download_youtube_video_success_and_cleanup(monkeypatch, tmp_path):
-    main = _import_main_with_stubs(monkeypatch)
-    cookie_file = tmp_path / "job_cookie.txt"
-    cookie_file.write_text("x")
-
-    monkeypatch.setattr(main, "_make_job_cookies_copy", lambda: str(cookie_file))
-    monkeypatch.setattr(main, "_extract_info_with_fallback", lambda *args, **kwargs: ({"title": "My Video"}, {}))
-    monkeypatch.setattr(main, "_run_download", lambda *args, **kwargs: "/tmp/out.mp4")
-    monkeypatch.setattr(main, "sanitize_filename", lambda name: "My_Video")
-    monkeypatch.setattr(main, "yt_dlp", types.SimpleNamespace(version=types.SimpleNamespace(__version__="1.0")))
-
-    removed = []
-    monkeypatch.setattr(main.os.path, "exists", lambda p: str(p) == str(cookie_file))
-    monkeypatch.setattr(main.os, "remove", lambda p: removed.append(p))
-
-    file_path, title = main.download_youtube_video("https://youtube.com/watch?v=abc", output_dir="/tmp")
-    assert file_path == "/tmp/out.mp4"
-    assert title == "My_Video"
-    assert str(cookie_file) in removed
-
-
-def test_download_youtube_video_prints_failure_and_raises(monkeypatch):
-    main = _import_main_with_stubs(monkeypatch)
-    monkeypatch.setattr(main, "_make_job_cookies_copy", lambda: None)
-    monkeypatch.setattr(main, "_extract_info_with_fallback", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("blocked")))
-    printer = {"called": 0}
-    monkeypatch.setattr(main, "_print_download_failure", lambda exc: printer.__setitem__("called", printer["called"] + 1))
-    monkeypatch.setattr(main, "yt_dlp", types.SimpleNamespace(version=types.SimpleNamespace(__version__="1.0")))
-    with pytest.raises(RuntimeError):
-        main.download_youtube_video("https://youtube.com/watch?v=abc", output_dir="/tmp")
-    assert printer["called"] == 1
-
-
 def test_cameraman_and_speaker_tracker_internal_branches(monkeypatch):
     main = _import_main_with_stubs(monkeypatch)
 
@@ -1421,33 +1286,8 @@ def test_refine_multi_speaker_and_split_render(monkeypatch):
     assert cap.released is True
 
 
-def test_download_and_temp_path_helpers(monkeypatch, tmp_path):
+def test_prepare_temp_paths(monkeypatch):
     main = _import_main_with_stubs(monkeypatch)
-    np = pytest.importorskip("numpy")
-    monkeypatch.setattr(main, "np", np)
-
-    out_dir = tmp_path
-    existing = out_dir / "video.mp4"
-    existing.write_text("x")
-
-    class _YDL:
-        def __init__(self, opts):
-            self.opts = opts
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def download(self, _urls):
-            return None
-
-    monkeypatch.setattr(main.yt_dlp, "YoutubeDL", _YDL, raising=False)
-    path = main._run_download("https://y.t", str(out_dir), "video", {"quiet": True})
-    assert path.endswith("video.mp4")
-    assert main._locate_downloaded_file(str(out_dir), "missing").endswith("missing.mp4")
-
     temp_v, temp_a = main._prepare_temp_paths("/tmp/out.mp4")
     assert temp_v.endswith("_temp_video.mp4")
     assert temp_a.endswith("_temp_audio.aac")
@@ -1659,35 +1499,6 @@ def test_visual_helpers_and_scene_detector_paths(monkeypatch):
     scenes, fps = main.detect_scenes("in.mp4")
     assert len(scenes) == 1
     assert fps == 25.0
-
-
-def test_download_failure_print_cookie_and_fallback_paths(monkeypatch):
-    main = _import_main_with_stubs(monkeypatch)
-    slept = {"n": 0}
-    monkeypatch.setattr(main.time, "sleep", lambda _s: slept.__setitem__("n", slept["n"] + 1))
-    main._print_download_failure(RuntimeError("boom"))
-    assert slept["n"] == 1
-
-    monkeypatch.delenv("YOUTUBE_COOKIES", raising=False)
-    assert main._resolve_cookiefile_from_env() is None
-    monkeypatch.setenv("YOUTUBE_COOKIES", "...")
-    assert main._resolve_cookiefile_from_env() is None
-
-    monkeypatch.setenv("YOUTUBE_COOKIES", "bad-content")
-    monkeypatch.setattr(main.os.path, "isfile", lambda _p: True)
-
-    class _F:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return "not netscape"
-
-    monkeypatch.setattr("builtins.open", lambda *a, **k: _F())
-    assert main._resolve_cookiefile_from_env() is None
 
 
 def test_fallback_and_render_helpers(monkeypatch):
@@ -1905,15 +1716,6 @@ def test_cookie_render_and_process_frame_extra_branches(monkeypatch):
     np = _mini_np()
     monkeypatch.setattr(main, "np", np)
 
-    monkeypatch.setenv("YOUTUBE_COOKIES", "inline-no-tabs")
-    monkeypatch.setattr(main.os.path, "isfile", lambda _p: False)
-    assert main._resolve_cookiefile_from_env() is None
-
-    monkeypatch.setenv("YOUTUBE_COOKIES", "a\\tb\\tc\\td\\te\\tf\\tg")
-    monkeypatch.setattr(main, "_looks_like_netscape_cookies", lambda _t: True)
-    monkeypatch.setattr("builtins.open", lambda *a, **k: (_ for _ in ()).throw(OSError("no write")))
-    assert main._resolve_cookiefile_from_env() is None
-
     monkeypatch.setattr(main.cv2, "INTER_LINEAR", 1, raising=False)
     monkeypatch.setattr(main.cv2, "resize", lambda img, size, interpolation=None: np.zeros((size[1], size[0], 3), dtype=np.uint8), raising=False)
     frame = np.zeros((10, 10, 3), dtype=np.uint8)
@@ -2103,16 +1905,6 @@ def test_remaining_non_cli_branches(monkeypatch):
     _ = main.render_multi_speaker_frame(base_frame, [[0, 0, 5, 5], [5, 0, 5, 5]], 20, 20)
     _ = main.render_multi_speaker_frame(base_frame, [], 20, 20)
 
-    # cookie path read exception and inline-invalid branches.
-    monkeypatch.setenv("YOUTUBE_COOKIES", "cookie_path")
-    monkeypatch.setattr(main.os.path, "isfile", lambda _p: True)
-    monkeypatch.setattr("builtins.open", lambda *a, **k: (_ for _ in ()).throw(OSError("read fail")))
-    assert main._resolve_cookiefile_from_env() is None
-    monkeypatch.setenv("YOUTUBE_COOKIES", "invalid inline")
-    monkeypatch.setattr(main.os.path, "isfile", lambda _p: False)
-    monkeypatch.setattr(main, "_looks_like_netscape_cookies", lambda _t: False)
-    assert main._resolve_cookiefile_from_env() is None
-
     # track/render fallback branches and invalid crop fallback.
     monkeypatch.setattr(main.cv2, "INTER_LINEAR", 1, raising=False)
     monkeypatch.setattr(main.cv2, "resize", lambda img, size, interpolation=None: np.zeros((size[1], size[0], 3), dtype=np.uint8), raising=False)
@@ -2243,8 +2035,6 @@ def test_remaining_precise_branches_for_main(monkeypatch, tmp_path):
     # target_ratio > src_ratio branch
     cropped = main._crop_centered_on_face(frame, [1, 1, 2, 2], 20, 10)
     assert cropped.shape == (10, 20, 3)
-
-    assert main._looks_like_netscape_cookies("# just comment\nsite\tTRUE\t/\tFALSE\t0\ta\tb") is True
 
     cam = main.SmoothedCameraman(8, 16, 8, 8)
     monkeypatch.setattr(cam, "get_crop_box", lambda force_snap=False: (0, 0, 0, 0))

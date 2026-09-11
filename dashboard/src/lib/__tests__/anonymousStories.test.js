@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildFullText, errorMessageForCode, normalizeStoryJobStatus } from '../anonymousStories';
+import { buildAnonymousStoryProcessSteps, buildFullText, errorMessageForCode, normalizeStoryJobStatus } from '../anonymousStories';
+
+const identityT = (key, fallback) => fallback ?? key;
 
 describe('normalizeStoryJobStatus', () => {
     it('maps backend statuses to the frontend canonical form', () => {
@@ -54,5 +56,44 @@ describe('buildFullText', () => {
 
     it('returns an empty string when everything is empty', () => {
         expect(buildFullText('', '', '', [])).toBe('');
+    });
+});
+
+describe('buildAnonymousStoryProcessSteps', () => {
+    const stateOf = (steps, key) => steps.find((s) => s.key === key).state;
+
+    it('marks upload done and transcription active before any stage is reported', () => {
+        const steps = buildAnonymousStoryProcessSteps({ status: 'processing', currentStep: 'queued', t: identityT });
+        expect(stateOf(steps, 'upload')).toBe('done');
+        expect(stateOf(steps, 'transcription')).toBe('active');
+        expect(stateOf(steps, 'generation')).toBe('pending');
+        expect(stateOf(steps, 'finalization')).toBe('pending');
+    });
+
+    it('marks earlier stages done and the current one active', () => {
+        const steps = buildAnonymousStoryProcessSteps({ status: 'processing', currentStep: 'generation', t: identityT });
+        expect(stateOf(steps, 'transcription')).toBe('done');
+        expect(stateOf(steps, 'generation')).toBe('active');
+        expect(stateOf(steps, 'finalization')).toBe('pending');
+    });
+
+    it('marks every stage done once the job is complete', () => {
+        const steps = buildAnonymousStoryProcessSteps({ status: 'complete', currentStep: 'finalization', t: identityT });
+        for (const step of steps) {
+            expect(step.state).toBe('done');
+        }
+    });
+
+    it('marks the in-flight stage as error and leaves later ones pending on failure', () => {
+        const steps = buildAnonymousStoryProcessSteps({ status: 'error', currentStep: 'generation', t: identityT });
+        expect(stateOf(steps, 'transcription')).toBe('done');
+        expect(stateOf(steps, 'generation')).toBe('error');
+        expect(stateOf(steps, 'finalization')).toBe('pending');
+    });
+
+    it('blames the first real stage when failing before any stage was reported', () => {
+        const steps = buildAnonymousStoryProcessSteps({ status: 'error', currentStep: 'processing', t: identityT });
+        expect(stateOf(steps, 'transcription')).toBe('error');
+        expect(stateOf(steps, 'generation')).toBe('pending');
     });
 });

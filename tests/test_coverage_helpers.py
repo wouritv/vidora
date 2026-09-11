@@ -202,9 +202,11 @@ def test_main_utils_coverage():
     result = main.sanitize_filename('My <video>: "title"?.mp4')
     assert result == "My_video_title.mp4"
 
-    # Test _looks_like_netscape_cookies
-    assert main._looks_like_netscape_cookies("") is False
-    assert main._looks_like_netscape_cookies("# Netscape HTTP Cookie File\n") is True
+    # Test _looks_like_netscape_cookies (moved to youtube_download.py, which
+    # main.py's download_youtube_video/sanitize_filename are imported from)
+    import youtube_download
+    assert youtube_download._looks_like_netscape_cookies("") is False
+    assert youtube_download._looks_like_netscape_cookies("# Netscape HTTP Cookie File\n") is True
 
     # Test _classify_scene_strategy
     assert main._classify_scene_strategy(0) == "GENERAL"
