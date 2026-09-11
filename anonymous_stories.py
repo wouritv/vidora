@@ -122,11 +122,31 @@ def validate_generated_story_payload(raw: Any) -> Dict[str, Any]:
         "introduction": str(raw.get("introduction") or "").strip(),
         "story": story,
         "questions": [str(q).strip() for q in questions if str(q).strip()],
+        "title": str(raw.get("title") or "").strip()[:200],
     }
     normalized["full_text"] = build_final_text(normalized)
     if not normalized["full_text"]:
         raise StoryValidationError(AnonymousStoryErrorCode.GENERATION_INVALID, "final_text is empty")
+    if not normalized["title"]:
+        normalized["title"] = derive_fallback_title(normalized)
     return normalized
+
+
+def derive_fallback_title(content: Dict[str, Any]) -> str:
+    """Best-effort title when the model didn't return one: the first dozen
+    words of the hook (or the story, if there's no hook), truncated with an
+    ellipsis. Kept deliberately simple -- no extra AI call -- since the
+    model is asked for a real title first (see STORY_SYSTEM_PROMPT).
+    """
+    basis = str(content.get("hook") or content.get("story") or "").strip()
+    if not basis:
+        return ""
+    words = basis.split()
+    kept = words[:12]
+    title = " ".join(kept).strip(" \"'«»")
+    if len(kept) < len(words):
+        title = f"{title.rstrip('.,;:!?')}…"
+    return title[:200]
 
 
 def validate_edited_story_content(raw: Any) -> Dict[str, Any]:
@@ -229,11 +249,15 @@ Termine par une a trois questions directement liees au dilemme, jamais generique
 # INTRODUCTION
 L'introduction peut signaler que la personne souhaite rester anonyme, sans aucune marque ou media en dur.
 
+# TITRE
+Genere aussi un titre court (6 a 12 mots) qui resume factuellement le sujet ou le dilemme de l'histoire, pour l'affichage dans une liste (ex: "Mon mari veut que j'arrete mon travail apres la naissance").
+Le titre est neutre et descriptif, different du hook : pas de clickbait, pas d'emoji, pas de guillemets, anonymise comme le reste du texte.
+
 # ANALYSE PREALABLE
-Determine d'abord si la transcription contient reellement un recit personnel exploitable. Si ce n'est pas le cas, renvoie is_story=false avec une raison, et laisse hook/introduction/story vides plutot que d'inventer une histoire.
+Determine d'abord si la transcription contient reellement un recit personnel exploitable. Si ce n'est pas le cas, renvoie is_story=false avec une raison, et laisse hook/introduction/story/title vides plutot que d'inventer une histoire.
 
 # CONTRAINTES DE SORTIE
-Retourne uniquement un objet JSON valide avec exactement ces cles : is_story (bool), confidence (0-1), has_personal_experience (bool), reason (string, uniquement si is_story est false), hook (string), introduction (string), story (string), questions (liste de strings).
+Retourne uniquement un objet JSON valide avec exactement ces cles : is_story (bool), confidence (0-1), has_personal_experience (bool), reason (string, uniquement si is_story est false), title (string), hook (string), introduction (string), story (string), questions (liste de strings).
 Aucune explication hors JSON."""
 
 

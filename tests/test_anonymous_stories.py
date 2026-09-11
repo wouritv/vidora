@@ -97,6 +97,40 @@ def test_validate_generated_story_payload_strips_and_filters_questions():
     assert normalized["questions"] == ["Real question?"]
 
 
+def test_validate_generated_story_payload_keeps_model_provided_title():
+    payload = _valid_payload(title="  Mon mari veut que je demissionne  ")
+    normalized = stories.validate_generated_story_payload(payload)
+    assert normalized["title"] == "Mon mari veut que je demissionne"
+
+
+def test_validate_generated_story_payload_derives_title_when_missing():
+    payload = _valid_payload(hook="Il m'a annonce qu'il voulait divorcer devant toute la famille")
+    normalized = stories.validate_generated_story_payload(payload)
+    assert normalized["title"]
+    assert normalized["title"] == stories.derive_fallback_title({"hook": payload["hook"]})
+
+
+# ---------------------------------------------------------------------------
+# derive_fallback_title
+# ---------------------------------------------------------------------------
+
+def test_derive_fallback_title_truncates_long_hook_with_ellipsis():
+    content = {"hook": "Un deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze"}
+    title = stories.derive_fallback_title(content)
+    assert title.endswith("…")
+    assert len(title.split()) <= 13  # 12 words + possible trailing punctuation stripped
+
+
+def test_derive_fallback_title_uses_story_when_hook_missing():
+    content = {"hook": "", "story": "Elle a decouvert la verite trop tard"}
+    title = stories.derive_fallback_title(content)
+    assert title == "Elle a decouvert la verite trop tard"
+
+
+def test_derive_fallback_title_returns_empty_for_empty_content():
+    assert stories.derive_fallback_title({}) == ""
+
+
 # ---------------------------------------------------------------------------
 # validate_edited_story_content
 # ---------------------------------------------------------------------------

@@ -8283,8 +8283,14 @@ async def _finalize_anonymous_story_job(
     final_credits = float(cost_breakdown.get("final_credits") or 0.0)
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # Replace the placeholder title set at creation time (source filename or
+    # YouTube video title) with one that actually reflects what was
+    # generated -- see anonymous_stories.derive_fallback_title and the
+    # "# TITRE" section of STORY_SYSTEM_PROMPT.
+    generated_title = str(story_content.get("title") or "").strip()
+
     if story_id and is_supabase_configured():
-        await supabase_update_anonymous_story(story_id, user_id, {
+        story_updates: Dict[str, Any] = {
             "status": anonymous_stories.AnonymousStoryStatus.COMPLETED,
             "stage": anonymous_stories.AnonymousStoryStage.FINALIZATION,
             "source_s3_key": source_s3_key,
@@ -8294,7 +8300,10 @@ async def _finalize_anonymous_story_job(
             "billing_details": cost_breakdown,
             "total_cost_usd": cost_breakdown.get("total_usd", 0.0),
             "completed_at": now_iso,
-        })
+        }
+        if generated_title:
+            story_updates["title"] = generated_title
+        await supabase_update_anonymous_story(story_id, user_id, story_updates)
         if user_id:
             debit_ok = await reel_job_manager.debit_credits_for_job(
                 job_id=job_id,
@@ -8309,10 +8318,13 @@ async def _finalize_anonymous_story_job(
     if project_id and is_supabase_configured():
         try:
             await supabase_update_project_status(project_id, "completed", user_id=user_id)
-            await supabase_update_project(project_id, user_id, {
+            project_updates: Dict[str, Any] = {
                 "description": _build_short_project_summary(story_content.get("hook") or story_content.get("story") or ""),
                 "output_count": 1,
-            })
+            }
+            if generated_title:
+                project_updates["name"] = generated_title
+            await supabase_update_project(project_id, user_id, project_updates)
         except Exception as e:
             logger.warning(f"Failed to mark project {project_id} completed: {str(e)}")
 
@@ -8449,14 +8461,26 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
         raise HTTPException(status_code=400, detail=exc.code) from exc
 
     story_content.pop("usage", None)
-    updated = await supabase_update_anonymous_story(story_id, user_id, {
+    generated_title = str(story_content.get("title") or "").strip()
+    story_updates: Dict[str, Any] = {
         "status": anonymous_stories.AnonymousStoryStatus.COMPLETED,
         "stage": anonymous_stories.AnonymousStoryStage.FINALIZATION,
         "generated_content": story_content,
         "edited_content": story_content,
         "final_text": story_content.get("full_text", ""),
         "completed_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    if generated_title:
+        story_updates["title"] = generated_title
+    updated = await supabase_update_anonymous_story(story_id, user_id, story_updates)
+
+    project_id = row.get("project_id")
+    if generated_title and project_id and is_supabase_configured():
+        try:
+            await supabase_update_project(project_id, user_id, {"name": generated_title})
+        except Exception as e:
+            logger.warning(f"Failed to update project {project_id} name after regenerate: {str(e)}")
+
     await reel_job_manager.debit_credits_for_job(
         job_id=job_id, user_id=user_id, credits=regen_credits,
         operation_type="temoignage_regen", reserved_credits=regen_credits,
