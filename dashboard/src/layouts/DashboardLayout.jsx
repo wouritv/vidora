@@ -185,7 +185,7 @@ export default function DashboardLayout() {
                     <div className="absolute inset-0 overflow-hidden -z-10 pointer-events-none">
                         <div className="absolute -top-[10%] -right-[10%] w-[50%] h-[50%] bg-primary/5 rounded-full blur-[120px]" />
                     </div>
-                    <div className={isDesktopLike ? "h-full" : "h-full pt-16"}>
+                    <div className={`h-full min-h-0 flex flex-col ${isDesktopLike ? "" : "pt-16"}`}>
                         <Outlet />
                     </div>
                 </main>
