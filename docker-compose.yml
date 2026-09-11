@@ -18,6 +18,10 @@ services:
   frontend:
     build:
       context: ./dashboard
+      # Local dev only: hot-reload Vite dev server (source bind-mounted
+      # below). Staging/prod build dashboard/Dockerfile instead -- a real
+      # `vite build` served by nginx, see that file's header comment.
+      dockerfile: Dockerfile.dev
       args:
         VITE_SUPABASE_URL: ${SUPABASE_URL:-http://localhost:54321}
         VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-placeholder}
