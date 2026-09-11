@@ -63,24 +63,6 @@ export default function Dashboard() {
         };
     }, [generationSession?.jobId, generationSession?.status]);
 
-    const generationSummary = useMemo(() => {
-        if (!generationSession?.status || generationSession.status === "idle") return null;
-        return {
-            ...generationSession,
-            clipCount: generationSession.results?.clips?.length || 0,
-            ...statusMeta(generationSession.status),
-        };
-    }, [generationSession]);
-
-    let generationSummaryText = "";
-    if (generationSummary?.status === "processing") {
-        generationSummaryText = t("dashboard.generationInProgress", "Une generation est toujours en cours. Tu peux rouvrir la page de generation pour suivre les etapes et voir les reels deja prets.");
-    } else if (generationSummary?.status === "complete") {
-        generationSummaryText = t("dashboard.generationComplete", { count: generationSummary.clipCount });
-    } else if (generationSummary) {
-        generationSummaryText = t("dashboard.generationFailed", "La derniere generation a echoue. Rouvre les details pour verifier l’avancement et relancer une operation.");
-    }
-
     return (
         <div className="flex-1 overflow-y-auto p-8 space-y-10">
             <section className="flex flex-col gap-4 rounded-3xl border border-slate-300 dark:border-white/10 bg-gradient-to-br from-primary/15 via-violet-500/10 to-transparent p-6 md:flex-row md:items-end md:justify-between">
@@ -95,42 +77,6 @@ export default function Dashboard() {
                     </p>
                 </div>
             </section>
-
-            {generationSummary && (
-                <section className="rounded-3xl border border-slate-300 dark:border-white/10 bg-white/[0.03] p-6">
-                    <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                        <div className="space-y-2">
-                            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-zinc-500">{t("app.reelGenerator","Génération de réels")}</p>
-                            <div className="flex flex-wrap items-center gap-3">
-                                <h3 className="title-contrast text-xl font-bold">{t("dashboard.memoryWorkflow","Workflow en mémoire")}</h3>
-                                <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${generationSummary.className}`}>
-                                    <generationSummary.icon size={14} />
-                                    {generationSummary.label}
-                                </span>
-                            </div>
-                            <p className="text-sm leading-6 text-slate-500 dark:text-zinc-400">
-                                {generationSummaryText}
-                            </p>
-                        </div>
-
-                        <div className="flex flex-wrap gap-3">
-                            <button
-                                onClick={() => navigate("/dashboard/reel-generator")}
-                                className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 dark:border-white/10 bg-white/5 px-4 py-3 text-sm text-white transition hover:bg-white/10"
-                            >
-                                <ArrowRight size={16} />
-                                {t("dashboard.details","Ouvrir les details")}
-                            </button>
-                            <button
-                                onClick={() => navigate("/dashboard/reels")}
-                                className="inline-flex items-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-white transition hover:bg-blue-500"
-                            >
-                                {t("dashboard.gallery","Voir la galerie")}
-                            </button>
-                        </div>
-                    </div>
-                </section>
-            )}
 
             <section className="space-y-6">
                 <div>
