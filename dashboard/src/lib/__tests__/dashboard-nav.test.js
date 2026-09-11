@@ -31,6 +31,7 @@ describe('DASHBOARD_SIDEBAR_ITEMS', () => {
             'dashboard',
             'reels',
             'captions',
+            'anonymous-stories',
             'social-publications',
             'abonnements',
             'settings',

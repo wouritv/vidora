@@ -638,6 +638,109 @@ def test_list_style_edit_versions_returns_empty_for_missing_params(monkeypatch):
     assert result == []
 
 
+# --------------------------------------------------------------------------
+# Anonymous stories
+# --------------------------------------------------------------------------
+
+def test_insert_anonymous_story_returns_none_for_empty_row(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    result = asyncio.run(supabase_request.insert_anonymous_story(None))
+    assert result is None
+
+
+def test_insert_anonymous_story_returns_inserted_row(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE: [_FakeResponse(data=[{"id": "s1"}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    result = asyncio.run(supabase_request.insert_anonymous_story({"user_id": "u1"}))
+    assert result == {"id": "s1"}
+
+
+def test_list_anonymous_stories_applies_filters_and_pagination(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE: [_FakeResponse(data=[{"id": "s1"}], count=3)]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    rows, total = asyncio.run(
+        supabase_request.list_anonymous_stories("user-1", page=0, page_size=999, status="completed", query="my*query")
+    )
+
+    assert rows == [{"id": "s1"}]
+    assert total == 3
+    assert _event_args(fake_client.events, supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE, "range") == (0, 99)
+    assert _event_args(fake_client.events, supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE, "or_") == (
+        'title.ilike."*myquery*"',
+    )
+
+
+def test_get_anonymous_story_returns_none_for_missing_ids(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    result = asyncio.run(supabase_request.get_anonymous_story("", "u1"))
+    assert result is None
+
+
+def test_get_anonymous_story_returns_first_row(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE: [_FakeResponse(data=[{"id": "s1"}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    result = asyncio.run(supabase_request.get_anonymous_story("s1", "u1"))
+    assert result == {"id": "s1"}
+
+
+def test_get_anonymous_story_by_job_returns_none_for_missing_ids(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    result = asyncio.run(supabase_request.get_anonymous_story_by_job("", "u1"))
+    assert result is None
+
+
+def test_update_anonymous_story_returns_none_for_missing_ids(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    result = asyncio.run(supabase_request.update_anonymous_story("", "u1", {}))
+    assert result is None
+
+
+def test_update_anonymous_story_sets_updated_at_and_returns_row(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE: [
+            _FakeResponse(data=[{"id": "s1", "status": "completed"}]),  # .update().execute()
+            _FakeResponse(data=[{"id": "s1", "status": "completed"}]),  # re-select via get_anonymous_story
+        ]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    result = asyncio.run(supabase_request.update_anonymous_story("s1", "u1", {"status": "completed"}))
+    assert result == {"id": "s1", "status": "completed"}
+    update_args = _event_args(fake_client.events, supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE, "update")
+    assert update_args[0]["status"] == "completed"
+    assert "updated_at" in update_args[0]
+
+
+def test_soft_delete_anonymous_story_returns_false_for_missing_ids(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    result = asyncio.run(supabase_request.soft_delete_anonymous_story("", "u1"))
+    assert result is False
+
+
+def test_soft_delete_anonymous_story_returns_bool(monkeypatch):
+    supabase_request = _import_supabase_request_with_stubs(monkeypatch)
+    fake_client = _FakeClient(
+        {supabase_request.SUPABASE_ANONYMOUS_STORIES_TABLE: [_FakeResponse(data=[{"id": "s1"}])]}
+    )
+    _patch_get_client(monkeypatch, supabase_request, fake_client)
+
+    result = asyncio.run(supabase_request.soft_delete_anonymous_story("s1", "u1"))
+    assert result is True
+
+
 def test_delete_style_edit_versions_returns_zero_for_missing_params(monkeypatch):
     supabase_request = _import_supabase_request_with_stubs(monkeypatch)
     result = asyncio.run(supabase_request.delete_style_edit_versions("", 0, ""))

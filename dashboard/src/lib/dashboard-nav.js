@@ -3,6 +3,7 @@ import {
     Home,
     LayoutGrid,
     MessageSquareText,
+    Quote,
     Settings,
     Share2,
 } from "lucide-react";
@@ -43,6 +44,18 @@ export const DASHBOARD_SIDEBAR_ITEMS = [
         badge: "Projets",
         category: "service",
         path: "/dashboard/captions",
+    },
+    {
+        key: "anonymous-stories",
+        title: "Témoignages",
+        sidebarLabel: "Témoignages",
+        icon: Quote,
+        activeClassName: "bg-pink-500/10 text-pink-400",
+        inactiveClassName: "text-slate-500 dark:text-zinc-400 hover:text-white hover:bg-white/5",
+        description: "Transforme une video temoignage en histoire ecrite anonymisee, prete a copier.",
+        badge: "Projets",
+        category: "service",
+        path: "/dashboard/anonymous-stories",
     },
     {
         key: "social-publications",
