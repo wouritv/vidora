@@ -2208,15 +2208,39 @@ def _build_words_payload(transcript_result):
     return words
 
 
+# _build_analysis_prompt fills REEL_PROMPT in with a targeted regex
+# substitution instead of str.format() -- REEL_PROMPT is meant to be
+# hand-edited (it gets tuned/rewritten directly in this file over time),
+# and .format() treats EVERY '{' in the template as the start of a
+# placeholder. A prompt edit that pastes in a JSON example -- exactly the
+# kind of thing a prompt like this tends to grow, and exactly what broke it
+# last time (KeyError: '\n  "w"', from the WORDS_JSON example block) --
+# silently breaks every call unless each literal brace is manually doubled
+# to '{{'/'}}', which is an easy, unobvious mistake to make and to miss in
+# review. Matching only these 5 known names means any other '{...}'
+# anywhere in the template is just text, never a trap.
+_PROMPT_PLACEHOLDER_NAMES = (
+    "video_duration",
+    "transcript_text",
+    "words_json",
+    "max_clip_duration_seconds",
+    "min_clip_duration_seconds",
+)
+_PROMPT_PLACEHOLDER_RE = re.compile(
+    "{(" + "|".join(re.escape(name) for name in _PROMPT_PLACEHOLDER_NAMES) + ")}"
+)
+
+
 def _build_analysis_prompt(transcript_result, video_duration):
     words = _build_words_payload(transcript_result)
-    return REEL_PROMPT.format(
-        video_duration=video_duration,
-        transcript_text=json.dumps(transcript_result.get("text", "")),
-        words_json=json.dumps(words),
-        max_clip_duration_seconds=MAX_CLIP_DURATIONS_SECOND,
-        min_clip_duration_seconds=MIN_CLIP_DURATION_SECONDS,
-    )
+    values = {
+        "video_duration": str(video_duration),
+        "transcript_text": json.dumps(transcript_result.get("text", "")),
+        "words_json": json.dumps(words),
+        "max_clip_duration_seconds": str(MAX_CLIP_DURATIONS_SECOND),
+        "min_clip_duration_seconds": str(MIN_CLIP_DURATION_SECONDS),
+    }
+    return _PROMPT_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], REEL_PROMPT)
 
 
 def _get_viral_clips_with_gemini(transcript_result, video_duration):

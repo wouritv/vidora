@@ -675,6 +675,35 @@ def test_build_analysis_prompt_includes_video_details(monkeypatch):
     assert "Test transcript" in result
 
 
+def test_build_analysis_prompt_tolerates_unescaped_literal_braces(monkeypatch):
+    """A prompt template hand-edited to include a raw JSON example (e.g.
+    '{\\n  "w": ...\\n}' pasted in without doubling the braces to '{{'/'}}')
+    used to crash str.format() with a KeyError on the stray field name --
+    _build_analysis_prompt must only ever touch its 5 known placeholders and
+    leave every other '{...}' in the template untouched."""
+    main = _import_main_with_stubs(monkeypatch)
+
+    monkeypatch.setattr(
+        main,
+        "REEL_PROMPT",
+        'Duration: {video_duration}\n'
+        'Transcript: {transcript_text}\n'
+        'Words: {words_json}\n'
+        'Bounds: {min_clip_duration_seconds}-{max_clip_duration_seconds}\n'
+        'Example JSON (not a placeholder):\n'
+        '{\n  "w": "hello",\n  "s": 0,\n  "e": 1\n}\n',
+    )
+
+    transcript = {"text": "Test transcript", "segments": []}
+
+    result = main._build_analysis_prompt(transcript, video_duration=100)
+
+    assert "Duration: 100" in result
+    assert "Transcript: " in result and "Test transcript" in result
+    assert 'Bounds: {}-{}'.format(main.MIN_CLIP_DURATION_SECONDS, main.MAX_CLIP_DURATIONS_SECOND) in result
+    assert '{\n  "w": "hello",\n  "s": 0,\n  "e": 1\n}' in result
+
+
 def test_smoothed_cameraman_initialization(monkeypatch):
     main = _import_main_with_stubs(monkeypatch)
 
