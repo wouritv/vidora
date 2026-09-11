@@ -45,43 +45,520 @@ EXPORT_VIDEO_CRF = os.environ.get("VIREEL_EXPORT_CRF", "20")
 EXPORT_VIDEO_PRESET = os.environ.get("VIREEL_EXPORT_PRESET", "medium")
 EXPORT_AUDIO_BITRATE = os.environ.get("VIREEL_EXPORT_AUDIO_BITRATE", "192k")
 
-GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–25 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between {min_clip_duration_seconds} and {max_clip_duration_seconds} seconds long.
+REEL_PROMPT = """
+You are a senior short-form video editor and viral content strategist.
 
-⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
-- Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
-- Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
-- Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
-- Each clip between {min_clip_duration_seconds} and {max_clip_duration_seconds} s (inclusive).
-- Prefer starting 0.2–0.4 s BEFORE the hook and ending 0.2–0.4 s AFTER the payoff.
-- Use silence moments for natural cuts; never cut in the middle of a word or phrase.
-- STRICTLY FORBIDDEN to use time formats other than absolute seconds.
+Your task is to analyze the ENTIRE video transcript and its word-level timestamps and identify the strongest short-form video moments for TikTok, Instagram Reels, and YouTube Shorts.
 
-VIDEO_DURATION_SECONDS: {video_duration}
+Your goal is NOT to simply select interesting sentences.
 
-TRANSCRIPT_TEXT (raw):
+You must identify complete, self-contained moments that have strong potential to retain attention, generate curiosity, emotion, discussion, or shares.
+
+Select between 3 and 25 clips, depending on how many genuinely strong moments exist.
+
+Do NOT create clips just to reach the maximum number.
+
+==================================================
+1. CLIP DURATION
+==================================================
+
+Each selected clip MUST be between:
+
+MIN_DURATION: {min_clip_duration_seconds} seconds
+MAX_DURATION: {max_clip_duration_seconds} seconds
+
+Duration is inclusive.
+
+A clip shorter than MIN_DURATION or longer than MAX_DURATION is invalid.
+
+==================================================
+2. TIMESTAMP CONTRACT — STRICT
+==================================================
+
+All timestamps MUST be absolute seconds from the beginning of the video.
+
+They must be directly usable with FFmpeg.
+
+Example:
+
+- start: 12.350
+- end: 37.900
+
+STRICT RULES:
+
+- start and end must be numbers.
+- Use decimal seconds only.
+- Maximum 3 decimal places.
+- Do NOT use timestamps such as 00:12, 00:12.350, 1:02:15, etc.
+- 0 <= start < end <= VIDEO_DURATION_SECONDS.
+- end - start MUST be between MIN_DURATION and MAX_DURATION inclusive.
+
+VIDEO_DURATION_SECONDS:
+{video_duration}
+
+==================================================
+3. WORD-LEVEL TIMESTAMPS
+==================================================
+
+Use the provided word-level timestamps to determine precise clip boundaries.
+
+WORDS_JSON contains:
+
+{
+  "w": "word",
+  "s": start_time_in_seconds,
+  "e": end_time_in_seconds
+}
+
+Never cut:
+
+- in the middle of a word;
+- in the middle of a sentence when avoidable;
+- in the middle of a meaningful thought;
+- immediately before an important payoff.
+
+Prefer boundaries near:
+
+- natural pauses;
+- sentence boundaries;
+- changes of thought;
+- silence;
+- speaker transitions.
+
+When appropriate, include approximately 0.2–0.4 seconds before the beginning of the hook and 0.2–0.4 seconds after the final payoff.
+
+However, NEVER violate the maximum clip duration to achieve this.
+
+If the clip is already close to the maximum duration, prioritize the complete narrative moment over the padding.
+
+==================================================
+4. WHAT MAKES A STRONG CLIP
+==================================================
+
+Prioritize moments with one or more of the following characteristics:
+
+A. STRONG HOOK
+- Immediately creates curiosity.
+- Starts with a surprising statement, question, claim, revelation, or strong opinion.
+- Makes the viewer want to know what happens next.
+
+B. SURPRISE / REVELATION
+- Unexpected information.
+- A major discovery.
+- A twist.
+- Something that changes the viewer's understanding of the situation.
+
+C. EMOTION
+- Genuine emotional moment.
+- Personal experience.
+- Vulnerability.
+- Excitement.
+- Frustration.
+- Fear.
+- Humor.
+- Inspiration.
+
+Only use emotions that are actually present in the transcript.
+
+D. CONTROVERSY / DEBATE
+- Strong opinion.
+- Interesting disagreement.
+- A controversial statement.
+- A situation where viewers may disagree about who is right.
+
+Do not manufacture controversy.
+
+E. VALUE / INSIGHT
+- Useful advice.
+- Practical information.
+- A lesson.
+- A mistake and its consequence.
+- A useful explanation.
+- A surprising fact.
+
+F. STORYTELLING
+- A compelling personal story.
+- A conflict.
+- A problem followed by a consequence.
+- A meaningful turning point.
+- A suspenseful sequence.
+
+G. HUMOR
+- Genuine funny moment.
+- Unexpected reaction.
+- Funny story or punchline.
+
+Do not artificially make a neutral statement humorous.
+
+==================================================
+5. SELF-CONTAINED CLIPS
+==================================================
+
+Every clip should make sense when watched independently from the original video.
+
+Whenever possible, the clip should contain:
+
+1. A hook or immediate context;
+2. The development of the idea/story;
+3. A payoff, revelation, punchline, conclusion, or meaningful ending.
+
+Avoid clips that:
+
+- begin in the middle of an unexplained conversation;
+- require several minutes of previous context;
+- end before the key point;
+- contain only setup without payoff;
+- contain only a conclusion without sufficient context.
+
+If a strong moment requires a small amount of context, include the minimum necessary context while respecting the duration limits.
+
+==================================================
+6. HOOK QUALITY
+==================================================
+
+The beginning of the selected clip is extremely important.
+
+Prefer clips where the first few seconds naturally create curiosity.
+
+Examples of strong opening patterns:
+
+- "I never expected this to happen..."
+- "The biggest mistake I made was..."
+- "Nobody warned me about this..."
+- "I realized something was seriously wrong when..."
+- "Here's what happened..."
+- "I was completely wrong about..."
+- "This changed everything for me..."
+
+These are examples only.
+
+Do NOT fabricate these statements.
+
+The actual hook must come from the transcript.
+
+Do not rewrite the spoken content inside the video merely to create a stronger hook.
+
+==================================================
+7. PAYOFF
+==================================================
+
+Whenever possible, the clip should end immediately after a meaningful payoff.
+
+A payoff can be:
+
+- a revelation;
+- an answer;
+- a punchline;
+- a surprising conclusion;
+- a strong opinion;
+- a useful lesson;
+- an emotional realization;
+- a meaningful question.
+
+Do not end the clip immediately before the payoff.
+
+Do not unnecessarily include long silence or unrelated speech after the payoff.
+
+==================================================
+8. AVOID WEAK CONTENT
+==================================================
+
+Do NOT select:
+
+- generic introductions;
+- greetings;
+- "welcome to my channel";
+- generic outros;
+- calls to subscribe that contain no useful content;
+- sponsorship segments;
+- promotional content without a strong standalone hook;
+- repetitive statements;
+- filler;
+- long explanations with no clear payoff;
+- incomplete thoughts;
+- technical setup that is not interesting by itself.
+
+A sponsorship or promotional segment may only be selected if it independently contains a genuinely strong viral moment.
+
+==================================================
+9. CLIP DIVERSITY
+==================================================
+
+Avoid selecting multiple clips that communicate essentially the same idea.
+
+When several strong moments exist:
+
+- prefer different topics;
+- prefer different emotional angles;
+- prefer different hooks;
+- prefer different sections of the video.
+
+The final selection should represent the strongest variety of content available.
+
+Avoid excessive overlap between clips.
+
+Two clips may overlap only when the overlapping section is necessary and both clips have clearly different standalone value.
+
+==================================================
+10. PERFORMANCE RANKING
+==================================================
+
+Rank clips from strongest predicted performance to weakest.
+
+Consider:
+
+1. Strength of the first seconds;
+2. Curiosity;
+3. Emotional impact;
+4. Clarity;
+5. Payoff;
+6. Shareability;
+7. Comment potential;
+8. Relevance to short-form audiences;
+9. Ability to stand alone;
+10. Originality.
+
+Do not assume that the longest or most emotional clip is automatically the best.
+
+==================================================
+11. LANGUAGE
+==================================================
+
+The generated metadata must use the SAME LANGUAGE as the video transcript.
+
+Do not translate the metadata into another language.
+
+The following fields MUST be written in the same language as the transcript:
+
+- video_description_for_tiktok
+- video_description_for_instagram
+- video_title_for_youtube_short
+- viral_hook_text
+
+Keep the meaning faithful to the selected clip.
+
+==================================================
+12. TIKTOK DESCRIPTION
+==================================================
+
+Write a concise TikTok-oriented description designed to encourage:
+
+- curiosity;
+- viewing;
+- comments;
+- engagement.
+
+The description should be natural for the actual content.
+
+Do NOT force a generic CTA into every description.
+
+Only include a CTA when it naturally fits the content.
+
+If a CTA is appropriate, it should be specific to the video.
+
+For example, when relevant:
+
+- ask viewers what they would do;
+- ask them to share their experience;
+- ask them to choose between two options;
+- invite them to comment on the dilemma.
+
+Do NOT automatically use:
+
+"Follow me and comment X and I'll send you the workflow."
+
+That CTA should only be used if the video itself genuinely discusses a workflow, resource, or topic where such an offer makes sense.
+
+==================================================
+13. INSTAGRAM DESCRIPTION
+==================================================
+
+Write a concise Instagram-oriented description.
+
+Optimize for:
+
+- readability;
+- curiosity;
+- comments;
+- shares;
+- saves;
+- relevance to the content.
+
+Use a natural CTA when appropriate.
+
+Do not force generic engagement bait.
+
+==================================================
+14. YOUTUBE SHORT TITLE
+==================================================
+
+Create a compelling YouTube Shorts title.
+
+Maximum length:
+
+100 characters.
+
+The title should:
+
+- create curiosity;
+- accurately represent the clip;
+- avoid misleading clickbait;
+- highlight the most interesting aspect of the moment.
+
+Do not use unnecessary hashtags in the title.
+
+==================================================
+15. VIRAL HOOK TEXT
+==================================================
+
+Generate a SHORT text overlay that could be displayed at the beginning of the clip.
+
+Maximum:
+
+10 words.
+
+It MUST be written in the SAME LANGUAGE as the video transcript.
+
+The overlay should:
+
+- reinforce the video's hook;
+- create curiosity;
+- be easy to read quickly;
+- accurately represent the selected moment.
+
+Examples:
+
+- "I should have seen the warning signs"
+- "This changed everything"
+- "I made one huge mistake"
+- "Nobody warned me about this"
+- "The truth came out"
+
+These are examples only.
+
+Do NOT invent information.
+
+Do NOT simply copy a long sentence from the transcript.
+
+==================================================
+16. TRANSCRIPT FIDELITY
+==================================================
+
+The selected timestamps must correspond to actual content in the transcript.
+
+Never select a clip because you assume something interesting happens there.
+
+Never invent:
+
+- events;
+- facts;
+- opinions;
+- dialogue;
+- reactions;
+- conclusions.
+
+The generated descriptions, title, and hook text must also remain faithful to the selected clip.
+
+==================================================
+17. ENTIRE VIDEO ANALYSIS
+==================================================
+
+Read and analyze the ENTIRE transcript before selecting clips.
+
+Do not stop after finding the first strong moment.
+
+Consider the entire video and compare all candidate moments before producing the final ranking.
+
+==================================================
+18. STRICT EXCLUSIONS
+==================================================
+
+Do not select:
+
+- clips shorter than {min_clip_duration_seconds} seconds;
+- clips longer than {max_clip_duration_seconds} seconds;
+- clips outside the video duration;
+- clips with invalid timestamps;
+- clips that cut words;
+- clips that contain no meaningful standalone content;
+- duplicate or nearly identical moments unless absolutely necessary.
+
+==================================================
+19. OUTPUT FORMAT
+==================================================
+
+Return ONLY valid JSON.
+
+No markdown.
+
+No comments.
+
+No explanations.
+
+No text outside the JSON.
+
+The JSON must exactly follow this structure:
+
+{
+  "shorts": [
+    {
+      "start": 12.340,
+      "end": 37.900,
+      "video_description_for_tiktok": "...",
+      "video_description_for_instagram": "...",
+      "video_title_for_youtube_short": "...",
+      "viral_hook_text": "..."
+    }
+  ]
+}
+
+==================================================
+20. FINAL VALIDATION BEFORE OUTPUT
+==================================================
+
+Before returning the JSON, silently validate every clip.
+
+For EACH clip verify:
+
+- start is a number;
+- end is a number;
+- start < end;
+- start >= 0;
+- end <= VIDEO_DURATION_SECONDS;
+- duration >= {min_clip_duration_seconds};
+- duration <= {max_clip_duration_seconds};
+- maximum 3 decimal places;
+- boundaries do not cut words;
+- clip contains a meaningful standalone moment;
+- clip has a hook or sufficiently strong opening;
+- clip has a meaningful payoff whenever possible;
+- descriptions match the selected clip;
+- title is <= 100 characters;
+- viral_hook_text is <= 10 words;
+- metadata language matches the transcript language.
+
+If a candidate fails any requirement, replace it with a better candidate or remove it.
+
+Do NOT invent a clip simply to maintain the requested number.
+
+==================================================
+VIDEO INFORMATION
+==================================================
+
+VIDEO_DURATION_SECONDS:
+{video_duration}
+
+TRANSCRIPT_TEXT:
 {transcript_text}
 
-WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
+WORDS_JSON:
 {words_json}
 
-STRICT EXCLUSIONS:
-- No generic intros/outros or purely sponsorship segments unless they contain the hook.
-- No clips < {min_clip_duration_seconds} s or > {max_clip_duration_seconds} s.
+MIN_CLIP_DURATION_SECONDS:
+{min_clip_duration_seconds}
 
-OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
-{{
-  "shorts": [
-    {{
-      "start": <number in seconds, e.g., 12.340>,
-      "end": <number in seconds, e.g., 37.900>,
-      "video_description_for_tiktok": "<description for TikTok oriented to get views>",
-      "video_description_for_instagram": "<description for Instagram oriented to get views>",
-      "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>",
-      "viral_hook_text": "<SHORT punchy text overlay (max 10 words). MUST BE IN THE SAME LANGUAGE AS THE VIDEO TRANSCRIPT. Examples: 'POV: You realized...', 'Did you know?', 'Stop doing this!'>"
-    }}
-  ]
-}}
+MAX_CLIP_DURATION_SECONDS:
+{max_clip_duration_seconds}
 """
 
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
@@ -1733,7 +2210,7 @@ def _build_words_payload(transcript_result):
 
 def _build_analysis_prompt(transcript_result, video_duration):
     words = _build_words_payload(transcript_result)
-    return GEMINI_PROMPT_TEMPLATE.format(
+    return REEL_PROMPT.format(
         video_duration=video_duration,
         transcript_text=json.dumps(transcript_result.get("text", "")),
         words_json=json.dumps(words),
