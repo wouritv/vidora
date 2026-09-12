@@ -1,9 +1,15 @@
 ## Fichier de config pour le deploiement de l'application sur le VPS
 ## Pour deploiement dans un environnement donne (Staging ou prod), modifier le port ainsi que le container_name et c'est correct
+##
+## La prod ne suit que la seule version `release` (voir
+## .github/workflows/promote-release.yml pour la promotion d'un snapshot
+## valide en release, et ci-prod.yml pour le deploiement). IMAGE_TAG=release
+## par defaut ci-dessous ; ne jamais pointer ce fichier vers `snapshot` ou un
+## SHA de commit.
 
 services:
   backend:
-    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-backend:${IMAGE_TAG:-latest}
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-backend:${IMAGE_TAG:-release}
     container_name: vireel-prod-backend
     ports:
       - "5000:8000"
@@ -24,7 +30,7 @@ services:
     cpus: ${BACKEND_CPU_LIMIT:-4}
 
   frontend:
-    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-latest}
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-release}
     container_name: vireel-prod-frontend
     ports:
       - "5001:8080"
@@ -37,7 +43,7 @@ services:
     cpus: ${FRONTEND_CPU_LIMIT:-1}
 
   renderer:
-    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-latest}
+    image: ${NEXUS_REGISTRY}/${IMAGE_PREFIX}-renderer:${IMAGE_TAG:-release}
     container_name: vireel-prod-renderer
     ports:
       # Bound to loopback only: render-service has no per-user auth of its

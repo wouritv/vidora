@@ -1,13 +1,14 @@
 name: CD Production
 
+# Production only ever runs the single `:release` image of each module --
+# there is no freeform tag input anymore (it used to accept any tag,
+# including a raw commit SHA, which meant prod could run something that
+# was never actually promoted/validated). To ship a new version to
+# production: (1) let ci-cd.yml build+deploy it as `:snapshot` on staging,
+# (2) validate it there, (3) run promote-release.yml to turn that snapshot
+# into `:release`, (4) run this workflow.
 on:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: "Tag de l'image Nexus à déployer (ex: latest, ou un SHA de commit)"
-        required: true
-        default: 'latest'
-        type: string
+  workflow_dispatch: {}
 
 env:
   # Le connecteur Docker interne de Nexus (port 8082) n'a jamais été
@@ -16,6 +17,7 @@ env:
   # au trafic interne loopback.
   NEXUS_REGISTRY: nexus.wouri.tv:8446
   IMAGE_PREFIX: vireel
+  IMAGE_TAG: release
 
 jobs:
   deploy:
@@ -28,11 +30,11 @@ jobs:
 
       - name: Afficher la version déployée
         run: |
-          echo "Déploiement en production du tag : ${{ github.event.inputs.image_tag }}"
+          echo "Déploiement en production du tag : ${{ env.IMAGE_TAG }}"
           echo "Images :"
-          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:${{ github.event.inputs.image_tag }}"
-          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-backend:${{ github.event.inputs.image_tag }}"
-          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-renderer:${{ github.event.inputs.image_tag }}"
+          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:${{ env.IMAGE_TAG }}"
+          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-backend:${{ env.IMAGE_TAG }}"
+          echo "  ${{ env.NEXUS_REGISTRY }}/${{ env.IMAGE_PREFIX }}-renderer:${{ env.IMAGE_TAG }}"
 
       - name: Copier les fichiers de déploiement sur le VPS
         uses: appleboy/scp-action@v0.1.7
@@ -52,7 +54,7 @@ jobs:
           envs: NEXUS_REGISTRY,IMAGE_PREFIX,IMAGE_TAG
           script: |
             cd /var/apps/vireel_prod
-            export IMAGE_TAG=${{ github.event.inputs.image_tag }}
+            export IMAGE_TAG=release
             echo "${{ secrets.NEXUS_PASSWORD }}" | docker login ${{ env.NEXUS_REGISTRY }} -u ${{ secrets.NEXUS_USERNAME }} --password-stdin
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
