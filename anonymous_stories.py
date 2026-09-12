@@ -12,9 +12,12 @@ router).
 """
 
 import asyncio
+import io
 import json
 import os
 from typing import Any, Dict, List, Optional
+
+from PIL import Image, ImageDraw, ImageFont
 
 
 class AnonymousStorySourceType:
@@ -371,3 +374,133 @@ def download_youtube_source(url: str, output_dir: str) -> Dict[str, str]:
     # before the AI-generated one replaces it (see app.py's
     # _finalize_anonymous_story_job).
     return {"path": path, "title": sanitized_title.replace("_", " ").strip()}
+
+
+# ---------------------------------------------------------------------------
+# Publish backgrounds -- Meta/LinkedIn's public APIs have no native "colored
+# background text post" feature for third-party apps, so the visual effect
+# the user asked for ("proposer une liste" of backgrounds, for Facebook and
+# LinkedIn alike) is produced by rendering the story text onto a preset
+# colored/gradient image ourselves, then publishing that image like any
+# other photo post (see app.py's publish_to_facebook_photo /
+# publish_to_linkedin_image).
+# ---------------------------------------------------------------------------
+
+_STORY_BACKGROUND_FONT_PATH = os.path.join("fonts", "NotoSerif-Bold.ttf")
+
+BACKGROUND_PRESETS: List[Dict[str, Any]] = [
+    {"id": "midnight", "name": "Midnight Blue", "colors": ["#0f2027", "#203a43", "#2c5364"], "text_color": "#ffffff"},
+    {"id": "sunset", "name": "Sunset", "colors": ["#ff512f", "#dd2476"], "text_color": "#ffffff"},
+    {"id": "forest", "name": "Forest", "colors": ["#134e5e", "#71b280"], "text_color": "#ffffff"},
+    {"id": "royal", "name": "Royal Purple", "colors": ["#41295a", "#2f0743"], "text_color": "#ffffff"},
+    {"id": "charcoal", "name": "Charcoal", "colors": ["#232526", "#414345"], "text_color": "#ffffff"},
+    {"id": "ivory", "name": "Ivory", "colors": ["#f5f5f0", "#e0e0d8"], "text_color": "#1a1a1a"},
+]
+
+
+def get_background_preset(background_id: Optional[str]) -> Dict[str, Any]:
+    """Return the preset matching `background_id`, or the first preset when
+    unset/unknown (so callers always get a usable default)."""
+    if background_id:
+        for preset in BACKGROUND_PRESETS:
+            if preset["id"] == background_id:
+                return preset
+    return BACKGROUND_PRESETS[0]
+
+
+def _hex_to_rgb(value: str) -> tuple:
+    value = value.lstrip("#")
+    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+
+
+def _render_gradient_background(size: tuple, colors: List[str]) -> "Image.Image":
+    width, height = size
+    top = _hex_to_rgb(colors[0])
+    bottom = _hex_to_rgb(colors[-1] if len(colors) > 1 else colors[0])
+    img = Image.new("RGB", size, top)
+    draw = ImageDraw.Draw(img)
+    for y in range(height):
+        t = y / max(height - 1, 1)
+        row_color = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
+        draw.line([(0, y), (width, y)], fill=row_color)
+    return img
+
+
+def _wrap_text_lines(text: str, font, max_width: int, draw) -> List[str]:
+    lines: List[str] = []
+    for paragraph in text.split("\n"):
+        if not paragraph.strip():
+            lines.append("")
+            continue
+        words = paragraph.split()
+        current: List[str] = []
+        for word in words:
+            candidate = " ".join(current + [word])
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            if bbox[2] - bbox[0] <= max_width or not current:
+                current.append(word)
+            else:
+                lines.append(" ".join(current))
+                current = [word]
+        if current:
+            lines.append(" ".join(current))
+    return lines
+
+
+def render_story_background_image(text: str, preset: Dict[str, Any], size: tuple = (1080, 1080)) -> bytes:
+    """Render `text` centered over a preset colored/gradient background,
+    returning PNG bytes. Shrinks the font until the wrapped text fits the
+    canvas so long stories still render legibly."""
+    width, height = size
+    padding = int(width * 0.1)
+    max_text_width = width - (2 * padding)
+    max_text_height = height - (2 * padding)
+
+    excerpt = (text or "").strip()
+    if len(excerpt) > 600:
+        excerpt = excerpt[:597].rstrip() + "..."
+
+    img = _render_gradient_background(size, preset.get("colors") or ["#0f2027"])
+    draw = ImageDraw.Draw(img)
+
+    font_size = int(width * 0.055)
+    font = None
+    lines: List[str] = []
+    line_heights: List[int] = []
+    line_spacing = 0
+    total_height = 0
+
+    while font_size >= 20:
+        try:
+            font = ImageFont.truetype(_STORY_BACKGROUND_FONT_PATH, font_size)
+        except Exception:
+            font = ImageFont.load_default()
+
+        lines = _wrap_text_lines(excerpt, font, max_text_width, draw)
+        line_spacing = int(font_size * 0.35)
+        line_heights = []
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line or " ", font=font)
+            line_heights.append(bbox[3] - bbox[1])
+        total_height = sum(line_heights) + line_spacing * max(len(lines) - 1, 0)
+
+        if total_height <= max_text_height or font_size <= 20:
+            break
+        font_size -= 4
+
+    text_color = preset.get("text_color") or "#ffffff"
+    current_y = max((height - total_height) // 2, padding // 2)
+    for i, line in enumerate(lines):
+        line_height = line_heights[i] if i < len(line_heights) else font_size
+        if not line:
+            current_y += line_height + line_spacing
+            continue
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = bbox[2] - bbox[0]
+        x = (width - line_w) // 2
+        draw.text((x, current_y), line, font=font, fill=text_color)
+        current_y += line_height + line_spacing
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()

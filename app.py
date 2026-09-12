@@ -7975,6 +7975,13 @@ class AnonymousStoryUpdateRequest(BaseModel):
     questions: Optional[List[str]] = None
 
 
+class AnonymousStoryPublishRequest(BaseModel):
+    platforms: List[str]
+    background_id: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    timezone: Optional[str] = "UTC"
+
+
 def _normalize_anonymous_story_row(row: Dict[str, Any], *, include_content: bool = False) -> Dict[str, Any]:
     item = {
         "id": row.get("id"),
@@ -8488,9 +8495,161 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
     return _normalize_anonymous_story_row(updated, include_content=True)
 
 
+# Anonymous stories may only be published to the platforms the user
+# explicitly asked for ("la publication dois se faire entre facebook et
+# Linkedin") -- unlike reels/captions, which fan out to whatever the
+# account has connected among tiktok/instagram/youtube/facebook/linkedin.
+_ANONYMOUS_STORY_PUBLISH_PLATFORMS = {"facebook", "linkedin"}
+
+_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS = 14 * 24 * 3600  # long enough for a scheduled post to still resolve the image days later
+
+
+def _resolve_anonymous_story_platforms(platforms: Optional[List[str]]) -> List[str]:
+    candidate = [p.strip().lower() for p in (platforms or []) if isinstance(p, str) and p.strip()]
+    result: List[str] = []
+    for p in candidate:
+        if p in _ANONYMOUS_STORY_PUBLISH_PLATFORMS and p not in result:
+            result.append(p)
+    if not result:
+        raise HTTPException(status_code=400, detail="platforms must include at least one of: facebook, linkedin")
+    return result
+
+
+@app.get("/api/anonymous-stories/backgrounds", responses={401: {"description": "Unauthorized"}})
+async def list_anonymous_story_backgrounds(user_id: Annotated[str, Depends(get_user_id_header)]):
+    return {
+        "items": [
+            {"id": preset["id"], "name": preset["name"], "colors": preset["colors"], "text_color": preset["text_color"]}
+            for preset in anonymous_stories.BACKGROUND_PRESETS
+        ],
+    }
+
+
+async def _render_and_upload_story_background(user_id: str, story_id: str, text: str, background_id: Optional[str]) -> str:
+    preset = anonymous_stories.get_background_preset(background_id)
+    image_bytes = await asyncio.to_thread(anonymous_stories.render_story_background_image, text, preset)
+
+    bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
+    s3_key = f"{_STORIES_PREFIX}{user_id}/{story_id}/background_{preset['id']}_{uuid.uuid4().hex}.png"
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    temp_path = os.path.join(OUTPUT_DIR, f"story_bg_{uuid.uuid4().hex}.png")
+    try:
+        async with aiofiles.open(temp_path, "wb") as file_handle:
+            await file_handle.write(image_bytes)
+        uploaded = upload_file_to_s3(temp_path, bucket_name, s3_key)
+        if not uploaded:
+            raise HTTPException(status_code=502, detail="Failed to upload story background image")
+    finally:
+        _cleanup_temp_file(temp_path)
+
+    presigned_url = generate_presigned_url(bucket_name, s3_key, expiration=_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS)
+    if not presigned_url:
+        raise HTTPException(status_code=502, detail="Failed to generate URL for story background image")
+    return presigned_url
+
+
+async def _publish_anonymous_story_now(
+    user_id: str, platform_name: str, publish_priority: int, text_value: str, image_url: Optional[str],
+) -> Dict[str, Any]:
+    publish_job_id = await _insert_publish_job(
+        user_id=user_id,
+        platform=platform_name,
+        external_id="n/a",
+        status="queued",
+        priority=publish_priority,
+    )
+    try:
+        await _update_publish_job_status(publish_job_id, "processing")
+        account = await _get_social_account(user_id, platform_name)
+        if not account:
+            raise HTTPException(status_code=404, detail=f"No connected {platform_name} account found")
+
+        publish_payload = PublishRequest(
+            user_id=user_id,
+            title="Vireel",
+            description=text_value,
+            text=text_value,
+            caption=text_value,
+            image_url=image_url,
+        )
+        platform_result = await publish_post(account, publish_payload)
+        external_id = str(platform_result.get("publish_id") or platform_result.get("id") or "n/a")
+        post_url = _build_social_post_url(platform_name, platform_result)
+        await _update_publish_job_status(publish_job_id, "done", external_id=external_id, post_url=post_url)
+        return {
+            "success": True,
+            "result": platform_result,
+            "publish_job_id": publish_job_id,
+        }
+    except Exception as exc:
+        err_msg = str(exc)
+        await _update_publish_job_status(publish_job_id, "failed", error_message=err_msg)
+        return {
+            "success": False,
+            "error": err_msg,
+            "publish_job_id": publish_job_id,
+        }
+
+
+@app.post("/api/anonymous-stories/{story_id}/publish", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
+async def publish_anonymous_story_endpoint(
+    story_id: str, payload: AnonymousStoryPublishRequest, user_id: Annotated[str, Depends(get_user_id_header)],
+):
+    if not ANONYMOUS_STORIES_ENABLED:
+        raise HTTPException(status_code=404, detail="Anonymous stories are not enabled on this deployment.")
+
+    await _assert_user_has_required_credits(user_id, 0.0)
+
+    row = await supabase_get_anonymous_story(story_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=_STORY_NOT_FOUND)
+
+    text_value = str(row.get("final_text") or "").strip()
+    if not text_value:
+        raise HTTPException(status_code=400, detail="Story has no generated text to publish yet")
+
+    selected_platforms = _resolve_anonymous_story_platforms(payload.platforms)
+    publish_priority = await _resolve_user_job_priority(user_id)
+    scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
+    if payload.scheduled_date and not scheduled_for:
+        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
+    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
+
+    background_preset = anonymous_stories.get_background_preset(payload.background_id)
+    image_url = await _render_and_upload_story_background(user_id, story_id, text_value, background_preset["id"])
+
+    results: Dict[str, Any] = {}
+    overall_success = True
+    for platform_name in selected_platforms:
+        if is_scheduled:
+            results[platform_name] = await _schedule_share_publish_job(
+                user_id, platform_name, "anonymous_story", story_id, publish_priority,
+                scheduled_for, payload.timezone, str(row.get("title") or "Vireel"), text_value, "",
+                image_url=image_url,
+            )
+            continue
+
+        result = await _publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, image_url)
+        results[platform_name] = result
+        if not result["success"]:
+            overall_success = False
+
+    if not is_scheduled:
+        await _debit_publish_credits_after_share(user_id, story_id, results)
+
+    return {
+        "success": overall_success,
+        "results": results,
+        "background_id": background_preset["id"],
+        "scheduled": is_scheduled,
+    }
+
+
 async def _schedule_share_publish_job(
     user_id: str, platform_name: str, source_type: str, source_id: str, publish_priority: int,
     scheduled_for, timezone: Optional[str], final_title: str, final_description: str, media_url: str,
+    image_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     publish_job_id = await _insert_publish_job(
         user_id=user_id,
@@ -8506,6 +8665,7 @@ async def _schedule_share_publish_job(
             "title": final_title,
             "description": final_description,
             "media_url": media_url,
+            "image_url": image_url,
         },
     )
     return {
@@ -9398,19 +9558,34 @@ async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
         if not account:
             raise HTTPException(status_code=404, detail=f"No connected {platform} account found")
 
-        media_url = str(task_payload.get("media_url") or "").strip()
-        if not media_url:
-            raise HTTPException(status_code=400, detail="No media URL available for scheduled publish")
-
         description = str(task_payload.get("description") or "")
-        publish_payload = PublishRequest(
-            user_id=user_id,
-            title=str(task_payload.get("title") or "Vireel"),
-            description=description,
-            text=description,
-            caption=description,
-            video_url=media_url,
-        )
+        source_type = str(task_payload.get("source_type") or "")
+
+        if source_type == "anonymous_story":
+            # No video for a story publish -- text plus a rendered
+            # background image (see _render_and_upload_story_background),
+            # so this skips the video-based media_url requirement below.
+            publish_payload = PublishRequest(
+                user_id=user_id,
+                title=str(task_payload.get("title") or "Vireel"),
+                description=description,
+                text=description,
+                caption=description,
+                image_url=task_payload.get("image_url") or None,
+            )
+        else:
+            media_url = str(task_payload.get("media_url") or "").strip()
+            if not media_url:
+                raise HTTPException(status_code=400, detail="No media URL available for scheduled publish")
+
+            publish_payload = PublishRequest(
+                user_id=user_id,
+                title=str(task_payload.get("title") or "Vireel"),
+                description=description,
+                text=description,
+                caption=description,
+                video_url=media_url,
+            )
 
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
@@ -10195,6 +10370,7 @@ class PublishRequest(BaseModel):
     description: Optional[str] = None
     video_url: Optional[str] = None
     video_file: Optional[str] = None
+    image_url: Optional[str] = None
     privacy_level: Optional[str] = "PUBLIC_TO_EVERYONE"
 
 
@@ -10549,6 +10725,21 @@ async def publish_to_facebook_video(access_token: str, target_id: str, video_url
     return {"id": response.json().get("id")}
 
 
+async def publish_to_facebook_photo(access_token: str, target_id: str, image_url: str, message: str):
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Connected Facebook target id is missing")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Facebook page access token expired or missing")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"https://graph.facebook.com/v19.0/{target_id}/photos",
+            data={"url": image_url, "caption": message, "access_token": access_token},
+        )
+    await _raise_for_status_or_502(response, "Facebook")
+    return response.json()
+
+
 async def publish_to_facebook_page(page_id: str, page_access_token: str, message: str):
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
@@ -10773,6 +10964,56 @@ async def _li_finalize_upload(access_token: str, video_urn: str, upload_token: s
     await _raise_for_status_or_502(finalize_response, "LinkedIn")
 
 
+async def _li_initialize_image_upload(access_token: str, owner_urn: str):
+    """Renvoie (image_urn, upload_url)."""
+    init_payload = {"initializeUploadRequest": {"owner": owner_urn}}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        init_response = await client.post(
+            "https://api.linkedin.com/rest/images?action=initializeUpload",
+            headers=_linkedin_headers(access_token),
+            json=init_payload,
+        )
+    await _raise_for_status_or_502(init_response, "LinkedIn")
+
+    init_data = (init_response.json() or {}).get("value") or {}
+    image_urn = init_data.get("image")
+    upload_url = init_data.get("uploadUrl")
+    if not image_urn or not upload_url:
+        raise HTTPException(status_code=502, detail="LinkedIn initializeUpload response missing image urn or upload url")
+    return image_urn, upload_url
+
+
+async def publish_to_linkedin_image(access_token: str, owner_urn: str, image_url: str, description: str) -> Dict[str, Any]:
+    """
+    Publie une image sur LinkedIn via la Images API actuelle :
+    1. Téléchargement local de l'image (image_url) avec validation anti-SSRF.
+    2. initializeUpload -> URN image + URL d'upload.
+    3. PUT du fichier vers l'URL d'upload.
+    4. Création du post via /rest/posts (Posts API) référençant l'URN image.
+    """
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    temp_path = os.path.join(UPLOAD_DIR, f"li_publish_{uuid.uuid4().hex}.png")
+    await _download_to_file(image_url, temp_path)
+
+    try:
+        image_urn, upload_url = await _li_initialize_image_upload(access_token, owner_urn)
+        async with aiofiles.open(temp_path, "rb") as file_handle:
+            image_bytes = await file_handle.read()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            upload_response = await client.put(
+                upload_url, headers={"Content-Type": "application/octet-stream"}, content=image_bytes,
+            )
+        upload_response.raise_for_status()
+
+        post_result = await _create_linkedin_post(
+            token=access_token, owner_urn=owner_urn, commentary=description, media={"id": image_urn},
+        )
+        post_result["image_urn"] = image_urn
+        return post_result
+    finally:
+        _cleanup_temp_file(temp_path)
+
+
 async def publish_to_linkedin_video(access_token: str, owner_urn: str, video_url: str, title: str, description: str) -> Dict[str, Any]:
     """
     Publie une vidéo sur LinkedIn via la Videos API actuelle :
@@ -10825,6 +11066,7 @@ async def _publish_video_then_text_fallback(has_video: bool, video_publisher, te
 async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
     _require_platform_user_id(account, "LinkedIn")
     owner_urn = f"urn:li:person:{account.get('platform_user_id')}"
+    image_url = getattr(content, "image_url", None)
 
     async def video_publisher():
         return await publish_to_linkedin_video(
@@ -10835,11 +11077,17 @@ async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_v
     async def text_publisher():
         return await _create_linkedin_post(token=token, owner_urn=owner_urn, commentary=text_value)
 
+    if not content.video_url and image_url:
+        return await publish_to_linkedin_image(
+            access_token=token, owner_urn=owner_urn, image_url=image_url, description=text_value,
+        )
+
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
 
 
 async def _publish_facebook(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
     _require_platform_user_id(account, "Facebook")
+    image_url = getattr(content, "image_url", None)
 
     async def video_publisher():
         return await publish_to_facebook_video(
@@ -10856,6 +11104,12 @@ async def _publish_facebook(account: Dict[str, Any], token: str, content, text_v
             )
         await _raise_for_status_or_502(response, "Facebook")
         return response.json()
+
+    if not content.video_url and image_url:
+        return await publish_to_facebook_photo(
+            access_token=token, target_id=str(account.get("platform_user_id") or ""),
+            image_url=image_url, message=text_value,
+        )
 
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
 
