@@ -43,6 +43,23 @@ export function buildFullText(hook, introduction, story, questions) {
 const STORY_STAGE_ORDER = ["transcription", "generation", "finalization"];
 
 /**
+ * State of a single step given the job's overall status, which stage index
+ * is currently reported (-1 when none has been reported yet), and this
+ * step's own index. Pulled out of buildAnonymousStoryProcessSteps (and
+ * flattened to early returns) to keep cognitive complexity low -- a nested
+ * closure with the same branching counts every branch twice (once for its
+ * own nesting, once for being inside the outer function).
+ */
+function resolveStoryStepState(status, stageIndex, index) {
+    if (status === "complete") return "done";
+    if (index < stageIndex) return "done";
+
+    const isCurrentStep = index === stageIndex || (stageIndex === -1 && index === 0);
+    if (!isCurrentStep) return "pending";
+    return status === "error" ? "error" : "active";
+}
+
+/**
  * Build the step list for the "Suivi du processus" progress card, in the
  * same shape/visual role as App.jsx's buildProcessingSteps for reels
  * (label + description + state per step) so both features present
@@ -50,19 +67,7 @@ const STORY_STAGE_ORDER = ["transcription", "generation", "finalization"];
  */
 export function buildAnonymousStoryProcessSteps({ status, currentStep, t }) {
     const stageIndex = STORY_STAGE_ORDER.indexOf(currentStep);
-
-    const stateFor = (index) => {
-        if (status === "complete") return "done";
-        if (status === "error") {
-            if (stageIndex === -1) return index === 0 ? "error" : "pending";
-            if (index < stageIndex) return "done";
-            return index === stageIndex ? "error" : "pending";
-        }
-        // processing (or idle, defensively)
-        if (stageIndex === -1) return index === 0 ? "active" : "pending";
-        if (index < stageIndex) return "done";
-        return index === stageIndex ? "active" : "pending";
-    };
+    const stateFor = (index) => resolveStoryStepState(status, stageIndex, index);
 
     return [
         {
