@@ -2303,8 +2303,10 @@ def test_publish_facebook_still_falls_back_to_video_when_video_url_set(monkeypat
 
 def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requirement(monkeypatch):
     # Reel/caption scheduled jobs require a media_url (video); an anonymous
-    # story scheduled job carries text + a rendered background image_url
-    # instead, so _execute_scheduled_publish_job must not reject it for
+    # story scheduled job carries text + a background_id instead, rendered
+    # fresh right when the job fires (see
+    # test_execute_scheduled_publish_job_anonymous_story_renders_background_at_fire_time
+    # for that), so _execute_scheduled_publish_job must not reject it for
     # lacking media_url.
     app = _import_app_with_stubs(monkeypatch)
 
@@ -2317,7 +2319,7 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
             "source_id": "story-1",
             "title": "Une histoire",
             "description": "Le texte complet de l'histoire.",
-            "image_url": "https://example.com/bg.png",
+            "background_id": "sunset",
         },
     }
 
@@ -2328,6 +2330,9 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
 
     async def fake_get_social_account(user_id, platform):
         return {"id": "acct-1", "platform_user_id": "page-1"}
+
+    async def fake_resolve_story_publish_image(user_id, story_id, text, background_id):
+        return "https://example.com/bg.png"
 
     published_payloads = []
 
@@ -2340,6 +2345,7 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
 
     monkeypatch.setattr(app, "_update_publish_job_status", fake_update_publish_job_status)
     monkeypatch.setattr(app, "_get_social_account", fake_get_social_account)
+    monkeypatch.setattr(app, "_resolve_story_publish_image", fake_resolve_story_publish_image)
     monkeypatch.setattr(app, "publish_post", fake_publish_post)
     monkeypatch.setattr(app, "_debit_scheduled_publish_credits", fake_debit_scheduled_publish_credits)
 
@@ -2350,6 +2356,79 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
     assert published_payloads[0].image_url == "https://example.com/bg.png"
     assert published_payloads[0].description == "Le texte complet de l'histoire."
     assert ("job-1", "done", {"external_id": "111_222", "post_url": "https://www.facebook.com/111_222", "error_message": None}) in status_calls
+
+
+def test_execute_scheduled_publish_job_anonymous_story_renders_background_at_fire_time(monkeypatch):
+    # The whole point of deferring rendering to fire time: this pins that
+    # _build_scheduled_publish_payload calls _resolve_story_publish_image
+    # (not some cached/pre-rendered URL) with the story id/text/background
+    # carried in the job payload, right when the job executes.
+    app = _import_app_with_stubs(monkeypatch)
+
+    job_row = {
+        "id": "job-2",
+        "user_id": "user-1",
+        "platform": "linkedin",
+        "payload": {
+            "source_type": "anonymous_story",
+            "source_id": "story-42",
+            "title": "Une histoire",
+            "description": "Texte de l'histoire.",
+            "background_id": "forest",
+        },
+    }
+
+    calls = []
+
+    async def fake_resolve_story_publish_image(user_id, story_id, text, background_id):
+        calls.append((user_id, story_id, text, background_id))
+        return "https://example.com/fresh-bg.png"
+
+    async def fake_get_social_account(user_id, platform):
+        return {"id": "acct-1", "platform_user_id": "person-1"}
+
+    async def fake_publish_post(account, content):
+        return {"id": "urn:li:share:1"}
+
+    monkeypatch.setattr(app, "_resolve_story_publish_image", fake_resolve_story_publish_image)
+    monkeypatch.setattr(app, "_get_social_account", fake_get_social_account)
+    monkeypatch.setattr(app, "_update_publish_job_status", AsyncMock())
+    monkeypatch.setattr(app, "publish_post", fake_publish_post)
+    monkeypatch.setattr(app, "_debit_scheduled_publish_credits", AsyncMock())
+
+    asyncio.run(app._execute_scheduled_publish_job(job_row))
+
+    assert calls == [("user-1", "story-42", "Texte de l'histoire.", "forest")]
+
+
+def test_resolve_story_publish_image_returns_none_for_no_background(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    render_calls = []
+
+    async def fake_render_and_upload_story_background(user_id, story_id, text, background_id):
+        render_calls.append((user_id, story_id, text, background_id))
+        return "https://example.com/bg.png"
+
+    monkeypatch.setattr(app, "_render_and_upload_story_background", fake_render_and_upload_story_background)
+
+    result = asyncio.run(app._resolve_story_publish_image("user-1", "story-1", "text", app.anonymous_stories.NO_BACKGROUND_ID))
+
+    assert result is None
+    assert render_calls == []
+
+
+def test_resolve_story_publish_image_renders_for_a_real_background(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    async def fake_render_and_upload_story_background(user_id, story_id, text, background_id):
+        return f"https://example.com/{background_id}.png"
+
+    monkeypatch.setattr(app, "_render_and_upload_story_background", fake_render_and_upload_story_background)
+
+    result = asyncio.run(app._resolve_story_publish_image("user-1", "story-1", "text", "sunset"))
+
+    assert result == "https://example.com/sunset.png"
 
 
 def test_anonymous_stories_backgrounds_route_registered_before_story_id_route(monkeypatch):
@@ -2374,6 +2453,23 @@ def test_anonymous_stories_backgrounds_route_registered_before_story_id_route(mo
     items = response.json()["items"]
     assert len(items) > 0
     assert all("id" in item and "colors" in item for item in items)
+
+
+def test_anonymous_stories_backgrounds_includes_no_background_option_last(monkeypatch):
+    # "rajouter ... une option sans background": the listing must offer a
+    # text-only choice alongside the color presets, appended last so the
+    # frontend's "default to items[0]" logic still lands on a color.
+    app = _import_app_with_stubs(monkeypatch)
+
+    client = TestClient(app.app)
+    response = client.get("/api/anonymous-stories/backgrounds", headers=_auth_headers("user-1"))
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert items[-1]["id"] == app.anonymous_stories.NO_BACKGROUND_ID
+    assert items[0]["id"] != app.anonymous_stories.NO_BACKGROUND_ID
+    preset_ids = {item["id"] for item in items[:-1]}
+    assert preset_ids == {preset["id"] for preset in app.anonymous_stories.BACKGROUND_PRESETS}
 
 
 def test_publish_to_facebook_photo_uploads_bytes_via_multipart(monkeypatch):

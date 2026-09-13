@@ -298,6 +298,20 @@ def test_background_presets_are_well_formed():
         assert preset["text_color"].startswith("#")
 
 
+def test_background_presets_offer_a_real_choice():
+    # The user explicitly asked for more variety ("rajouter encore d'autres
+    # background") beyond the original 6.
+    assert len(stories.BACKGROUND_PRESETS) >= 10
+
+
+def test_no_background_id_is_not_a_real_preset():
+    # NO_BACKGROUND_ID is a sentinel meaning "text-only post" -- it must
+    # never collide with an actual preset id, or get_background_preset
+    # would treat "no background" as a request for that color.
+    preset_ids = {preset["id"] for preset in stories.BACKGROUND_PRESETS}
+    assert stories.NO_BACKGROUND_ID not in preset_ids
+
+
 def test_render_story_background_image_produces_a_valid_png():
     from PIL import Image
     import io
