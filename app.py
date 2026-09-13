@@ -154,6 +154,7 @@ _SUPABASE_NOT_CONFIGURED = "Supabase is not configured"
 _CAPTION_NOT_FOUND = "Caption not found"
 _STORY_NOT_FOUND = "Anonymous story not found"
 _STORIES_PREFIX = "anonymous_stories/"
+_ANONYMOUS_STORIES_DISABLED = "Anonymous stories are not enabled on this deployment."
 _SUPABASE_PROJECTS_NOT_CONFIGURED = "Supabase projects is not configured"
 _PROJECT_NOT_FOUND = "Project not found"
 _REEL_NOT_FOUND = "Reel not found"
@@ -8050,7 +8051,55 @@ async def _create_anonymous_story_endpoint_project(
         return None
 
 
-@app.post("/api/anonymous-stories", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
+async def _resolve_anonymous_story_source(
+    file: Optional[UploadFile], url: Optional[str], output_dir: str,
+) -> Dict[str, Any]:
+    """Resolve the story's source video -- uploaded file or YouTube link --
+    into a uniform shape. Pulled out of create_anonymous_story to keep that
+    endpoint's cognitive complexity down: this file-vs-YouTube branch
+    (including its nested try/except) was most of it."""
+    if file:
+        _validate_video_extension(file.filename if file else "", context_label="histoire anonyme")
+        source_name = os.path.basename(str(file.filename or "story_source.mp4"))
+        input_path = os.path.join(output_dir, f"story_input_{int(time.time())}_{source_name}")
+        limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
+        size_bytes = await _save_caption_upload_file(file, input_path, limit_bytes)
+        return {
+            "input_path": input_path,
+            "source_name": source_name,
+            "size_bytes": size_bytes,
+            "source_type": anonymous_stories.AnonymousStorySourceType.UPLOAD,
+            "source_url_value": None,
+            "story_title": _project_name_from_uploaded_file(source_name),
+        }
+
+    if not _is_youtube_url(url):
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="Only YouTube links are supported for anonymous stories in V1.")
+
+    try:
+        youtube_source = await asyncio.to_thread(anonymous_stories.download_youtube_source, url, output_dir)
+        input_path = youtube_source["path"]
+    except Exception as exc:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="Le lien YouTube n'est pas valide ou ne peut pas etre traite.") from exc
+
+    try:
+        size_bytes = os.path.getsize(input_path)
+    except OSError:
+        size_bytes = 0
+
+    return {
+        "input_path": input_path,
+        "source_name": "youtube_source.mp4",
+        "size_bytes": size_bytes,
+        "source_type": anonymous_stories.AnonymousStorySourceType.YOUTUBE,
+        "source_url_value": url,
+        "story_title": youtube_source.get("title") or "Temoignage YouTube",
+    }
+
+
+@app.post("/api/anonymous-stories", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 403: {"description": "Forbidden"}, 404: {"description": "Not Found"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
 async def create_anonymous_story(
     request: Request,
     user_id: Annotated[str, Depends(get_user_id_header)],
@@ -8059,7 +8108,7 @@ async def create_anonymous_story(
     acknowledged: Annotated[Optional[str], Form()] = None,
 ):
     if not ANONYMOUS_STORIES_ENABLED:
-        raise HTTPException(status_code=404, detail="Anonymous stories are not enabled on this deployment.")
+        raise HTTPException(status_code=404, detail=_ANONYMOUS_STORIES_DISABLED)
 
     url, ack_flag = await _resolve_process_endpoint_url_and_ack(request, url, acknowledged)
     _validate_process_endpoint_inputs(url, file, ack_flag)
@@ -8071,33 +8120,13 @@ async def create_anonymous_story(
     output_dir = os.path.join(OUTPUT_DIR, story_job_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    if file:
-        _validate_video_extension(file.filename if file else "", context_label="histoire anonyme")
-        source_name = os.path.basename(str(file.filename or "story_source.mp4"))
-        input_path = os.path.join(output_dir, f"story_input_{int(time.time())}_{source_name}")
-        limit_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
-        size_bytes = await _save_caption_upload_file(file, input_path, limit_bytes)
-        source_type = anonymous_stories.AnonymousStorySourceType.UPLOAD
-        source_url_value = None
-        story_title = _project_name_from_uploaded_file(source_name)
-    else:
-        if not _is_youtube_url(url):
-            shutil.rmtree(output_dir, ignore_errors=True)
-            raise HTTPException(status_code=400, detail="Only YouTube links are supported for anonymous stories in V1.")
-        source_name = "youtube_source.mp4"
-        try:
-            youtube_source = await asyncio.to_thread(anonymous_stories.download_youtube_source, url, output_dir)
-            input_path = youtube_source["path"]
-        except Exception as exc:
-            shutil.rmtree(output_dir, ignore_errors=True)
-            raise HTTPException(status_code=400, detail="Le lien YouTube n'est pas valide ou ne peut pas etre traite.") from exc
-        try:
-            size_bytes = os.path.getsize(input_path)
-        except OSError:
-            size_bytes = 0
-        source_type = anonymous_stories.AnonymousStorySourceType.YOUTUBE
-        source_url_value = url
-        story_title = youtube_source.get("title") or "Temoignage YouTube"
+    source = await _resolve_anonymous_story_source(file, url, output_dir)
+    input_path = source["input_path"]
+    source_name = source["source_name"]
+    size_bytes = source["size_bytes"]
+    source_type = source["source_type"]
+    source_url_value = source["source_url_value"]
+    story_title = source["story_title"]
 
     local_duration = _probe_local_video_duration_seconds(input_path)
     _validate_caption_source_constraints(duration_seconds=local_duration, size_bytes=float(size_bytes), source_label="fichier")
@@ -8154,7 +8183,6 @@ async def create_anonymous_story(
         project_id=project_id,
         source_s3_key=source_s3_key,
         input_path=input_path,
-        source_name=source_name,
         output_dir=output_dir,
         local_duration=local_duration,
         size_bytes=float(size_bytes),
@@ -8170,7 +8198,7 @@ async def create_anonymous_story(
 
 
 async def _mark_anonymous_story_job_failed(
-    job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], error_code: str, error_message: str,
+    user_id: str, story_id: Optional[str], project_id: Optional[str], error_code: str, error_message: str,
 ) -> None:
     if story_id and is_supabase_configured():
         await supabase_update_anonymous_story(story_id, user_id, {
@@ -8187,23 +8215,23 @@ async def _mark_anonymous_story_job_failed(
 
 async def _run_anonymous_story_job(
     job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], source_s3_key: Optional[str],
-    input_path: str, source_name: str, output_dir: str, local_duration: float, size_bytes: float,
+    input_path: str, output_dir: str, local_duration: float, size_bytes: float,
     story_required_credits: float,
 ) -> None:
     try:
         await reel_job_manager.start_job(job_id)
         await _run_anonymous_story_pipeline_stages(
-            job_id, user_id, story_id, project_id, source_s3_key, input_path, source_name,
+            job_id, user_id, story_id, project_id, source_s3_key, input_path,
             local_duration, size_bytes, story_required_credits,
         )
     except anonymous_stories.StoryValidationError as exc:
         await reel_job_manager.fail_job(job_id, str(exc), error_code=exc.code)
-        await _mark_anonymous_story_job_failed(job_id, user_id, story_id, project_id, exc.code, str(exc))
+        await _mark_anonymous_story_job_failed(user_id, story_id, project_id, exc.code, str(exc))
         await reel_job_manager.refund_reservation(job_id, user_id, story_required_credits, operation_type=anonymous_stories.CREDIT_OPERATION_TYPE)
     except Exception as exc:  # noqa: BLE001 -- any unexpected failure must still fail the job and refund the user
         logger.exception(f"Anonymous story job {job_id} failed")
         await reel_job_manager.fail_job(job_id, "Technical failure while generating the story", error_code="GENERATION_INVALID")
-        await _mark_anonymous_story_job_failed(job_id, user_id, story_id, project_id, "GENERATION_INVALID", str(exc))
+        await _mark_anonymous_story_job_failed(user_id, story_id, project_id, "GENERATION_INVALID", str(exc))
         await reel_job_manager.refund_reservation(job_id, user_id, story_required_credits, operation_type=anonymous_stories.CREDIT_OPERATION_TYPE)
     finally:
         if os.path.exists(output_dir):
@@ -8212,7 +8240,7 @@ async def _run_anonymous_story_job(
 
 async def _run_anonymous_story_pipeline_stages(
     job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], source_s3_key: Optional[str],
-    input_path: str, source_name: str, local_duration: float, size_bytes: float, story_required_credits: float,
+    input_path: str, local_duration: float, size_bytes: float, story_required_credits: float,
 ) -> None:
     if story_id and is_supabase_configured():
         await supabase_update_anonymous_story(story_id, user_id, {
@@ -8275,6 +8303,55 @@ def _build_story_cost_breakdown(duration_seconds: float, size_bytes: float, usag
     return calculate_credits_for_operation(breakdown)
 
 
+async def _settle_anonymous_story_row(
+    job_id: str, user_id: str, story_id: str, source_s3_key: Optional[str], story_content: Dict[str, Any],
+    cost_breakdown: Dict[str, Any], final_credits: float, story_required_credits: float,
+    generated_title: str, now_iso: str,
+) -> None:
+    story_updates: Dict[str, Any] = {
+        "status": anonymous_stories.AnonymousStoryStatus.COMPLETED,
+        "stage": anonymous_stories.AnonymousStoryStage.FINALIZATION,
+        "source_s3_key": source_s3_key,
+        "generated_content": story_content,
+        "edited_content": story_content,
+        "final_text": story_content.get("full_text", ""),
+        "billing_details": cost_breakdown,
+        "total_cost_usd": cost_breakdown.get("total_usd", 0.0),
+        "completed_at": now_iso,
+    }
+    if generated_title:
+        story_updates["title"] = generated_title
+    await supabase_update_anonymous_story(story_id, user_id, story_updates)
+
+    if not user_id:
+        return
+    debit_ok = await reel_job_manager.debit_credits_for_job(
+        job_id=job_id,
+        user_id=user_id,
+        credits=final_credits,
+        operation_type=anonymous_stories.CREDIT_OPERATION_TYPE,
+        reserved_credits=story_required_credits,
+    )
+    if not debit_ok:
+        logger.warning(f"Insufficient balance to settle anonymous story job {job_id}")
+
+
+async def _settle_anonymous_story_project(
+    project_id: str, user_id: str, story_content: Dict[str, Any], generated_title: str,
+) -> None:
+    try:
+        await supabase_update_project_status(project_id, "completed", user_id=user_id)
+        project_updates: Dict[str, Any] = {
+            "description": _build_short_project_summary(story_content.get("hook") or story_content.get("story") or ""),
+            "output_count": 1,
+        }
+        if generated_title:
+            project_updates["name"] = generated_title
+        await supabase_update_project(project_id, user_id, project_updates)
+    except Exception as e:
+        logger.warning(f"Failed to mark project {project_id} completed: {str(e)}")
+
+
 async def _finalize_anonymous_story_job(
     job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], source_s3_key: Optional[str],
     local_duration: float, size_bytes: float, story_required_credits: float,
@@ -8297,43 +8374,13 @@ async def _finalize_anonymous_story_job(
     generated_title = str(story_content.get("title") or "").strip()
 
     if story_id and is_supabase_configured():
-        story_updates: Dict[str, Any] = {
-            "status": anonymous_stories.AnonymousStoryStatus.COMPLETED,
-            "stage": anonymous_stories.AnonymousStoryStage.FINALIZATION,
-            "source_s3_key": source_s3_key,
-            "generated_content": story_content,
-            "edited_content": story_content,
-            "final_text": story_content.get("full_text", ""),
-            "billing_details": cost_breakdown,
-            "total_cost_usd": cost_breakdown.get("total_usd", 0.0),
-            "completed_at": now_iso,
-        }
-        if generated_title:
-            story_updates["title"] = generated_title
-        await supabase_update_anonymous_story(story_id, user_id, story_updates)
-        if user_id:
-            debit_ok = await reel_job_manager.debit_credits_for_job(
-                job_id=job_id,
-                user_id=user_id,
-                credits=final_credits,
-                operation_type=anonymous_stories.CREDIT_OPERATION_TYPE,
-                reserved_credits=story_required_credits,
-            )
-            if not debit_ok:
-                logger.warning(f"Insufficient balance to settle anonymous story job {job_id}")
+        await _settle_anonymous_story_row(
+            job_id, user_id, story_id, source_s3_key, story_content, cost_breakdown,
+            final_credits, story_required_credits, generated_title, now_iso,
+        )
 
     if project_id and is_supabase_configured():
-        try:
-            await supabase_update_project_status(project_id, "completed", user_id=user_id)
-            project_updates: Dict[str, Any] = {
-                "description": _build_short_project_summary(story_content.get("hook") or story_content.get("story") or ""),
-                "output_count": 1,
-            }
-            if generated_title:
-                project_updates["name"] = generated_title
-            await supabase_update_project(project_id, user_id, project_updates)
-        except Exception as e:
-            logger.warning(f"Failed to mark project {project_id} completed: {str(e)}")
+        await _settle_anonymous_story_project(project_id, user_id, story_content, generated_title)
 
     await reel_job_manager.complete_job(
         job_id,
@@ -8428,10 +8475,10 @@ async def delete_anonymous_story_endpoint(story_id: str, user_id: Annotated[str,
     return {"deleted": True}
 
 
-@app.post("/api/anonymous-stories/{story_id}/regenerate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}})
+@app.post("/api/anonymous-stories/{story_id}/regenerate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 429: {"description": "Too Many Requests"}})
 async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     if not ANONYMOUS_STORIES_ENABLED:
-        raise HTTPException(status_code=404, detail="Anonymous stories are not enabled on this deployment.")
+        raise HTTPException(status_code=404, detail=_ANONYMOUS_STORIES_DISABLED)
 
     row = await supabase_get_anonymous_story(story_id, user_id)
     if not row:
@@ -8597,7 +8644,7 @@ async def publish_anonymous_story_endpoint(
     story_id: str, payload: AnonymousStoryPublishRequest, user_id: Annotated[str, Depends(get_user_id_header)],
 ):
     if not ANONYMOUS_STORIES_ENABLED:
-        raise HTTPException(status_code=404, detail="Anonymous stories are not enabled on this deployment.")
+        raise HTTPException(status_code=404, detail=_ANONYMOUS_STORIES_DISABLED)
 
     await _assert_user_has_required_credits(user_id, 0.0)
 
@@ -9541,6 +9588,31 @@ async def _debit_scheduled_publish_credits(user_id: str, task_payload: Dict[str,
     )
 
 
+def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str, Any]) -> "PublishRequest":
+    """Build the PublishRequest for a due scheduled publish job. Pulled out
+    of _execute_scheduled_publish_job to keep its cognitive complexity down:
+    a story publish (text + rendered background image, no media_url
+    requirement) and a reel/caption publish (video_url required) need
+    different shapes here."""
+    description = str(task_payload.get("description") or "")
+    title = str(task_payload.get("title") or "Vireel")
+
+    if str(task_payload.get("source_type") or "") == "anonymous_story":
+        return PublishRequest(
+            user_id=user_id, title=title, description=description, text=description,
+            caption=description, image_url=task_payload.get("image_url") or None,
+        )
+
+    media_url = str(task_payload.get("media_url") or "").strip()
+    if not media_url:
+        raise HTTPException(status_code=400, detail="No media URL available for scheduled publish")
+
+    return PublishRequest(
+        user_id=user_id, title=title, description=description, text=description,
+        caption=description, video_url=media_url,
+    )
+
+
 async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
     job_id = str(job_row.get("id") or "")
     user_id = str(job_row.get("user_id") or "")
@@ -9558,34 +9630,7 @@ async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
         if not account:
             raise HTTPException(status_code=404, detail=f"No connected {platform} account found")
 
-        description = str(task_payload.get("description") or "")
-        source_type = str(task_payload.get("source_type") or "")
-
-        if source_type == "anonymous_story":
-            # No video for a story publish -- text plus a rendered
-            # background image (see _render_and_upload_story_background),
-            # so this skips the video-based media_url requirement below.
-            publish_payload = PublishRequest(
-                user_id=user_id,
-                title=str(task_payload.get("title") or "Vireel"),
-                description=description,
-                text=description,
-                caption=description,
-                image_url=task_payload.get("image_url") or None,
-            )
-        else:
-            media_url = str(task_payload.get("media_url") or "").strip()
-            if not media_url:
-                raise HTTPException(status_code=400, detail="No media URL available for scheduled publish")
-
-            publish_payload = PublishRequest(
-                user_id=user_id,
-                title=str(task_payload.get("title") or "Vireel"),
-                description=description,
-                text=description,
-                caption=description,
-                video_url=media_url,
-            )
+        publish_payload = _build_scheduled_publish_payload(user_id, task_payload)
 
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")

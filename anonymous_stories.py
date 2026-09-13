@@ -99,6 +99,28 @@ def build_final_text(content: Dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+def _normalize_generated_story_fields(raw: Dict[str, Any], story: str, questions: List[Any]) -> Dict[str, Any]:
+    """Build the normalized story dict once the raw AI payload has passed
+    all validation checks. Pulled out of validate_generated_story_payload
+    to keep its cognitive complexity down."""
+    normalized = {
+        "is_story": True,
+        "confidence": _safe_float(raw.get("confidence")),
+        "has_personal_experience": bool(raw.get("has_personal_experience")),
+        "hook": str(raw.get("hook") or "").strip(),
+        "introduction": str(raw.get("introduction") or "").strip(),
+        "story": story,
+        "questions": [str(q).strip() for q in questions if str(q).strip()],
+        "title": str(raw.get("title") or "").strip()[:200],
+    }
+    normalized["full_text"] = build_final_text(normalized)
+    if not normalized["full_text"]:
+        raise StoryValidationError(AnonymousStoryErrorCode.GENERATION_INVALID, "final_text is empty")
+    if not normalized["title"]:
+        normalized["title"] = derive_fallback_title(normalized)
+    return normalized
+
+
 def validate_generated_story_payload(raw: Any) -> Dict[str, Any]:
     """Validate and normalize the AI's JSON output against the schema from
     spec section 8.1. Raises StoryValidationError -- never returns
@@ -126,22 +148,7 @@ def validate_generated_story_payload(raw: Any) -> Dict[str, Any]:
     if not story:
         raise StoryValidationError(AnonymousStoryErrorCode.GENERATION_INVALID, "Empty story body")
 
-    normalized = {
-        "is_story": True,
-        "confidence": _safe_float(raw.get("confidence")),
-        "has_personal_experience": bool(raw.get("has_personal_experience")),
-        "hook": str(raw.get("hook") or "").strip(),
-        "introduction": str(raw.get("introduction") or "").strip(),
-        "story": story,
-        "questions": [str(q).strip() for q in questions if str(q).strip()],
-        "title": str(raw.get("title") or "").strip()[:200],
-    }
-    normalized["full_text"] = build_final_text(normalized)
-    if not normalized["full_text"]:
-        raise StoryValidationError(AnonymousStoryErrorCode.GENERATION_INVALID, "final_text is empty")
-    if not normalized["title"]:
-        normalized["title"] = derive_fallback_title(normalized)
-    return normalized
+    return _normalize_generated_story_fields(raw, story, questions)
 
 
 def derive_fallback_title(content: Dict[str, Any]) -> str:
@@ -447,22 +454,13 @@ def _wrap_text_lines(text: str, font, max_width: int, draw) -> List[str]:
     return lines
 
 
-def render_story_background_image(text: str, preset: Dict[str, Any], size: tuple = (1080, 1080)) -> bytes:
-    """Render `text` centered over a preset colored/gradient background,
-    returning PNG bytes. Shrinks the font until the wrapped text fits the
-    canvas so long stories still render legibly."""
-    width, height = size
-    padding = int(width * 0.1)
-    max_text_width = width - (2 * padding)
-    max_text_height = height - (2 * padding)
-
-    excerpt = (text or "").strip()
-    if len(excerpt) > 600:
-        excerpt = excerpt[:597].rstrip() + "..."
-
-    img = _render_gradient_background(size, preset.get("colors") or ["#0f2027"])
-    draw = ImageDraw.Draw(img)
-
+def _fit_story_text_to_canvas(excerpt: str, width: int, max_text_width: int, max_text_height: int, draw) -> tuple:
+    """Shrink the font (starting from ~5.5% of the canvas width) until the
+    wrapped text fits within max_text_height. Pulled out of
+    render_story_background_image to keep its cognitive complexity down --
+    this loop (with its nested try/except and per-line measurement) was
+    most of it. Returns (font, font_size, lines, line_heights, line_spacing,
+    total_height)."""
     font_size = int(width * 0.055)
     font = None
     lines: List[str] = []
@@ -487,6 +485,29 @@ def render_story_background_image(text: str, preset: Dict[str, Any], size: tuple
         if total_height <= max_text_height or font_size <= 20:
             break
         font_size -= 4
+
+    return font, font_size, lines, line_heights, line_spacing, total_height
+
+
+def render_story_background_image(text: str, preset: Dict[str, Any], size: tuple = (1080, 1080)) -> bytes:
+    """Render `text` centered over a preset colored/gradient background,
+    returning PNG bytes. Shrinks the font until the wrapped text fits the
+    canvas so long stories still render legibly."""
+    width, height = size
+    padding = int(width * 0.1)
+    max_text_width = width - (2 * padding)
+    max_text_height = height - (2 * padding)
+
+    excerpt = (text or "").strip()
+    if len(excerpt) > 600:
+        excerpt = excerpt[:597].rstrip() + "..."
+
+    img = _render_gradient_background(size, preset.get("colors") or ["#0f2027"])
+    draw = ImageDraw.Draw(img)
+
+    font, font_size, lines, line_heights, line_spacing, total_height = _fit_story_text_to_canvas(
+        excerpt, width, max_text_width, max_text_height, draw,
+    )
 
     text_color = preset.get("text_color") or "#ffffff"
     current_y = max((height - total_height) // 2, padding // 2)
