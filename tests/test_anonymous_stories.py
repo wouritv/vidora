@@ -324,6 +324,15 @@ def test_get_facebook_text_format_preset_id_returns_mapped_meta_id():
     assert preset_id == "1881421442117417"
 
 
+def test_classic_preset_uses_the_confirmed_working_meta_id():
+    # Captured from a real Publer payload that successfully published a
+    # long text post with a colored background to a live Facebook Page --
+    # unlike the other reverse-engineered ids, this one is confirmed
+    # working, so it's the default (first) preset in the list.
+    assert stories.get_facebook_text_format_preset_id("classic") == "618093735238824"
+    assert stories.BACKGROUND_PRESETS[0]["id"] == "classic"
+
+
 def test_every_preset_meta_preset_id_field_is_none_or_a_digit_string():
     # Architecture requirement: adding/removing a Facebook mapping is a
     # one-line edit to _FACEBOOK_META_PRESET_IDS, never a change to publish

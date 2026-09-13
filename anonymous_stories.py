@@ -415,6 +415,17 @@ NO_BACKGROUND_ID = "none"
 # behind Facebook's own "See more" expander rather than ever posting an
 # image for this format).
 _FACEBOOK_META_PRESET_IDS = {
+    # Confirmed live and working (2026-09-13): captured from a real Publer
+    # payload that successfully published a long (>1000 char) text post
+    # with a colored background to a Facebook Page -- Meta rendered the
+    # background over the truncated "See more" preview exactly as
+    # expected. Visual style not yet identified; rename once confirmed.
+    "classic": "618093735238824",
+    # The rest are reverse-engineered from a community list (see the gist
+    # linked above), not independently confirmed against a live Page --
+    # verify before relying on them, and prefer adding more ids captured
+    # the same way as "classic" above (a real Publer/Facebook payload)
+    # over guessing.
     "solid_black": "1881421442117417",   # Black
     "royal": "106018623298955",          # Purple
     "solid_red": "1903718606535395",     # Red
@@ -433,6 +444,11 @@ def _preset(preset_id: str, name: str, colors: List[str], text_color: str) -> Di
 
 
 BACKGROUND_PRESETS: List[Dict[str, Any]] = [
+    # Placeholder swatch color -- confirmed working on Facebook (see
+    # _FACEBOOK_META_PRESET_IDS above) but its actual visual style hasn't
+    # been identified yet, so this doesn't necessarily match what Facebook
+    # renders. Update "colors"/"name" once seen live.
+    _preset("classic", "Classic", ["#1877f2", "#0a3d91"], "#ffffff"),
     _preset("midnight", "Midnight Blue", ["#0f2027", "#203a43", "#2c5364"], "#ffffff"),
     _preset("sunset", "Sunset", ["#ff512f", "#dd2476"], "#ffffff"),
     _preset("forest", "Forest", ["#134e5e", "#71b280"], "#ffffff"),
