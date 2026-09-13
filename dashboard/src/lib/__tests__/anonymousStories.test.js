@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildAnonymousStoryProcessSteps, buildFullText, errorMessageForCode, normalizeStoryJobStatus } from '../anonymousStories';
+import { buildAnonymousStoryProcessSteps, buildFullText, describePlatformPublishError, errorMessageForCode, normalizeStoryJobStatus } from '../anonymousStories';
 
 const identityT = (key, fallback) => fallback ?? key;
 
@@ -36,6 +36,28 @@ describe('errorMessageForCode', () => {
         expect(errorMessageForCode(t, '', 'fallback text')).toBe('fallback text');
         expect(errorMessageForCode(t, null, 'fallback text')).toBe('fallback text');
         expect(t).not.toHaveBeenCalled();
+    });
+});
+
+describe('describePlatformPublishError', () => {
+    it('translates Facebook\'s documented text-background length rejection', () => {
+        const t = vi.fn((key, fallback) => fallback ?? key);
+        const rawError = '502: Facebook API error (400): Facebook text-only posts with a text background preset are limited to 130 characters';
+
+        const message = describePlatformPublishError(t, rawError);
+
+        expect(t).toHaveBeenCalledWith('anonymousStories.errorFacebookTextBackgroundTooLong', expect.any(String));
+        expect(message).not.toBe(rawError);
+    });
+
+    it('falls back to the raw error for anything else', () => {
+        const t = identityT;
+        expect(describePlatformPublishError(t, '502: Facebook API error (500): boom')).toBe('502: Facebook API error (500): boom');
+    });
+
+    it('falls back to the generic error when there is no message at all', () => {
+        const t = vi.fn((key, fallback) => fallback ?? key);
+        expect(describePlatformPublishError(t, undefined)).toBe(t('anonymousStories.genericError', 'Une erreur est survenue.'));
     });
 });
 

@@ -19,6 +19,29 @@ export function errorMessageForCode(t, code, fallback) {
     return t(key, fallback);
 }
 
+// Meta's documented rejection text when a text-background post exceeds its
+// length limit (see app.py's publish_to_facebook_text_with_background,
+// surfaced verbatim from the Graph API error body) -- matched loosely since
+// it arrives wrapped in "502: Facebook API error (400): ...".
+const FACEBOOK_TEXT_BACKGROUND_LENGTH_ERROR_MARKER = "limited to 130 characters";
+
+/**
+ * Turn a per-platform publish failure (results[platform].error, a raw
+ * exception string) into a message safe to show the user: Meta's specific
+ * "too long for a background preset" rejection gets a translated, friendly
+ * message; anything else falls back to the raw error (still better than
+ * hiding the failure) or the generic fallback.
+ */
+export function describePlatformPublishError(t, rawError) {
+    if (typeof rawError === "string" && rawError.includes(FACEBOOK_TEXT_BACKGROUND_LENGTH_ERROR_MARKER)) {
+        return t(
+            "anonymousStories.errorFacebookTextBackgroundTooLong",
+            "Facebook a refuse cette publication avec arriere-plan car le texte est trop long."
+        );
+    }
+    return rawError || t("anonymousStories.genericError", "Une erreur est survenue.");
+}
+
 /**
  * Client-side mirror of the backend's build_final_text (anonymous_stories.py):
  * flattens hook/introduction/story/questions into the single copy-ready

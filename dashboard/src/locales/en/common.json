@@ -698,6 +698,8 @@
     "publishSelectDateTime": "Please select a date and time.",
     "publishSuccess": "Post published successfully.",
     "publishScheduledSuccess": "Post scheduled successfully.",
+    "publishPartialFailure": "Failed to publish on: {{platforms}}. {{error}}",
+    "errorFacebookTextBackgroundTooLong": "Facebook rejected this background post because the text is too long.",
     "errorInvalidYoutubeUrl": "This YouTube link is not valid or could not be processed.",
     "errorDownloadFailed": "The video could not be retrieved.",
     "errorTranscriptionFailed": "The video could not be transcribed.",

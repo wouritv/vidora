@@ -10269,9 +10269,22 @@ async def _raise_for_status_or_502(response: httpx.Response, platform: str) -> N
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
         logger.exception("%s API error: %s - %s", platform, e.response.status_code, e.response.text)
+        # Meta's Graph API (Facebook/Instagram) wraps its actual error text in
+        # {"error": {"message": "..."}}; surfacing that message instead of the
+        # raw JSON blob is what lets a specific, documented rejection (e.g.
+        # the text-background length limit) read as a clear sentence rather
+        # than an opaque payload. Other platforms' error shapes don't match,
+        # so this just falls through to the original raw text for them.
+        detail_message = e.response.text
+        try:
+            api_message = e.response.json().get("error", {}).get("message")
+            if api_message:
+                detail_message = api_message
+        except (ValueError, AttributeError):
+            pass
         raise HTTPException(
             status_code=502,
-            detail=f"{platform} API error ({e.response.status_code}): {e.response.text}",
+            detail=f"{platform} API error ({e.response.status_code}): {detail_message}",
         ) from e
 
 

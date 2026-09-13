@@ -401,56 +401,108 @@ _STORY_BACKGROUND_FONT_PATH = os.path.join("fonts", "NotoSerif-Bold.ttf")
 # (still fully supported by both Facebook's and LinkedIn's text-post path).
 NO_BACKGROUND_ID = "none"
 
-# Meta's native "text post with colored background" feature (the
-# text_format_preset_id field on POST /{page-id}/feed) has no public Graph
-# API reference -- these numeric ids are Meta's own internal object ids
-# for each of its background templates, sourced from community
-# reverse-engineering (e.g. https://gist.github.com/moraxh/1eeb76b651f504450ab2fa03a8040f72)
-# since there is no official, documented catalog. Meta can retire or
-# change these without notice; if Facebook stops honoring one, update (or
-# remove) it here -- app.py's publish logic never needs to change. A
-# preset with no mapping here simply publishes as plain text on Facebook
-# (never as an image -- the publication must always stay text, confirmed
-# against Publer, which uses this same mechanism and truncates long text
-# behind Facebook's own "See more" expander rather than ever posting an
-# image for this format).
-_FACEBOOK_META_PRESET_IDS = {
-    "solid_black": "1881421442117417",   # Black
-    "royal": "106018623298955",          # Purple
-    "solid_red": "1903718606535395",     # Red
-    "sunset": "200521337465306",         # Fire (orange/red pattern)
-    "ocean": "1679248482160767",         # Blue with white gradient
-    "solid_blue": "143093446467972",     # Blue sky pattern
-    "forest": "931584293685988",         # Blue/green/aqua pattern
-    "berry": "249307305544279",          # Purple to red gradient
-}
-
+# The full, official catalog of Facebook's native "text post with colored
+# background" presets (Meta's text_format_preset_id on POST
+# /{page-id}/feed), transcribed from the platform's own reference
+# documentation ("Facebook Text-Background Posts Reference", 77 presets
+# across Featured/Decorative/Gradient/Solid categories). Since every entry
+# here IS a real Facebook preset, `id` doubles as the exact
+# text_format_preset_id value sent to Meta -- see
+# get_facebook_text_format_preset_id -- so adding, removing or reordering
+# a preset is the only change ever needed; app.py's publish logic never
+# changes. `text_color` is the exact value the reference documents for
+# that preset; `colors` is our own best-effort swatch approximation for
+# the picker UI and for LinkedIn's rendered-image fallback (LinkedIn has
+# no native background-post feature, so it always needs a real rendered
+# image -- see app.py's publish_to_linkedin_image), since most of these
+# presets are Facebook-provided illustrations/photos we cannot reproduce
+# pixel-for-pixel.
 def _preset(preset_id: str, name: str, colors: List[str], text_color: str) -> Dict[str, Any]:
-    return {
-        "id": preset_id, "name": name, "colors": colors, "text_color": text_color,
-        "meta_preset_id": _FACEBOOK_META_PRESET_IDS.get(preset_id),
-    }
+    return {"id": preset_id, "name": name, "colors": colors, "text_color": text_color}
 
 
 BACKGROUND_PRESETS: List[Dict[str, Any]] = [
-    _preset("midnight", "Midnight Blue", ["#0f2027", "#203a43", "#2c5364"], "#ffffff"),
-    _preset("sunset", "Sunset", ["#ff512f", "#dd2476"], "#ffffff"),
-    _preset("forest", "Forest", ["#134e5e", "#71b280"], "#ffffff"),
-    _preset("royal", "Royal Purple", ["#41295a", "#2f0743"], "#ffffff"),
-    _preset("charcoal", "Charcoal", ["#232526", "#414345"], "#ffffff"),
-    _preset("ivory", "Ivory", ["#f5f5f0", "#e0e0d8"], "#1a1a1a"),
-    _preset("ocean", "Ocean", ["#00c6ff", "#0072ff"], "#ffffff"),
-    _preset("rose_gold", "Rose Gold", ["#f6d365", "#fda085"], "#3a2a1a"),
-    _preset("emerald", "Emerald", ["#11998e", "#38ef7d"], "#ffffff"),
-    _preset("berry", "Berry", ["#c31432", "#240b36"], "#ffffff"),
-    _preset("slate", "Slate", ["#485563", "#29323c"], "#ffffff"),
-    _preset("peach", "Peach", ["#ffecd2", "#fcb69f"], "#3a2a1a"),
-    # Solid single-color fills (a one-item `colors` list renders flat, see
-    # _render_gradient_background) alongside the gradients above.
-    _preset("solid_black", "Black", ["#000000"], "#ffffff"),
-    _preset("solid_white", "White", ["#ffffff"], "#1a1a1a"),
-    _preset("solid_blue", "Blue", ["#1d4ed8"], "#ffffff"),
-    _preset("solid_red", "Red", ["#dc2626"], "#ffffff"),
+    # --- Featured (14) ---
+    _preset("303063890126415", "Yellow, Orange & Pink Gradient", ["#FBC02D", "#EC407A"], "#FFFFFF"),
+    _preset("319468561816672", "Dark Blue", ["#0D2C54", "#0D47A1"], "#FFFFFF"),
+    _preset("121945541697934", "Pink", ["#EC407A", "#D81B60"], "#FFFFFF"),
+    _preset("288211338285858", "Blue", ["#1E88E5", "#1565C0"], "#FFFFFF"),
+    _preset("106018623298955", "Solid Purple", ["#8E24AA"], "#FFFFFF"),
+    _preset("1903718606535395", "Solid Red", ["#E53935"], "#FFFFFF"),
+    _preset("1881421442117417", "Solid Black", ["#000000"], "#FFFFFF"),
+    _preset("249307305544279", "Red to Blue Gradient", ["#E53935", "#1E88E5"], "#FFFFFF"),
+    _preset("1777259169190672", "Purple to Magenta Gradient", ["#8E24AA", "#D81B60"], "#FFFFFF"),
+    _preset("122708641613922", "Dark Grey to Black Gradient", ["#424242", "#000000"], "#FFFFFF"),
+    _preset("446330032368780", "Red Gradient", ["#B71C1C", "#E53935"], "#FFFFFF"),
+    _preset("219266485227663", "Solid Magenta", ["#D81B60"], "#FFFFFF"),
+    _preset("1289741387813798", "Solid Dark Red", ["#B71C1C"], "#FFFFFF"),
+    _preset("1365883126823705", "Solid Blue", ["#1E88E5"], "#FFFFFF"),
+    # --- Decorative (22) ---
+    _preset("1007203310607963", "Light Purple", ["#B39DDB", "#9575CD"], "#4944A8"),
+    _preset("6524876100975152", "Light Purple", ["#C5B3E6", "#A48CDB"], "#FFFFFF"),
+    _preset("352226107216239", "Beige", ["#D7CCC8", "#BCAAA4"], "#635C56"),
+    _preset("1718609505251057", "Light Rose", ["#F8BBD0", "#F48FB1"], "#FFFFFF"),
+    _preset("710893630898745", "Dark Sandy Hills", ["#8D6E52", "#5D4A36"], "#FFFFFF"),
+    _preset("698363068460805", "Grey", ["#BDBDBD", "#9E9E9E"], "#595959"),
+    _preset("676677941094852", "Pink", ["#F06292", "#EC407A"], "#000000"),
+    _preset("243340214990392", "Red", ["#EF5350", "#E53935"], "#FFE8F0"),
+    _preset("650785203544528", "Light Green", ["#A5D6A7", "#81C784"], "#086210"),
+    _preset("231438476584844", "White", ["#FAFAFA", "#F0F0F0"], "#525252"),
+    _preset("1655172555010455", "Light Purple", ["#9575CD", "#7E57C2"], "#534EBF"),
+    _preset("1953054055059680", "Light Blue", ["#4FC3F7", "#29B6F6"], "#009478"),
+    _preset("1369831517263092", "Yellow", ["#FFF176", "#FFEE58"], "#705C04"),
+    _preset("820220726468391", "Red", ["#E57373", "#EF5350"], "#FFFFFF"),
+    _preset("992723408700211", "Light Purple", ["#D1C4E9", "#B39DDB"], "#000000"),
+    _preset("328761036360061", "Light Purple Sparkle", ["#B39DDB", "#7970FB"], "#7970FB"),
+    _preset("861250769045725", "Blurry Red Heart", ["#8B4444", "#5C3232"], "#422828"),
+    _preset("847821360169458", "Orange Confetti", ["#FFB74D", "#FF9800"], "#4B3686"),
+    _preset("233245916398282", "Abstract Beige Heart", ["#D7B99B", "#B08968"], "#802A2A"),
+    _preset("732044718735090", "Magenta", ["#D81B60", "#AD1457"], "#FFFFFF"),
+    _preset("1690448544763812", "Pink & Purple Wave", ["#EC407A", "#7E57C2"], "#44489E"),
+    _preset("1723026288124782", "Light Blue", ["#64B5F6", "#42A5F5"], "#274C82"),
+    # --- Gradient (8) ---
+    _preset("1531491134287540", "Pink & Orange Gradient", ["#EC407A", "#FB8C00"], "#6C2666"),
+    _preset("299890096121791", "Pink", ["#F06292", "#EC407A"], "#3C3887"),
+    _preset("1452114928969476", "Orange & Yellow Gradient", ["#FB8C00", "#FDD835"], "#611316"),
+    _preset("149887694868218", "Red & Purple Gradient", ["#E53935", "#8E24AA"], "#FFFFFF"),
+    _preset("681225170735955", "Blue & Purple Gradient", ["#1E88E5", "#8E24AA"], "#000000"),
+    _preset("1012699409936684", "Yellow & Orange Gradient", ["#FDD835", "#FB8C00"], "#920E1D"),
+    _preset("844319284091919", "Pink & Purple Gradient", ["#EC407A", "#8E24AA"], "#000000"),
+    _preset("639000325036183", "Pink & Orange Gradient", ["#EC407A", "#FF9800"], "#413C93"),
+    # --- Solid (33) ---
+    _preset("1038184293978413", "Light Grey", ["#E0E0E0", "#BDBDBD"], "#828282"),
+    _preset("340531735020539", "Grey", ["#9E9E9E", "#757575"], "#525252"),
+    _preset("334764089044169", "Black", ["#1A1A1A", "#000000"], "#F5F5F5"),
+    _preset("3121716424802062", "Pink", ["#F48FB1", "#EC407A"], "#E11731"),
+    _preset("3625555494348449", "Red", ["#E57373", "#E53935"], "#611316"),
+    _preset("841428021039542", "Dark Red", ["#B71C1C", "#7F0000"], "#FF7C74"),
+    _preset("838428734606379", "Pink", ["#EC407A", "#D81B60"], "#B9005F"),
+    _preset("1354917475430263", "Pink", ["#F48FB1", "#F06292"], "#5F1032"),
+    _preset("287628994046344", "Crimson", ["#DC143C", "#B22222"], "#FF90BD"),
+    _preset("866176818274367", "Beige", ["#D7B99B", "#C8A876"], "#B15B0F"),
+    _preset("653263790240452", "Orange", ["#FB8C00", "#EF6C00"], "#7F420E"),
+    _preset("618237107054113", "Brown", ["#795548", "#5D4037"], "#FFC891"),
+    _preset("2046306532386635", "Light Yellow", ["#FFF9C4", "#FFF59D"], "#9D8000"),
+    _preset("184083004658498", "Yellow", ["#FDD835", "#FBC02D"], "#887000"),
+    _preset("696971568609418", "Dark Yellow", ["#F9A825", "#F57F17"], "#625008"),
+    _preset("861160898741935", "Light Green", ["#AED581", "#9CCC65"], "#678F16"),
+    _preset("784913000073648", "Light Green", ["#C5E1A5", "#AED581"], "#5A7C16"),
+    _preset("680142694061655", "Olive Green", ["#808000", "#6B8E23"], "#D1FF71"),
+    _preset("1142122703434463", "Light Green", ["#81C784", "#66BB6A"], "#299633"),
+    _preset("1032899107855087", "Green", ["#43A047", "#2E7D32"], "#206C25"),
+    _preset("345064321202371", "Green", ["#66BB6A", "#4CAF50"], "#90E78A"),
+    _preset("137309512798730", "Light Blue", ["#4FC3F7", "#29B6F6"], "#009478"),
+    _preset("685611216963500", "Teal", ["#00897B", "#00695C"], "#006A56"),
+    _preset("991525518807930", "Green", ["#66BB6A", "#388E3C"], "#8FE2CA"),
+    _preset("1342634519948064", "Light Blue", ["#4FC3F7", "#039BE5"], "#0078B5"),
+    _preset("2032408867140667", "Light Blue", ["#81D4FA", "#4FC3F7"], "#074C72"),
+    _preset("3543708749174422", "Steel Blue", ["#4682B4", "#2E5A88"], "#42BDFF"),
+    _preset("1798961300535344", "Light Purple", ["#9575CD", "#7E57C2"], "#6760E4"),
+    _preset("646971224215411", "Purple", ["#7E57C2", "#5E35B1"], "#F2ECFF"),
+    _preset("1502418263945319", "Dark Purple", ["#4A148C", "#311B92"], "#B7A7FF"),
+    _preset("309187638478389", "Pink", ["#D81B60", "#AD1457"], "#B93EB0"),
+    _preset("284033164441257", "Light Purple", ["#9575CD", "#7E57C2"], "#60245B"),
+    _preset("352064377250020", "Solid Dark Purple", ["#4A148C"], "#FCE3FA"),
 ]
 
 
@@ -465,17 +517,16 @@ def get_background_preset(background_id: Optional[str]) -> Dict[str, Any]:
 
 
 def get_facebook_text_format_preset_id(background_id: Optional[str]) -> Optional[str]:
-    """Meta's text_format_preset_id for `background_id`, or None when it
-    has no native mapping (NO_BACKGROUND_ID included) or isn't a known
-    preset -- callers must treat None as "publish as plain text, never as
-    an image" (per spec: the publication must stay text in every case).
-    Adding or remapping a preset here is the only change needed to change
-    what publishes natively; it never touches the publish logic itself."""
+    """Meta's text_format_preset_id for `background_id`, or None for
+    NO_BACKGROUND_ID or an unknown id -- callers must treat None as
+    "publish as plain text, never as an image" (per spec: the publication
+    must stay text in every case). Every entry in BACKGROUND_PRESETS is
+    itself a real Facebook preset, so this is just a membership check --
+    `id` already *is* the text_format_preset_id value."""
     if not background_id or background_id == NO_BACKGROUND_ID:
         return None
-    for preset in BACKGROUND_PRESETS:
-        if preset["id"] == background_id:
-            return preset.get("meta_preset_id")
+    if any(preset["id"] == background_id for preset in BACKGROUND_PRESETS):
+        return background_id
     return None
 
 
