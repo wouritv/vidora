@@ -693,6 +693,7 @@
     "publishModalTitle": "Publier l'histoire",
     "publishSelectPlatformLabel": "Choisir les plateformes",
     "publishBackgroundLabel": "Arrière-plan de la publication",
+    "publishBackgroundFacebookOnly": "Facebook uniquement : LinkedIn ne prend pas en charge ces arrière-plans et publie toujours en texte seul.",
     "publishBackgroundNone": "Aucun arrière-plan (texte seul)",
     "publishBackgroundNoneShort": "Aucun",
     "publishPreviewLabel": "Aperçu de la publication",

@@ -12,12 +12,9 @@ router).
 """
 
 import asyncio
-import io
 import json
 import os
 from typing import Any, Dict, List, Optional
-
-from PIL import Image, ImageDraw, ImageFont
 
 
 class AnonymousStorySourceType:
@@ -387,18 +384,17 @@ def download_youtube_source(url: str, output_dir: str) -> Dict[str, str]:
 # Publish backgrounds. Facebook has a native "colored background text
 # post" mechanism (text_format_preset_id, see get_facebook_text_format_
 # preset_id and app.py's publish_to_facebook_text_with_background) that a
-# mapped preset always uses -- the publication stays real text there,
-# never an image. LinkedIn has no such native feature for third-party
-# apps, so its visual effect is produced by rendering the story text onto
-# a preset colored/gradient image ourselves and publishing that image
-# (see app.py's publish_to_linkedin_image).
+# mapped preset always uses -- the publication stays real text there, never
+# an image. LinkedIn has no equivalent feature for third-party apps and,
+# per product decision, must never substitute a rendered image for one
+# either (see app.py's _publish_linkedin): a story always publishes to
+# LinkedIn as plain text, and this catalog is purely a Facebook picker --
+# the frontend labels it as such.
 # ---------------------------------------------------------------------------
 
-_STORY_BACKGROUND_FONT_PATH = os.path.join("fonts", "NotoSerif-Bold.ttf")
-
-# Sentinel background_id meaning "no image at all" -- the publish flow
-# skips rendering entirely and posts the story as a plain text status
-# (still fully supported by both Facebook's and LinkedIn's text-post path).
+# Sentinel background_id meaning "no background at all" -- Facebook then
+# publishes the story as a plain text status too, same as LinkedIn always
+# does.
 NO_BACKGROUND_ID = "none"
 
 # The full, official catalog of Facebook's native "text post with colored
@@ -411,12 +407,9 @@ NO_BACKGROUND_ID = "none"
 # get_facebook_text_format_preset_id -- so adding, removing or reordering
 # a preset is the only change ever needed; app.py's publish logic never
 # changes. `text_color` is the exact value the reference documents for
-# that preset; `colors` is our own best-effort swatch approximation for
-# the picker UI and for LinkedIn's rendered-image fallback (LinkedIn has
-# no native background-post feature, so it always needs a real rendered
-# image -- see app.py's publish_to_linkedin_image), since most of these
-# presets are Facebook-provided illustrations/photos we cannot reproduce
-# pixel-for-pixel.
+# that preset; `colors` is our own best-effort swatch approximation used
+# only by the frontend picker/preview (LinkedIn has no equivalent feature
+# and never uses this catalog at all -- it always publishes plain text).
 def _preset(preset_id: str, name: str, colors: List[str], text_color: str) -> Dict[str, Any]:
     return {"id": preset_id, "name": name, "colors": colors, "text_color": text_color}
 
@@ -536,127 +529,3 @@ def get_facebook_text_format_preset_id(background_id: Optional[str]) -> Optional
     if any(preset["id"] == background_id for preset in BACKGROUND_PRESETS):
         return background_id
     return None
-
-
-def _hex_to_rgb(value: str) -> tuple:
-    value = value.lstrip("#")
-    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
-
-
-def _render_gradient_background(size: tuple, colors: List[str]) -> "Image.Image":
-    width, height = size
-    top = _hex_to_rgb(colors[0])
-    bottom = _hex_to_rgb(colors[-1] if len(colors) > 1 else colors[0])
-    img = Image.new("RGB", size, top)
-    draw = ImageDraw.Draw(img)
-    for y in range(height):
-        t = y / max(height - 1, 1)
-        row_color = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
-        draw.line([(0, y), (width, y)], fill=row_color)
-    return img
-
-
-def _wrap_text_lines(text: str, font, max_width: int, draw) -> List[str]:
-    lines: List[str] = []
-    for paragraph in text.split("\n"):
-        if not paragraph.strip():
-            lines.append("")
-            continue
-        words = paragraph.split()
-        current: List[str] = []
-        for word in words:
-            candidate = " ".join(current + [word])
-            bbox = draw.textbbox((0, 0), candidate, font=font)
-            if bbox[2] - bbox[0] <= max_width or not current:
-                current.append(word)
-            else:
-                lines.append(" ".join(current))
-                current = [word]
-        if current:
-            lines.append(" ".join(current))
-    return lines
-
-
-def _fit_story_text_to_canvas(excerpt: str, width: int, max_text_width: int, max_text_height: int, draw) -> tuple:
-    """Shrink the font (starting from ~5.5% of the canvas width) until the
-    wrapped text fits within max_text_height. Pulled out of
-    render_story_background_image to keep its cognitive complexity down --
-    this loop (with its nested try/except and per-line measurement) was
-    most of it. Returns (font, font_size, lines, line_heights, line_spacing,
-    total_height)."""
-    font_size = int(width * 0.055)
-    font = None
-    lines: List[str] = []
-    line_heights: List[int] = []
-    line_spacing = 0
-    total_height = 0
-
-    while font_size >= 20:
-        try:
-            font = ImageFont.truetype(_STORY_BACKGROUND_FONT_PATH, font_size)
-        except Exception:
-            font = ImageFont.load_default()
-
-        lines = _wrap_text_lines(excerpt, font, max_text_width, draw)
-        line_spacing = int(font_size * 0.35)
-        line_heights = []
-        for line in lines:
-            bbox = draw.textbbox((0, 0), line or " ", font=font)
-            line_heights.append(bbox[3] - bbox[1])
-        total_height = sum(line_heights) + line_spacing * max(len(lines) - 1, 0)
-
-        if total_height <= max_text_height or font_size <= 20:
-            break
-        font_size -= 4
-
-    return font, font_size, lines, line_heights, line_spacing, total_height
-
-
-# Generous cap so a pathologically long story can't grow the canvas
-# without bound -- ordinary stories (even several paragraphs) fit well
-# under this once the font has shrunk to its readable floor.
-_STORY_BACKGROUND_MAX_HEIGHT = 3600
-
-
-def render_story_background_image(text: str, preset: Dict[str, Any], size: tuple = (1080, 1080)) -> bytes:
-    """Render the complete `text` centered over a preset colored/gradient
-    (or solid, when the preset has a single color) background, returning
-    PNG bytes. The story is never truncated: the font shrinks first (see
-    _fit_story_text_to_canvas), and if it still doesn't fit the default
-    height even at the smallest readable size, the canvas grows taller to
-    fit the full text instead of cutting it off -- the rendered image is
-    the entire publication, not an excerpt of it."""
-    width, base_height = size
-    padding = int(width * 0.1)
-    max_text_width = width - (2 * padding)
-
-    excerpt = (text or "").strip()
-
-    # Text is measured against a throwaway canvas first since the real
-    # background can't be sized until we know how tall the text needs.
-    measure_draw = ImageDraw.Draw(Image.new("RGB", (width, base_height)))
-    font, font_size, lines, line_heights, line_spacing, total_height = _fit_story_text_to_canvas(
-        excerpt, width, max_text_width, base_height - (2 * padding), measure_draw,
-    )
-
-    height = min(max(base_height, total_height + (2 * padding)), _STORY_BACKGROUND_MAX_HEIGHT)
-
-    img = _render_gradient_background((width, height), preset.get("colors") or ["#0f2027"])
-    draw = ImageDraw.Draw(img)
-
-    text_color = preset.get("text_color") or "#ffffff"
-    current_y = max((height - total_height) // 2, padding // 2)
-    for i, line in enumerate(lines):
-        line_height = line_heights[i] if i < len(line_heights) else font_size
-        if not line:
-            current_y += line_height + line_spacing
-            continue
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = bbox[2] - bbox[0]
-        x = (width - line_w) // 2
-        draw.text((x, current_y), line, font=font, fill=text_color)
-        current_y += line_height + line_spacing
-
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-    return buffer.getvalue()
