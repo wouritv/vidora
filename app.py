@@ -8580,16 +8580,6 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
 _ANONYMOUS_STORY_PUBLISH_PLATFORMS = {"facebook", "linkedin"}
 
 
-# AWS SigV4 presigned URLs have a hard protocol maximum of 7 days
-# (604800s) for X-Amz-Expires -- S3 rejects the request outright with 400
-# Bad Request if it's exceeded, regardless of how soon the URL is actually
-# used. This was set to 14 days, which made every story background image
-# unusable from the moment it was generated (both Facebook's own fetch and
-# our own _download_to_file hit the same 400). 604800 is the most headroom
-# SigV4 allows for a scheduled post to still resolve the image days later.
-_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS = 7 * 24 * 3600
-
-
 def _resolve_anonymous_story_platforms(platforms: Optional[List[str]]) -> List[str]:
     candidate = [p.strip().lower() for p in (platforms or []) if isinstance(p, str) and p.strip()]
     result: List[str] = []
@@ -8601,44 +8591,8 @@ def _resolve_anonymous_story_platforms(platforms: Optional[List[str]]) -> List[s
     return result
 
 
-async def _render_and_upload_story_background(user_id: str, story_id: str, text: str, background_id: Optional[str]) -> str:
-    preset = anonymous_stories.get_background_preset(background_id)
-    image_bytes = await asyncio.to_thread(anonymous_stories.render_story_background_image, text, preset)
-
-    bucket_name = os.environ.get("AWS_S3_BUCKET", "my-clips-bucket")
-    s3_key = f"{_STORIES_PREFIX}{user_id}/{story_id}/background_{preset['id']}_{uuid.uuid4().hex}.png"
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    temp_path = os.path.join(OUTPUT_DIR, f"story_bg_{uuid.uuid4().hex}.png")
-    try:
-        async with aiofiles.open(temp_path, "wb") as file_handle:
-            await file_handle.write(image_bytes)
-        uploaded = upload_file_to_s3(temp_path, bucket_name, s3_key)
-        if not uploaded:
-            raise HTTPException(status_code=502, detail="Failed to upload story background image")
-    finally:
-        _cleanup_temp_file(temp_path)
-
-    presigned_url = generate_presigned_url(bucket_name, s3_key, expiration=_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS)
-    if not presigned_url:
-        raise HTTPException(status_code=502, detail="Failed to generate URL for story background image")
-    return presigned_url
-
-
-async def _resolve_story_publish_image(user_id: str, story_id: str, text: str, background_id: Optional[str]) -> Optional[str]:
-    """Resolve the image to publish alongside `text`, or None for a
-    text-only post ("no background"). Always rendered fresh right when
-    it's about to be used -- for a scheduled publish this must be called
-    at fire time (see _build_scheduled_publish_payload), never persisted
-    across the schedule gap, since a presigned S3 URL can't outlive AWS
-    SigV4's 7-day cap and a story can be scheduled further out than that."""
-    if background_id == anonymous_stories.NO_BACKGROUND_ID:
-        return None
-    return await _render_and_upload_story_background(user_id, story_id, text, background_id)
-
-
 async def _publish_anonymous_story_now(
-    user_id: str, platform_name: str, publish_priority: int, text_value: str, image_url: Optional[str],
+    user_id: str, platform_name: str, publish_priority: int, text_value: str,
     background_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     publish_job_id = await _insert_publish_job(
@@ -8660,7 +8614,6 @@ async def _publish_anonymous_story_now(
             description=text_value,
             text=text_value,
             caption=text_value,
-            image_url=image_url,
             facebook_text_format_preset_id=anonymous_stories.get_facebook_text_format_preset_id(background_id),
         )
         platform_result = await publish_post(account, publish_payload)
@@ -8697,7 +8650,7 @@ def _resolve_anonymous_story_schedule(payload: "AnonymousStoryPublishRequest"):
 async def _dispatch_anonymous_story_publish(
     user_id: str, story_id: str, story_title: str, text_value: str, background_id: str,
     selected_platforms: List[str], publish_priority: int, scheduled_for, timezone: Optional[str],
-    is_scheduled: bool, image_url: Optional[str],
+    is_scheduled: bool,
 ) -> Dict[str, Any]:
     """Publish (or schedule) the story across every selected platform.
     Pulled out of publish_anonymous_story_endpoint to keep its cognitive
@@ -8713,7 +8666,7 @@ async def _dispatch_anonymous_story_publish(
             continue
 
         results[platform_name] = await _publish_anonymous_story_now(
-            user_id, platform_name, publish_priority, text_value, image_url, background_id,
+            user_id, platform_name, publish_priority, text_value, background_id,
         )
     return results
 
@@ -8740,18 +8693,9 @@ async def publish_anonymous_story_endpoint(
     scheduled_for, is_scheduled = _resolve_anonymous_story_schedule(payload)
     background_id = payload.background_id or anonymous_stories.BACKGROUND_PRESETS[0]["id"]
 
-    # For an immediate publish, render once and reuse it for every selected
-    # platform. For a scheduled publish, rendering is deferred to the
-    # moment each platform's job actually fires (see
-    # _build_scheduled_publish_payload) -- a presigned S3 URL generated now
-    # could easily outlive AWS SigV4's 7-day cap before the job runs.
-    image_url = None
-    if not is_scheduled:
-        image_url = await _resolve_story_publish_image(user_id, story_id, text_value, background_id)
-
     results = await _dispatch_anonymous_story_publish(
         user_id, story_id, str(row.get("title") or "Vireel"), text_value, background_id,
-        selected_platforms, publish_priority, scheduled_for, payload.timezone, is_scheduled, image_url,
+        selected_platforms, publish_priority, scheduled_for, payload.timezone, is_scheduled,
     )
     overall_success = all(result.get("success") for result in results.values())
 
@@ -9661,26 +9605,20 @@ async def _debit_scheduled_publish_credits(user_id: str, task_payload: Dict[str,
     )
 
 
-async def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str, Any]) -> "PublishRequest":
+def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str, Any]) -> "PublishRequest":
     """Build the PublishRequest for a due scheduled publish job. Pulled out
     of _execute_scheduled_publish_job to keep its cognitive complexity down:
-    a story publish (text + a background image rendered fresh right now,
-    no media_url requirement) and a reel/caption publish (video_url
-    required) need different shapes here. The story's background is
-    rendered here rather than at schedule time -- a presigned S3 URL
-    generated then could easily outlive AWS SigV4's 7-day cap before this
-    job fires."""
+    a story publish (text only -- Facebook's native colored background,
+    LinkedIn plain text, no media_url requirement) and a reel/caption
+    publish (video_url required) need different shapes here."""
     description = str(task_payload.get("description") or "")
     title = str(task_payload.get("title") or "Vireel")
 
     if str(task_payload.get("source_type") or "") == "anonymous_story":
         background_id = task_payload.get("background_id")
-        image_url = await _resolve_story_publish_image(
-            user_id, str(task_payload.get("source_id") or ""), description, background_id,
-        )
         return PublishRequest(
             user_id=user_id, title=title, description=description, text=description,
-            caption=description, image_url=image_url,
+            caption=description,
             facebook_text_format_preset_id=anonymous_stories.get_facebook_text_format_preset_id(background_id),
         )
 
@@ -9711,7 +9649,7 @@ async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
         if not account:
             raise HTTPException(status_code=404, detail=f"No connected {platform} account found")
 
-        publish_payload = await _build_scheduled_publish_payload(user_id, task_payload)
+        publish_payload = _build_scheduled_publish_payload(user_id, task_payload)
 
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
@@ -11112,56 +11050,6 @@ async def _li_finalize_upload(access_token: str, video_urn: str, upload_token: s
     await _raise_for_status_or_502(finalize_response, "LinkedIn")
 
 
-async def _li_initialize_image_upload(access_token: str, owner_urn: str):
-    """Renvoie (image_urn, upload_url)."""
-    init_payload = {"initializeUploadRequest": {"owner": owner_urn}}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        init_response = await client.post(
-            "https://api.linkedin.com/rest/images?action=initializeUpload",
-            headers=_linkedin_headers(access_token),
-            json=init_payload,
-        )
-    await _raise_for_status_or_502(init_response, "LinkedIn")
-
-    init_data = (init_response.json() or {}).get("value") or {}
-    image_urn = init_data.get("image")
-    upload_url = init_data.get("uploadUrl")
-    if not image_urn or not upload_url:
-        raise HTTPException(status_code=502, detail="LinkedIn initializeUpload response missing image urn or upload url")
-    return image_urn, upload_url
-
-
-async def publish_to_linkedin_image(access_token: str, owner_urn: str, image_url: str, description: str) -> Dict[str, Any]:
-    """
-    Publie une image sur LinkedIn via la Images API actuelle :
-    1. Téléchargement local de l'image (image_url) avec validation anti-SSRF.
-    2. initializeUpload -> URN image + URL d'upload.
-    3. PUT du fichier vers l'URL d'upload.
-    4. Création du post via /rest/posts (Posts API) référençant l'URN image.
-    """
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    temp_path = os.path.join(UPLOAD_DIR, f"li_publish_{uuid.uuid4().hex}.png")
-    await _download_to_file(image_url, temp_path)
-
-    try:
-        image_urn, upload_url = await _li_initialize_image_upload(access_token, owner_urn)
-        async with aiofiles.open(temp_path, "rb") as file_handle:
-            image_bytes = await file_handle.read()
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            upload_response = await client.put(
-                upload_url, headers={"Content-Type": "application/octet-stream"}, content=image_bytes,
-            )
-        upload_response.raise_for_status()
-
-        post_result = await _create_linkedin_post(
-            token=access_token, owner_urn=owner_urn, commentary=description, media={"id": image_urn},
-        )
-        post_result["image_urn"] = image_urn
-        return post_result
-    finally:
-        _cleanup_temp_file(temp_path)
-
-
 async def publish_to_linkedin_video(access_token: str, owner_urn: str, video_url: str, title: str, description: str) -> Dict[str, Any]:
     """
     Publie une vidéo sur LinkedIn via la Videos API actuelle :
@@ -11211,28 +11099,15 @@ async def _publish_video_then_text_fallback(has_video: bool, video_publisher, te
         return result
 
 
-def _short_caption_for_story(text_value: str, max_len: int = 150) -> str:
-    """A brief teaser for LinkedIn's commentary field when publishing an
-    anonymous-story background image (LinkedIn has no native
-    colored-background text post, so it always needs a rendered image --
-    see publish_to_linkedin_image). The complete story already lives on
-    the image itself (see anonymous_stories.render_story_background_image,
-    which never truncates it), so repeating the full text again as the
-    post's commentary looked broken -- the same wall of text twice, once
-    cut off on the image, once in full underneath. This never returns the
-    full text, only a short teaser (LinkedIn's Posts API commentary field
-    can't be blank)."""
-    text = (text_value or "").strip()
-    if len(text) <= max_len:
-        return text
-    truncated = text[:max_len].rsplit(" ", 1)[0].rstrip(".,;: ")
-    return f"{truncated}…"
-
-
 async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
+    # LinkedIn has no native colored-background text post and, per product
+    # decision, must never substitute a rendered image for one either (same
+    # "stays text, no exceptions" principle as Facebook's own background
+    # posts -- see _publish_facebook): an anonymous story always publishes
+    # here as plain text, regardless of which Facebook-only background the
+    # user picked.
     _require_platform_user_id(account, "LinkedIn")
     owner_urn = f"urn:li:person:{account.get('platform_user_id')}"
-    image_url = getattr(content, "image_url", None)
 
     async def video_publisher():
         return await publish_to_linkedin_video(
@@ -11242,12 +11117,6 @@ async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_v
 
     async def text_publisher():
         return await _create_linkedin_post(token=token, owner_urn=owner_urn, commentary=text_value)
-
-    if not content.video_url and image_url:
-        return await publish_to_linkedin_image(
-            access_token=token, owner_urn=owner_urn, image_url=image_url,
-            description=_short_caption_for_story(text_value),
-        )
 
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
 

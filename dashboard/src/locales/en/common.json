@@ -692,6 +692,7 @@
     "publishModalTitle": "Publish the story",
     "publishSelectPlatformLabel": "Choose the platforms",
     "publishBackgroundLabel": "Post background",
+    "publishBackgroundFacebookOnly": "Facebook only: LinkedIn doesn't support these backgrounds and always publishes as plain text.",
     "publishBackgroundNone": "No background (text only)",
     "publishBackgroundNoneShort": "None",
     "publishPreviewLabel": "Post preview",

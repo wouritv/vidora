@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, ArrowLeft, Check, Copy, Loader2, RefreshCw, Save, Share2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { getApiUrl } from "../config";
@@ -28,6 +28,7 @@ export default function AnonymousStoryProjectDetailPage() {
     const [savedFlash, setSavedFlash] = useState(false);
 
     const [title, setTitle] = useState("");
+    const titleRef = useRef(null);
     const [hook, setHook] = useState("");
     const [introduction, setIntroduction] = useState("");
     const [story, setStory] = useState("");
@@ -82,6 +83,19 @@ export default function AnonymousStoryProjectDetailPage() {
         loadStory();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [projectId, user?.id]);
+
+    // The title field is a single-row-by-default textarea (see below) that
+    // grows to fit long titles instead of clipping them -- resetting height
+    // to auto before reading scrollHeight lets it shrink back down too, not
+    // just grow. Re-run whenever the text changes, including the async load
+    // above (typing alone would trigger the textarea's own onInput handler,
+    // but the fetched title arrives via setState, not a user keystroke).
+    useEffect(() => {
+        const el = titleRef.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${el.scrollHeight}px`;
+    }, [title]);
 
     useEffect(() => {
         if (!user?.id) return;
@@ -272,11 +286,19 @@ export default function AnonymousStoryProjectDetailPage() {
         <div className="flex-1 overflow-y-auto p-8 space-y-6">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div className="min-w-0">
-                    <input
+                    <textarea
+                        ref={titleRef}
                         value={title}
                         onChange={(e) => setTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                            // The title stays a single logical line (it only
+                            // *wraps* visually to stay fully readable) --
+                            // Enter would otherwise insert a literal newline.
+                            if (e.key === "Enter") e.preventDefault();
+                        }}
                         placeholder={t("anonymousStories.editorTitle", "Temoignage")}
-                        className="w-full bg-transparent text-3xl font-black tracking-tight text-slate-900 dark:text-white focus:outline-none"
+                        rows={1}
+                        className="w-full resize-none overflow-hidden bg-transparent text-3xl font-black tracking-tight text-slate-900 dark:text-white focus:outline-none"
                     />
                 </div>
                 <button

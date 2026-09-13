@@ -2203,10 +2203,10 @@ def test_resolve_anonymous_story_platforms_rejects_when_none_selected(monkeypatc
 
 
 def test_publish_request_supports_image_url(monkeypatch):
-    # Reels/captions only ever publish a video; anonymous stories publish
-    # a rendered background image instead, so PublishRequest needs a field
-    # for it (consumed by _publish_facebook/_publish_linkedin's image
-    # branch and by _publish_anonymous_story_now).
+    # Generic field shared with Instagram/TikTok's own image-post branches
+    # (see _publish_instagram_platform/_publish_tiktok_platform) -- neither
+    # Facebook nor LinkedIn ever reads it for an anonymous story: both
+    # always publish plain text there, per product decision.
     app = _import_app_with_stubs(monkeypatch)
 
     payload = app.PublishRequest(user_id="u1", text="hello", image_url="https://example.com/bg.png")
@@ -2218,10 +2218,9 @@ def test_publish_request_supports_image_url(monkeypatch):
 
 def test_publish_facebook_ignores_image_url_and_posts_plain_text(monkeypatch):
     # Spec correction: an anonymous-story publish must NEVER become an
-    # image post on Facebook, in any case -- image_url is only ever
-    # meaningful to LinkedIn (which has no native background feature).
-    # Without a mapped facebook_text_format_preset_id, Facebook publishes
-    # the story as an ordinary plain-text post.
+    # image post on Facebook, in any case. Without a mapped
+    # facebook_text_format_preset_id, Facebook publishes the story as an
+    # ordinary plain-text post.
     app = _import_app_with_stubs(monkeypatch)
 
     captured = {}
@@ -2353,16 +2352,20 @@ def test_get_facebook_text_format_preset_id_maps_known_presets(monkeypatch):
     assert app.anonymous_stories.get_facebook_text_format_preset_id("does-not-exist") is None
 
 
-def test_publish_linkedin_uses_image_branch_when_only_image_url_set(monkeypatch):
+def test_publish_linkedin_ignores_image_url_and_posts_plain_text(monkeypatch):
+    # Same "stays text, no exceptions" principle as Facebook's own
+    # background posts: LinkedIn has no native colored-background feature
+    # and must never substitute a rendered image for one, regardless of
+    # what image_url (or background_id) was resolved upstream.
     app = _import_app_with_stubs(monkeypatch)
 
     calls = []
 
-    async def fake_publish_to_linkedin_image(**kwargs):
+    async def fake_create_linkedin_post(**kwargs):
         calls.append(kwargs)
         return {"id": "urn:li:share:999"}
 
-    monkeypatch.setattr(app, "publish_to_linkedin_image", fake_publish_to_linkedin_image)
+    monkeypatch.setattr(app, "_create_linkedin_post", fake_create_linkedin_post)
 
     account = {"platform_user_id": "person-1"}
     content = app.PublishRequest(user_id="u1", text="hello", image_url="https://example.com/bg.png")
@@ -2370,12 +2373,7 @@ def test_publish_linkedin_uses_image_branch_when_only_image_url_set(monkeypatch)
     result = asyncio.run(app._publish_linkedin(account, "token-1", content, "hello"))
 
     assert result == {"id": "urn:li:share:999"}
-    assert calls == [{
-        "access_token": "token-1",
-        "owner_urn": "urn:li:person:person-1",
-        "image_url": "https://example.com/bg.png",
-        "description": "hello",
-    }]
+    assert calls == [{"token": "token-1", "owner_urn": "urn:li:person:person-1", "commentary": "hello"}]
 
 
 def test_publish_facebook_still_falls_back_to_video_when_video_url_set(monkeypatch):
@@ -2414,11 +2412,11 @@ def test_publish_facebook_still_falls_back_to_video_when_video_url_set(monkeypat
 
 def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requirement(monkeypatch):
     # Reel/caption scheduled jobs require a media_url (video); an anonymous
-    # story scheduled job carries text + a background_id instead, rendered
-    # fresh right when the job fires (see
-    # test_execute_scheduled_publish_job_anonymous_story_renders_background_at_fire_time
-    # for that), so _execute_scheduled_publish_job must not reject it for
-    # lacking media_url.
+    # story scheduled job carries only text + a background_id (used solely
+    # to resolve Facebook's native preset -- see
+    # anonymous_stories.get_facebook_text_format_preset_id), so
+    # _execute_scheduled_publish_job must not reject it for lacking
+    # media_url.
     app = _import_app_with_stubs(monkeypatch)
 
     job_row = {
@@ -2442,9 +2440,6 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
     async def fake_get_social_account(user_id, platform):
         return {"id": "acct-1", "platform_user_id": "page-1"}
 
-    async def fake_resolve_story_publish_image(user_id, story_id, text, background_id):
-        return "https://example.com/bg.png"
-
     published_payloads = []
 
     async def fake_publish_post(account, content):
@@ -2456,7 +2451,6 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
 
     monkeypatch.setattr(app, "_update_publish_job_status", fake_update_publish_job_status)
     monkeypatch.setattr(app, "_get_social_account", fake_get_social_account)
-    monkeypatch.setattr(app, "_resolve_story_publish_image", fake_resolve_story_publish_image)
     monkeypatch.setattr(app, "publish_post", fake_publish_post)
     monkeypatch.setattr(app, "_debit_scheduled_publish_credits", fake_debit_scheduled_publish_credits)
 
@@ -2464,82 +2458,9 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
 
     assert len(published_payloads) == 1
     assert published_payloads[0].video_url is None
-    assert published_payloads[0].image_url == "https://example.com/bg.png"
+    assert published_payloads[0].image_url is None
     assert published_payloads[0].description == "Le texte complet de l'histoire."
     assert ("job-1", "done", {"external_id": "111_222", "post_url": "https://www.facebook.com/111_222", "error_message": None}) in status_calls
-
-
-def test_execute_scheduled_publish_job_anonymous_story_renders_background_at_fire_time(monkeypatch):
-    # The whole point of deferring rendering to fire time: this pins that
-    # _build_scheduled_publish_payload calls _resolve_story_publish_image
-    # (not some cached/pre-rendered URL) with the story id/text/background
-    # carried in the job payload, right when the job executes.
-    app = _import_app_with_stubs(monkeypatch)
-
-    job_row = {
-        "id": "job-2",
-        "user_id": "user-1",
-        "platform": "linkedin",
-        "payload": {
-            "source_type": "anonymous_story",
-            "source_id": "story-42",
-            "title": "Une histoire",
-            "description": "Texte de l'histoire.",
-            "background_id": "forest",
-        },
-    }
-
-    calls = []
-
-    async def fake_resolve_story_publish_image(user_id, story_id, text, background_id):
-        calls.append((user_id, story_id, text, background_id))
-        return "https://example.com/fresh-bg.png"
-
-    async def fake_get_social_account(user_id, platform):
-        return {"id": "acct-1", "platform_user_id": "person-1"}
-
-    async def fake_publish_post(account, content):
-        return {"id": "urn:li:share:1"}
-
-    monkeypatch.setattr(app, "_resolve_story_publish_image", fake_resolve_story_publish_image)
-    monkeypatch.setattr(app, "_get_social_account", fake_get_social_account)
-    monkeypatch.setattr(app, "_update_publish_job_status", AsyncMock())
-    monkeypatch.setattr(app, "publish_post", fake_publish_post)
-    monkeypatch.setattr(app, "_debit_scheduled_publish_credits", AsyncMock())
-
-    asyncio.run(app._execute_scheduled_publish_job(job_row))
-
-    assert calls == [("user-1", "story-42", "Texte de l'histoire.", "forest")]
-
-
-def test_resolve_story_publish_image_returns_none_for_no_background(monkeypatch):
-    app = _import_app_with_stubs(monkeypatch)
-
-    render_calls = []
-
-    async def fake_render_and_upload_story_background(user_id, story_id, text, background_id):
-        render_calls.append((user_id, story_id, text, background_id))
-        return "https://example.com/bg.png"
-
-    monkeypatch.setattr(app, "_render_and_upload_story_background", fake_render_and_upload_story_background)
-
-    result = asyncio.run(app._resolve_story_publish_image("user-1", "story-1", "text", app.anonymous_stories.NO_BACKGROUND_ID))
-
-    assert result is None
-    assert render_calls == []
-
-
-def test_resolve_story_publish_image_renders_for_a_real_background(monkeypatch):
-    app = _import_app_with_stubs(monkeypatch)
-
-    async def fake_render_and_upload_story_background(user_id, story_id, text, background_id):
-        return f"https://example.com/{background_id}.png"
-
-    monkeypatch.setattr(app, "_render_and_upload_story_background", fake_render_and_upload_story_background)
-
-    result = asyncio.run(app._resolve_story_publish_image("user-1", "story-1", "text", "sunset"))
-
-    assert result == "https://example.com/sunset.png"
 
 
 def test_anonymous_stories_backgrounds_route_registered_before_story_id_route(monkeypatch):
@@ -2583,20 +2504,6 @@ def test_anonymous_stories_backgrounds_includes_no_background_option_last(monkey
     assert preset_ids == {preset["id"] for preset in app.anonymous_stories.BACKGROUND_PRESETS}
 
 
-def test_story_background_presign_expiration_within_sigv4_limit(monkeypatch):
-    # Regression: this constant was 14 days (1209600s), but AWS SigV4
-    # presigned URLs have a hard protocol maximum of 7 days (604800s) for
-    # X-Amz-Expires -- S3 rejects the request with 400 Bad Request the
-    # moment that's exceeded, regardless of how soon the URL is actually
-    # used. That made every anonymous-story background image unusable from
-    # the instant it was generated (both Facebook's own fetch of it, and
-    # our own _download_to_file re-fetching it for the multipart upload,
-    # failed with the identical 400).
-    app = _import_app_with_stubs(monkeypatch)
-
-    assert app._STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS <= 604800
-
-
 def test_resolve_anonymous_story_schedule_rejects_invalid_date(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
 
@@ -2633,20 +2540,20 @@ def test_dispatch_anonymous_story_publish_immediate_calls_publish_now_per_platfo
 
     calls = []
 
-    async def fake_publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, image_url, background_id=None):
-        calls.append((platform_name, image_url, background_id))
+    async def fake_publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, background_id=None):
+        calls.append((platform_name, background_id))
         return {"success": platform_name == "facebook"}
 
     monkeypatch.setattr(app, "_publish_anonymous_story_now", fake_publish_anonymous_story_now)
 
     results = asyncio.run(app._dispatch_anonymous_story_publish(
         "user-1", "story-1", "Une histoire", "texte", "sunset",
-        ["facebook", "linkedin"], 5, None, "UTC", False, "https://example.com/bg.png",
+        ["facebook", "linkedin"], 5, None, "UTC", False,
     ))
 
     assert calls == [
-        ("facebook", "https://example.com/bg.png", "sunset"),
-        ("linkedin", "https://example.com/bg.png", "sunset"),
+        ("facebook", "sunset"),
+        ("linkedin", "sunset"),
     ]
     assert results == {"facebook": {"success": True}, "linkedin": {"success": False}}
 
@@ -2668,54 +2575,34 @@ def test_dispatch_anonymous_story_publish_scheduled_schedules_each_platform(monk
     scheduled_for = app._utcnow() + app.timedelta(days=1)
     results = asyncio.run(app._dispatch_anonymous_story_publish(
         "user-1", "story-1", "Une histoire", "texte", "sunset",
-        ["facebook"], 5, scheduled_for, "UTC", True, None,
+        ["facebook"], 5, scheduled_for, "UTC", True,
     ))
 
     assert calls == [("facebook", "anonymous_story", "story-1", "Une histoire", "sunset")]
     assert results == {"facebook": {"success": True, "scheduled": True}}
 
 
-def test_short_caption_for_story_returns_full_text_when_short(monkeypatch):
-    app = _import_app_with_stubs(monkeypatch)
-
-    assert app._short_caption_for_story("Une histoire courte.") == "Une histoire courte."
-    assert app._short_caption_for_story("") == ""
-
-
-def test_short_caption_for_story_never_returns_the_full_long_text(monkeypatch):
-    # Regression: the platform caption/commentary used to be the entire
-    # story text, duplicating what's already rendered (in full, see
-    # anonymous_stories.render_story_background_image) onto the background
-    # image -- the same wall of text appeared twice.
-    app = _import_app_with_stubs(monkeypatch)
-
-    long_text = "Ceci est une histoire assez longue. " * 20
-    caption = app._short_caption_for_story(long_text)
-
-    assert len(caption) < len(long_text)
-    assert caption != long_text
-    assert caption.endswith("…")
-
-
-def test_publish_linkedin_image_description_is_a_short_teaser_not_full_text(monkeypatch):
+def test_publish_linkedin_posts_full_text_even_when_long(monkeypatch):
+    # No teaser/truncation needed anymore: LinkedIn never renders a
+    # background image (there's nothing left to avoid duplicating text
+    # onto), so the full story goes straight into the post commentary.
     app = _import_app_with_stubs(monkeypatch)
 
     captured = {}
 
-    async def fake_publish_to_linkedin_image(**kwargs):
+    async def fake_create_linkedin_post(**kwargs):
         captured.update(kwargs)
         return {"id": "urn:li:share:1"}
 
-    monkeypatch.setattr(app, "publish_to_linkedin_image", fake_publish_to_linkedin_image)
+    monkeypatch.setattr(app, "_create_linkedin_post", fake_create_linkedin_post)
 
     account = {"platform_user_id": "person-1"}
-    long_text = "Une histoire tres longue qui ne doit jamais etre dupliquee en entier. " * 10
-    content = app.PublishRequest(user_id="u1", text=long_text, image_url="https://example.com/bg.png")
+    long_text = "Une histoire assez longue. " * 20
+    content = app.PublishRequest(user_id="u1", text=long_text)
 
     asyncio.run(app._publish_linkedin(account, "token-1", content, long_text))
 
-    assert captured["description"] != long_text
-    assert len(captured["description"]) < len(long_text)
+    assert captured["commentary"] == long_text
 
 
 def test_validate_caption_source_constraints_defaults_to_caption_limits(monkeypatch):

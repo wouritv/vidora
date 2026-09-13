@@ -99,6 +99,12 @@ export default function AnonymousStoryPublishModal({
                         <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-2">
                             {t("anonymousStories.publishBackgroundLabel", "Arriere-plan de la publication")}
                         </label>
+                        <p className="mb-2 text-[11px] text-slate-500 dark:text-zinc-400">
+                            {t(
+                                "anonymousStories.publishBackgroundFacebookOnly",
+                                "Facebook uniquement : LinkedIn ne prend pas en charge ces arriere-plans et publie toujours en texte seul."
+                            )}
+                        </p>
                         {/* Small, fixed-size (60x60) swatches so the full 77-preset
                             catalog fits many per row -- a bounded, internally
                             scrolling grid keeps the whole modal from growing

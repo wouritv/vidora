@@ -274,7 +274,7 @@ def test_download_youtube_source_delegates_to_shared_youtube_download(monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Publish backgrounds (get_background_preset / render_story_background_image)
+# Publish backgrounds (get_background_preset / get_facebook_text_format_preset_id)
 # ---------------------------------------------------------------------------
 
 def test_get_background_preset_returns_matching_preset():
@@ -335,60 +335,3 @@ def test_every_preset_id_is_a_real_facebook_preset_id_string():
         assert preset["id"].isdigit()
 
 
-def test_render_story_background_image_produces_a_valid_png():
-    from PIL import Image
-    import io
-
-    preset = stories.get_background_preset("319468561816672")
-    data = stories.render_story_background_image("Une courte histoire anonyme.", preset, size=(200, 200))
-
-    assert isinstance(data, bytes)
-    img = Image.open(io.BytesIO(data))
-    assert img.format == "PNG"
-    assert img.size == (200, 200)
-
-
-def test_render_story_background_image_handles_long_text_without_error():
-    preset = stories.get_background_preset("1032899107855087")
-    long_text = "Ceci est une phrase repetee pour tester le retour a la ligne. " * 40
-
-    data = stories.render_story_background_image(long_text, preset, size=(300, 300))
-
-    assert isinstance(data, bytes)
-    assert len(data) > 0
-
-
-def test_render_story_background_image_never_truncates_the_story():
-    # Regression: the image used to hard-truncate anything past 600 chars
-    # ("...") while the platform caption showed the full text underneath
-    # -- the rendered "publication" must always carry the complete story,
-    # growing the canvas taller rather than cutting it off.
-    from PIL import Image
-    import io
-
-    preset = stories.get_background_preset("319468561816672")
-    long_text = (
-        "Ceci est une phrase de test qui va se repeter plusieurs fois pour simuler une "
-        "histoire tres longue avec de nombreux paragraphes et details divers sur le vecu "
-        "de la personne. "
-    ) * 40
-    assert len(long_text) > 600
-
-    data = stories.render_story_background_image(long_text, preset)
-    img = Image.open(io.BytesIO(data))
-
-    assert img.size[0] == 1080
-    assert img.size[1] > 1080
-
-
-def test_render_story_background_image_supports_a_solid_color():
-    from PIL import Image
-    import io
-
-    preset = stories.get_background_preset("1881421442117417")
-    data = stories.render_story_background_image("Texte court.", preset, size=(200, 200))
-    img = Image.open(io.BytesIO(data)).convert("RGB")
-
-    # Corners far from the centered text should be the flat preset color.
-    assert img.getpixel((2, 2)) == (0, 0, 0)
-    assert img.getpixel((197, 197)) == (0, 0, 0)
