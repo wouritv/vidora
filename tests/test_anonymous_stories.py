@@ -335,16 +335,6 @@ def test_every_preset_meta_preset_id_field_is_none_or_a_digit_string():
         assert meta_id is None or (isinstance(meta_id, str) and meta_id.isdigit())
 
 
-def test_facebook_text_fits_native_background_respects_the_char_limit():
-    short_text = "x" * stories.FACEBOOK_TEXT_FORMAT_MAX_CHARS
-    long_text = "x" * (stories.FACEBOOK_TEXT_FORMAT_MAX_CHARS + 1)
-
-    assert stories.facebook_text_fits_native_background(short_text) is True
-    assert stories.facebook_text_fits_native_background(long_text) is False
-    assert stories.facebook_text_fits_native_background("") is True
-    assert stories.facebook_text_fits_native_background("   ") is True
-
-
 def test_render_story_background_image_produces_a_valid_png():
     from PIL import Image
     import io

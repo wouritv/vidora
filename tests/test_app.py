@@ -2216,19 +2216,33 @@ def test_publish_request_supports_image_url(monkeypatch):
     assert default_payload.image_url is None
 
 
-def test_publish_facebook_uses_photo_branch_when_only_image_url_set(monkeypatch):
-    # A story publish has no video, only a rendered background image --
-    # _publish_facebook must route that straight to the photo endpoint
-    # instead of the video-then-text-fallback path used by reels/captions.
+def test_publish_facebook_ignores_image_url_and_posts_plain_text(monkeypatch):
+    # Spec correction: an anonymous-story publish must NEVER become an
+    # image post on Facebook, in any case -- image_url is only ever
+    # meaningful to LinkedIn (which has no native background feature).
+    # Without a mapped facebook_text_format_preset_id, Facebook publishes
+    # the story as an ordinary plain-text post.
     app = _import_app_with_stubs(monkeypatch)
 
-    calls = []
+    captured = {}
 
-    async def fake_publish_to_facebook_photo(**kwargs):
-        calls.append(kwargs)
-        return {"id": "111_222"}
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
 
-    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, data=None):
+            captured["url"] = url
+            captured["data"] = data
+            request = app.httpx.Request("POST", url)
+            return app.httpx.Response(200, json={"id": "111_222"}, request=request)
+
+    monkeypatch.setattr(app.httpx, "AsyncClient", _FakeAsyncClient)
 
     account = {"platform_user_id": "page-1"}
     content = app.PublishRequest(user_id="u1", text="hello", image_url="https://example.com/bg.png")
@@ -2236,111 +2250,45 @@ def test_publish_facebook_uses_photo_branch_when_only_image_url_set(monkeypatch)
     result = asyncio.run(app._publish_facebook(account, "token-1", content, "hello"))
 
     assert result == {"id": "111_222"}
-    assert calls == [{
-        "access_token": "token-1",
-        "target_id": "page-1",
-        "image_url": "https://example.com/bg.png",
-        "message": "hello",
-    }]
+    assert captured["url"] == "https://graph.facebook.com/page-1/feed"
+    assert captured["data"] == {"message": "hello", "access_token": "token-1"}
 
 
-def test_publish_facebook_uses_native_background_when_preset_and_short_text(monkeypatch):
+def test_publish_facebook_uses_native_background_when_preset_mapped(monkeypatch):
     # Spec: "Facebook — Publication de posts texte avec arriere-plan" --
-    # a short story with a mapped preset must publish as Meta's native
-    # colored-background text (text_format_preset_id), never as an image.
-    app = _import_app_with_stubs(monkeypatch)
-
-    native_calls = []
-    photo_calls = []
-
-    async def fake_publish_to_facebook_text_with_background(**kwargs):
-        native_calls.append(kwargs)
-        return {"id": "111_222"}
-
-    async def fake_publish_to_facebook_photo(**kwargs):
-        photo_calls.append(kwargs)
-        return {"id": "should-not-be-called"}
-
-    monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
-    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
-
-    account = {"platform_user_id": "page-1"}
-    content = app.PublishRequest(
-        user_id="u1", text="Une courte histoire.", image_url="https://example.com/bg.png",
-        facebook_text_format_preset_id="1881421442117417",
-    )
-
-    result = asyncio.run(app._publish_facebook(account, "token-1", content, "Une courte histoire."))
-
-    assert result == {"id": "111_222"}
-    assert photo_calls == []
-    assert native_calls == [{
-        "access_token": "token-1", "page_id": "page-1",
-        "message": "Une courte histoire.", "meta_preset_id": "1881421442117417",
-    }]
-
-
-def test_publish_facebook_skips_native_when_text_too_long(monkeypatch):
+    # a story with a mapped preset must publish as Meta's native
+    # colored-background text (text_format_preset_id), never as an image,
+    # and regardless of text length: Facebook truncates long text behind
+    # its own "See more" expander while keeping the background, confirmed
+    # against Publer (which uses this same mechanism).
     app = _import_app_with_stubs(monkeypatch)
 
     native_calls = []
 
     async def fake_publish_to_facebook_text_with_background(**kwargs):
         native_calls.append(kwargs)
-        return {"id": "should-not-be-called"}
-
-    async def fake_publish_to_facebook_photo(**kwargs):
         return {"id": "111_222"}
 
     monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
-    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
 
     account = {"platform_user_id": "page-1"}
-    long_text = "Une histoire bien trop longue pour tenir dans le format natif. " * 5
+    long_text = "Une histoire assez longue pour depasser le seuil de 130 caracteres de Facebook. " * 5
     content = app.PublishRequest(
-        user_id="u1", text=long_text, image_url="https://example.com/bg.png",
-        facebook_text_format_preset_id="1881421442117417",
+        user_id="u1", text=long_text, facebook_text_format_preset_id="1881421442117417",
     )
 
     result = asyncio.run(app._publish_facebook(account, "token-1", content, long_text))
 
     assert result == {"id": "111_222"}
-    assert native_calls == []
+    assert native_calls == [{
+        "access_token": "token-1", "page_id": "page-1",
+        "message": long_text, "meta_preset_id": "1881421442117417",
+    }]
 
 
-def test_publish_facebook_falls_back_to_image_when_meta_rejects_native(monkeypatch):
-    # Requirement 4: "Verifier au prealable ou gerer proprement le cas ou
-    # Meta refuse le text_format_preset_id" + "prevoir un fallback vers une
-    # publication image generee par Vireel".
-    app = _import_app_with_stubs(monkeypatch)
-
-    async def fake_publish_to_facebook_text_with_background(**kwargs):
-        raise app.HTTPException(status_code=502, detail="Facebook API error (400): unsupported preset")
-
-    photo_calls = []
-
-    async def fake_publish_to_facebook_photo(**kwargs):
-        photo_calls.append(kwargs)
-        return {"id": "111_222"}
-
-    monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
-    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
-
-    account = {"platform_user_id": "page-1"}
-    content = app.PublishRequest(
-        user_id="u1", text="Une courte histoire.", image_url="https://example.com/bg.png",
-        facebook_text_format_preset_id="1881421442117417",
-    )
-
-    result = asyncio.run(app._publish_facebook(account, "token-1", content, "Une courte histoire."))
-
-    assert result["id"] == "111_222"
-    assert result["native_background_failed"] is True
-    assert "unsupported preset" in result["native_background_error"]
-    assert len(photo_calls) == 1
-
-
-def test_publish_facebook_native_failure_without_fallback_image_reraises(monkeypatch):
+def test_publish_facebook_native_failure_always_reraises(monkeypatch):
+    # There is no fallback: per spec, the publication must remain text and
+    # in no case become an image, so a native failure surfaces as-is.
     app = _import_app_with_stubs(monkeypatch)
 
     async def fake_publish_to_facebook_text_with_background(**kwargs):
@@ -2349,10 +2297,7 @@ def test_publish_facebook_native_failure_without_fallback_image_reraises(monkeyp
     monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
 
     account = {"platform_user_id": "page-1"}
-    content = app.PublishRequest(
-        user_id="u1", text="Une courte histoire.", image_url=None,
-        facebook_text_format_preset_id="1881421442117417",
-    )
+    content = app.PublishRequest(user_id="u1", text="Une courte histoire.", facebook_text_format_preset_id="1881421442117417")
 
     with pytest.raises(app.HTTPException):
         asyncio.run(app._publish_facebook(account, "token-1", content, "Une courte histoire."))
@@ -2402,7 +2347,7 @@ def test_get_facebook_text_format_preset_id_maps_known_presets(monkeypatch):
     assert app.anonymous_stories.get_facebook_text_format_preset_id(None) is None
     # A preset with no Facebook mapping (e.g. a pastel color with no close
     # native equivalent) must resolve to None -- callers treat that as
-    # "use the image fallback", never as an error.
+    # "publish as plain text", never as "use an image instead".
     assert app.anonymous_stories.get_facebook_text_format_preset_id("peach") is None
 
 
@@ -2432,34 +2377,36 @@ def test_publish_linkedin_uses_image_branch_when_only_image_url_set(monkeypatch)
 
 
 def test_publish_facebook_still_falls_back_to_video_when_video_url_set(monkeypatch):
-    # Guard against the image branch swallowing the existing reel/caption
-    # behavior: when a video_url is present, the video-then-text fallback
-    # must still run (photo branch is only for image-only, no-video posts).
+    # Guard against the native-background branch swallowing the existing
+    # reel/caption behavior: when a video_url is present, the
+    # video-then-text fallback must still run even if a preset is also set
+    # (a background text post can never be combined with a video).
     app = _import_app_with_stubs(monkeypatch)
 
-    photo_calls = []
+    native_calls = []
     video_calls = []
 
-    async def fake_publish_to_facebook_photo(**kwargs):
-        photo_calls.append(kwargs)
+    async def fake_publish_to_facebook_text_with_background(**kwargs):
+        native_calls.append(kwargs)
         return {"id": "should-not-be-called"}
 
     async def fake_publish_to_facebook_video(**kwargs):
         video_calls.append(kwargs)
         return {"id": "987654321"}
 
-    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+    monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
     monkeypatch.setattr(app, "publish_to_facebook_video", fake_publish_to_facebook_video)
 
     account = {"platform_user_id": "page-1"}
     content = app.PublishRequest(
-        user_id="u1", text="hello", video_url="https://example.com/v.mp4", image_url="https://example.com/bg.png",
+        user_id="u1", text="hello", video_url="https://example.com/v.mp4",
+        facebook_text_format_preset_id="1881421442117417",
     )
 
     result = asyncio.run(app._publish_facebook(account, "token-1", content, "hello"))
 
     assert result == {"id": "987654321"}
-    assert photo_calls == []
+    assert native_calls == []
     assert len(video_calls) == 1
 
 
@@ -2634,54 +2581,6 @@ def test_anonymous_stories_backgrounds_includes_no_background_option_last(monkey
     assert preset_ids == {preset["id"] for preset in app.anonymous_stories.BACKGROUND_PRESETS}
 
 
-def test_publish_to_facebook_photo_uploads_bytes_via_multipart(monkeypatch):
-    # Regression: passing `url` and letting Facebook fetch the image
-    # server-side reliably failed in production ("Missing or invalid image
-    # file", code 324/2069019) even for a valid, correctly content-typed
-    # PNG background. Uploading the bytes ourselves via multipart removes
-    # Facebook's own server-side fetch step from the equation entirely --
-    # the same approach publish_to_linkedin_image already uses.
-    app = _import_app_with_stubs(monkeypatch)
-
-    async def fake_download_to_file(url, dest_path, timeout=180.0):
-        with open(dest_path, "wb") as f:
-            f.write(b"fake-png-bytes")
-
-    monkeypatch.setattr(app, "_download_to_file", fake_download_to_file)
-
-    captured = {}
-
-    class _FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def post(self, url, data=None, files=None):
-            captured["url"] = url
-            captured["data"] = data
-            captured["files"] = files
-            request = app.httpx.Request("POST", url)
-            return app.httpx.Response(200, json={"id": "123_456"}, request=request)
-
-    monkeypatch.setattr(app.httpx, "AsyncClient", _FakeAsyncClient)
-
-    result = asyncio.run(app.publish_to_facebook_photo(
-        access_token="token-1", target_id="page-1", image_url="https://example.com/bg.png", message="hello",
-    ))
-
-    assert result == {"id": "123_456"}
-    assert captured["url"] == "https://graph.facebook.com/v19.0/page-1/photos"
-    assert "url" not in captured["data"]
-    assert captured["data"] == {"caption": "hello", "access_token": "token-1"}
-    assert captured["files"]["source"][1] == b"fake-png-bytes"
-    assert captured["files"]["source"][2] == "image/png"
-
-
 def test_story_background_presign_expiration_within_sigv4_limit(monkeypatch):
     # Regression: this constant was 14 days (1209600s), but AWS SigV4
     # presigned URLs have a hard protocol maximum of 7 days (604800s) for
@@ -2794,27 +2693,6 @@ def test_short_caption_for_story_never_returns_the_full_long_text(monkeypatch):
     assert len(caption) < len(long_text)
     assert caption != long_text
     assert caption.endswith("…")
-
-
-def test_publish_facebook_photo_caption_is_a_short_teaser_not_full_text(monkeypatch):
-    app = _import_app_with_stubs(monkeypatch)
-
-    captured = {}
-
-    async def fake_publish_to_facebook_photo(**kwargs):
-        captured.update(kwargs)
-        return {"id": "111_222"}
-
-    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
-
-    account = {"platform_user_id": "page-1"}
-    long_text = "Une histoire tres longue qui ne doit jamais etre dupliquee en entier. " * 10
-    content = app.PublishRequest(user_id="u1", text=long_text, image_url="https://example.com/bg.png")
-
-    asyncio.run(app._publish_facebook(account, "token-1", content, long_text))
-
-    assert captured["message"] != long_text
-    assert len(captured["message"]) < len(long_text)
 
 
 def test_publish_linkedin_image_description_is_a_short_teaser_not_full_text(monkeypatch):
