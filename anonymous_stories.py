@@ -395,6 +395,11 @@ def download_youtube_source(url: str, output_dir: str) -> Dict[str, str]:
 
 _STORY_BACKGROUND_FONT_PATH = os.path.join("fonts", "NotoSerif-Bold.ttf")
 
+# Sentinel background_id meaning "no image at all" -- the publish flow
+# skips rendering entirely and posts the story as a plain text status
+# (still fully supported by both Facebook's and LinkedIn's text-post path).
+NO_BACKGROUND_ID = "none"
+
 BACKGROUND_PRESETS: List[Dict[str, Any]] = [
     {"id": "midnight", "name": "Midnight Blue", "colors": ["#0f2027", "#203a43", "#2c5364"], "text_color": "#ffffff"},
     {"id": "sunset", "name": "Sunset", "colors": ["#ff512f", "#dd2476"], "text_color": "#ffffff"},
@@ -402,6 +407,12 @@ BACKGROUND_PRESETS: List[Dict[str, Any]] = [
     {"id": "royal", "name": "Royal Purple", "colors": ["#41295a", "#2f0743"], "text_color": "#ffffff"},
     {"id": "charcoal", "name": "Charcoal", "colors": ["#232526", "#414345"], "text_color": "#ffffff"},
     {"id": "ivory", "name": "Ivory", "colors": ["#f5f5f0", "#e0e0d8"], "text_color": "#1a1a1a"},
+    {"id": "ocean", "name": "Ocean", "colors": ["#00c6ff", "#0072ff"], "text_color": "#ffffff"},
+    {"id": "rose_gold", "name": "Rose Gold", "colors": ["#f6d365", "#fda085"], "text_color": "#3a2a1a"},
+    {"id": "emerald", "name": "Emerald", "colors": ["#11998e", "#38ef7d"], "text_color": "#ffffff"},
+    {"id": "berry", "name": "Berry", "colors": ["#c31432", "#240b36"], "text_color": "#ffffff"},
+    {"id": "slate", "name": "Slate", "colors": ["#485563", "#29323c"], "text_color": "#ffffff"},
+    {"id": "peach", "name": "Peach", "colors": ["#ffecd2", "#fcb69f"], "text_color": "#3a2a1a"},
 ]
 
 

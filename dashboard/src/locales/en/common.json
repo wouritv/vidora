@@ -471,7 +471,9 @@
     "reelgenerator": "Generate reels",
     "reelgeneratorSubtitle": "Upload a video and let AI extract key reel moments.",
     "captionGenerator": "Generate Captions",
-    "captionGeneratorSubtitle": "Upload a video and let AI assist you in adding subtitles."
+    "captionGeneratorSubtitle": "Upload a video and let AI assist you in adding subtitles.",
+    "anonymousStoryGenerator": "Create an anonymous story",
+    "anonymousStoryGeneratorSubtitle": "Turn a testimonial video into an anonymized written story, ready to publish."
   },
   "social": {
     "socialPublications": "Social posts",
@@ -690,6 +692,8 @@
     "publishModalTitle": "Publish the story",
     "publishSelectPlatformLabel": "Choose the platforms",
     "publishBackgroundLabel": "Post background",
+    "publishBackgroundNone": "No background (text only)",
+    "publishBackgroundNoneShort": "None",
     "publishSelectPlatform": "Select at least one platform.",
     "publishSelectDateTime": "Please select a date and time.",
     "publishSuccess": "Post published successfully.",

@@ -1,6 +1,8 @@
 import React from 'react';
-import { X, Loader2, Share2, Calendar, Clock, Facebook, Linkedin, CheckCircle, AlertCircle, Check } from 'lucide-react';
+import { X, Loader2, Share2, Calendar, Clock, Facebook, Linkedin, CheckCircle, AlertCircle, Check, Ban } from 'lucide-react';
 import { useTranslation } from "../state/LanguageContext";
+
+const NO_BACKGROUND_ID = 'none';
 
 // Anonymous stories only publish to Facebook/LinkedIn (per the feature
 // request), unlike SharePostModal's full tiktok/instagram/youtube/facebook/
@@ -76,6 +78,23 @@ export default function AnonymousStoryPublishModal({
                         <div className="grid grid-cols-3 gap-2">
                             {(backgrounds || []).map((preset) => {
                                 const isSelected = backgroundId === preset.id;
+                                const isNoBackground = preset.id === NO_BACKGROUND_ID;
+
+                                if (isNoBackground) {
+                                    return (
+                                        <button
+                                            key={preset.id}
+                                            type="button"
+                                            onClick={() => onBackgroundChange(preset.id)}
+                                            title={t("anonymousStories.publishBackgroundNone", "No background (text only)")}
+                                            className={`relative h-14 rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition ${isSelected ? 'border-primary text-primary' : 'border-slate-300 dark:border-white/20 text-slate-500 dark:text-zinc-400'}`}
+                                        >
+                                            <Ban size={16} />
+                                            {t("anonymousStories.publishBackgroundNoneShort", "None")}
+                                        </button>
+                                    );
+                                }
+
                                 const colors = preset.colors && preset.colors.length ? preset.colors : ['#0f2027'];
                                 const gradientColors = colors.length > 1 ? colors : [colors[0], colors[0]];
                                 return (

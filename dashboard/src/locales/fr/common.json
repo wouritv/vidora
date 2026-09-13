@@ -472,7 +472,9 @@
     "reelgenerator": "Générer des réels",
     "reelgeneratorSubtitle": "Uploade une vidéo et laisse le système boosté à l'IA extraire les moments réels.",
     "captionGenerator": "Générer des Sous-titres",
-    "captionGeneratorSubtitle": "Upload une vidéo et laisse le système boosté à l'IA t'accompagner dans l'ajout de sous titres."
+    "captionGeneratorSubtitle": "Upload une vidéo et laisse le système boosté à l'IA t'accompagner dans l'ajout de sous titres.",
+    "anonymousStoryGenerator": "Créer une histoire anonyme",
+    "anonymousStoryGeneratorSubtitle": "Transforme une vidéo témoignage en histoire écrite anonymisée, prête à publier."
   },
   "social": {
     "socialPublications": "Publications sociales",
@@ -691,6 +693,8 @@
     "publishModalTitle": "Publier l'histoire",
     "publishSelectPlatformLabel": "Choisir les plateformes",
     "publishBackgroundLabel": "Arriere-plan de la publication",
+    "publishBackgroundNone": "Aucun arriere-plan (texte seul)",
+    "publishBackgroundNoneShort": "Aucun",
     "publishSelectPlatform": "Selectionnez au moins une plateforme.",
     "publishSelectDateTime": "Selectionnez une date et une heure.",
     "publishSuccess": "Publication envoyee avec succes.",

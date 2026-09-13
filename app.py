@@ -8418,12 +8418,14 @@ async def list_anonymous_stories_endpoint(
 
 @app.get("/api/anonymous-stories/backgrounds", responses={401: {"description": "Unauthorized"}})
 async def list_anonymous_story_backgrounds(user_id: Annotated[str, Depends(get_user_id_header)]):
-    return {
-        "items": [
-            {"id": preset["id"], "name": preset["name"], "colors": preset["colors"], "text_color": preset["text_color"]}
-            for preset in anonymous_stories.BACKGROUND_PRESETS
-        ],
-    }
+    items = [
+        {"id": preset["id"], "name": preset["name"], "colors": preset["colors"], "text_color": preset["text_color"]}
+        for preset in anonymous_stories.BACKGROUND_PRESETS
+    ]
+    # Appended last so the frontend's "pick items[0] as the default
+    # selection" logic still lands on a color preset, not "no background".
+    items.append({"id": anonymous_stories.NO_BACKGROUND_ID, "name": "No background", "colors": [], "text_color": None})
+    return {"items": items}
 
 
 # Registered before /api/anonymous-stories/{story_id}: FastAPI/Starlette
@@ -8564,7 +8566,15 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
 # account has connected among tiktok/instagram/youtube/facebook/linkedin.
 _ANONYMOUS_STORY_PUBLISH_PLATFORMS = {"facebook", "linkedin"}
 
-_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS = 14 * 24 * 3600  # long enough for a scheduled post to still resolve the image days later
+
+# AWS SigV4 presigned URLs have a hard protocol maximum of 7 days
+# (604800s) for X-Amz-Expires -- S3 rejects the request outright with 400
+# Bad Request if it's exceeded, regardless of how soon the URL is actually
+# used. This was set to 14 days, which made every story background image
+# unusable from the moment it was generated (both Facebook's own fetch and
+# our own _download_to_file hit the same 400). 604800 is the most headroom
+# SigV4 allows for a scheduled post to still resolve the image days later.
+_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS = 7 * 24 * 3600
 
 
 def _resolve_anonymous_story_platforms(platforms: Optional[List[str]]) -> List[str]:
@@ -8600,6 +8610,18 @@ async def _render_and_upload_story_background(user_id: str, story_id: str, text:
     if not presigned_url:
         raise HTTPException(status_code=502, detail="Failed to generate URL for story background image")
     return presigned_url
+
+
+async def _resolve_story_publish_image(user_id: str, story_id: str, text: str, background_id: Optional[str]) -> Optional[str]:
+    """Resolve the image to publish alongside `text`, or None for a
+    text-only post ("no background"). Always rendered fresh right when
+    it's about to be used -- for a scheduled publish this must be called
+    at fire time (see _build_scheduled_publish_payload), never persisted
+    across the schedule gap, since a presigned S3 URL can't outlive AWS
+    SigV4's 7-day cap and a story can be scheduled further out than that."""
+    if background_id == anonymous_stories.NO_BACKGROUND_ID:
+        return None
+    return await _render_and_upload_story_background(user_id, story_id, text, background_id)
 
 
 async def _publish_anonymous_story_now(
@@ -8645,6 +8667,42 @@ async def _publish_anonymous_story_now(
         }
 
 
+def _resolve_anonymous_story_schedule(payload: "AnonymousStoryPublishRequest"):
+    """Resolve and validate the requested schedule, returning
+    (scheduled_for, is_scheduled). Pulled out of
+    publish_anonymous_story_endpoint to keep its cognitive complexity
+    down."""
+    scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
+    if payload.scheduled_date and not scheduled_for:
+        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
+    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
+    return scheduled_for, is_scheduled
+
+
+async def _dispatch_anonymous_story_publish(
+    user_id: str, story_id: str, story_title: str, text_value: str, background_id: str,
+    selected_platforms: List[str], publish_priority: int, scheduled_for, timezone: Optional[str],
+    is_scheduled: bool, image_url: Optional[str],
+) -> Dict[str, Any]:
+    """Publish (or schedule) the story across every selected platform.
+    Pulled out of publish_anonymous_story_endpoint to keep its cognitive
+    complexity down."""
+    results: Dict[str, Any] = {}
+    for platform_name in selected_platforms:
+        if is_scheduled:
+            results[platform_name] = await _schedule_share_publish_job(
+                user_id, platform_name, "anonymous_story", story_id, publish_priority,
+                scheduled_for, timezone, story_title, text_value, "",
+                background_id=background_id,
+            )
+            continue
+
+        results[platform_name] = await _publish_anonymous_story_now(
+            user_id, platform_name, publish_priority, text_value, image_url,
+        )
+    return results
+
+
 @app.post("/api/anonymous-stories/{story_id}/publish", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def publish_anonymous_story_endpoint(
     story_id: str, payload: AnonymousStoryPublishRequest, user_id: Annotated[str, Depends(get_user_id_header)],
@@ -8664,29 +8722,23 @@ async def publish_anonymous_story_endpoint(
 
     selected_platforms = _resolve_anonymous_story_platforms(payload.platforms)
     publish_priority = await _resolve_user_job_priority(user_id)
-    scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
-    if payload.scheduled_date and not scheduled_for:
-        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
-    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
+    scheduled_for, is_scheduled = _resolve_anonymous_story_schedule(payload)
+    background_id = payload.background_id or anonymous_stories.BACKGROUND_PRESETS[0]["id"]
 
-    background_preset = anonymous_stories.get_background_preset(payload.background_id)
-    image_url = await _render_and_upload_story_background(user_id, story_id, text_value, background_preset["id"])
+    # For an immediate publish, render once and reuse it for every selected
+    # platform. For a scheduled publish, rendering is deferred to the
+    # moment each platform's job actually fires (see
+    # _build_scheduled_publish_payload) -- a presigned S3 URL generated now
+    # could easily outlive AWS SigV4's 7-day cap before the job runs.
+    image_url = None
+    if not is_scheduled:
+        image_url = await _resolve_story_publish_image(user_id, story_id, text_value, background_id)
 
-    results: Dict[str, Any] = {}
-    overall_success = True
-    for platform_name in selected_platforms:
-        if is_scheduled:
-            results[platform_name] = await _schedule_share_publish_job(
-                user_id, platform_name, "anonymous_story", story_id, publish_priority,
-                scheduled_for, payload.timezone, str(row.get("title") or "Vireel"), text_value, "",
-                image_url=image_url,
-            )
-            continue
-
-        result = await _publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, image_url)
-        results[platform_name] = result
-        if not result["success"]:
-            overall_success = False
+    results = await _dispatch_anonymous_story_publish(
+        user_id, story_id, str(row.get("title") or "Vireel"), text_value, background_id,
+        selected_platforms, publish_priority, scheduled_for, payload.timezone, is_scheduled, image_url,
+    )
+    overall_success = all(result.get("success") for result in results.values())
 
     if not is_scheduled:
         await _debit_publish_credits_after_share(user_id, story_id, results)
@@ -8694,7 +8746,7 @@ async def publish_anonymous_story_endpoint(
     return {
         "success": overall_success,
         "results": results,
-        "background_id": background_preset["id"],
+        "background_id": background_id,
         "scheduled": is_scheduled,
     }
 
@@ -8702,7 +8754,7 @@ async def publish_anonymous_story_endpoint(
 async def _schedule_share_publish_job(
     user_id: str, platform_name: str, source_type: str, source_id: str, publish_priority: int,
     scheduled_for, timezone: Optional[str], final_title: str, final_description: str, media_url: str,
-    image_url: Optional[str] = None,
+    background_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     publish_job_id = await _insert_publish_job(
         user_id=user_id,
@@ -8718,7 +8770,7 @@ async def _schedule_share_publish_job(
             "title": final_title,
             "description": final_description,
             "media_url": media_url,
-            "image_url": image_url,
+            "background_id": background_id,
         },
     )
     return {
@@ -9594,19 +9646,25 @@ async def _debit_scheduled_publish_credits(user_id: str, task_payload: Dict[str,
     )
 
 
-def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str, Any]) -> "PublishRequest":
+async def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str, Any]) -> "PublishRequest":
     """Build the PublishRequest for a due scheduled publish job. Pulled out
     of _execute_scheduled_publish_job to keep its cognitive complexity down:
-    a story publish (text + rendered background image, no media_url
-    requirement) and a reel/caption publish (video_url required) need
-    different shapes here."""
+    a story publish (text + a background image rendered fresh right now,
+    no media_url requirement) and a reel/caption publish (video_url
+    required) need different shapes here. The story's background is
+    rendered here rather than at schedule time -- a presigned S3 URL
+    generated then could easily outlive AWS SigV4's 7-day cap before this
+    job fires."""
     description = str(task_payload.get("description") or "")
     title = str(task_payload.get("title") or "Vireel")
 
     if str(task_payload.get("source_type") or "") == "anonymous_story":
+        image_url = await _resolve_story_publish_image(
+            user_id, str(task_payload.get("source_id") or ""), description, task_payload.get("background_id"),
+        )
         return PublishRequest(
             user_id=user_id, title=title, description=description, text=description,
-            caption=description, image_url=task_payload.get("image_url") or None,
+            caption=description, image_url=image_url,
         )
 
     media_url = str(task_payload.get("media_url") or "").strip()
@@ -9636,7 +9694,7 @@ async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
         if not account:
             raise HTTPException(status_code=404, detail=f"No connected {platform} account found")
 
-        publish_payload = _build_scheduled_publish_payload(user_id, task_payload)
+        publish_payload = await _build_scheduled_publish_payload(user_id, task_payload)
 
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
