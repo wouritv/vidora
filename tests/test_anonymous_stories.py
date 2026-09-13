@@ -333,3 +333,39 @@ def test_render_story_background_image_handles_long_text_without_error():
 
     assert isinstance(data, bytes)
     assert len(data) > 0
+
+
+def test_render_story_background_image_never_truncates_the_story():
+    # Regression: the image used to hard-truncate anything past 600 chars
+    # ("...") while the platform caption showed the full text underneath
+    # -- the rendered "publication" must always carry the complete story,
+    # growing the canvas taller rather than cutting it off.
+    from PIL import Image
+    import io
+
+    preset = stories.get_background_preset("midnight")
+    long_text = (
+        "Ceci est une phrase de test qui va se repeter plusieurs fois pour simuler une "
+        "histoire tres longue avec de nombreux paragraphes et details divers sur le vecu "
+        "de la personne. "
+    ) * 40
+    assert len(long_text) > 600
+
+    data = stories.render_story_background_image(long_text, preset)
+    img = Image.open(io.BytesIO(data))
+
+    assert img.size[0] == 1080
+    assert img.size[1] > 1080
+
+
+def test_render_story_background_image_supports_a_solid_color():
+    from PIL import Image
+    import io
+
+    preset = stories.get_background_preset("solid_black")
+    data = stories.render_story_background_image("Texte court.", preset, size=(200, 200))
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+
+    # Corners far from the centered text should be the flat preset color.
+    assert img.getpixel((2, 2)) == (0, 0, 0)
+    assert img.getpixel((197, 197)) == (0, 0, 0)

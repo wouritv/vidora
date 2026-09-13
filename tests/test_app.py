@@ -2607,3 +2607,67 @@ def test_dispatch_anonymous_story_publish_scheduled_schedules_each_platform(monk
 
     assert calls == [("facebook", "anonymous_story", "story-1", "Une histoire", "sunset")]
     assert results == {"facebook": {"success": True, "scheduled": True}}
+
+
+def test_short_caption_for_story_returns_full_text_when_short(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app._short_caption_for_story("Une histoire courte.") == "Une histoire courte."
+    assert app._short_caption_for_story("") == ""
+
+
+def test_short_caption_for_story_never_returns_the_full_long_text(monkeypatch):
+    # Regression: the platform caption/commentary used to be the entire
+    # story text, duplicating what's already rendered (in full, see
+    # anonymous_stories.render_story_background_image) onto the background
+    # image -- the same wall of text appeared twice.
+    app = _import_app_with_stubs(monkeypatch)
+
+    long_text = "Ceci est une histoire assez longue. " * 20
+    caption = app._short_caption_for_story(long_text)
+
+    assert len(caption) < len(long_text)
+    assert caption != long_text
+    assert caption.endswith("…")
+
+
+def test_publish_facebook_photo_caption_is_a_short_teaser_not_full_text(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    captured = {}
+
+    async def fake_publish_to_facebook_photo(**kwargs):
+        captured.update(kwargs)
+        return {"id": "111_222"}
+
+    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+
+    account = {"platform_user_id": "page-1"}
+    long_text = "Une histoire tres longue qui ne doit jamais etre dupliquee en entier. " * 10
+    content = app.PublishRequest(user_id="u1", text=long_text, image_url="https://example.com/bg.png")
+
+    asyncio.run(app._publish_facebook(account, "token-1", content, long_text))
+
+    assert captured["message"] != long_text
+    assert len(captured["message"]) < len(long_text)
+
+
+def test_publish_linkedin_image_description_is_a_short_teaser_not_full_text(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    captured = {}
+
+    async def fake_publish_to_linkedin_image(**kwargs):
+        captured.update(kwargs)
+        return {"id": "urn:li:share:1"}
+
+    monkeypatch.setattr(app, "publish_to_linkedin_image", fake_publish_to_linkedin_image)
+
+    account = {"platform_user_id": "person-1"}
+    long_text = "Une histoire tres longue qui ne doit jamais etre dupliquee en entier. " * 10
+    content = app.PublishRequest(user_id="u1", text=long_text, image_url="https://example.com/bg.png")
+
+    asyncio.run(app._publish_linkedin(account, "token-1", content, long_text))
+
+    assert captured["description"] != long_text
+    assert len(captured["description"]) < len(long_text)
