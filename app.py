@@ -8416,6 +8416,22 @@ async def list_anonymous_stories_endpoint(
     }
 
 
+@app.get("/api/anonymous-stories/backgrounds", responses={401: {"description": "Unauthorized"}})
+async def list_anonymous_story_backgrounds(user_id: Annotated[str, Depends(get_user_id_header)]):
+    return {
+        "items": [
+            {"id": preset["id"], "name": preset["name"], "colors": preset["colors"], "text_color": preset["text_color"]}
+            for preset in anonymous_stories.BACKGROUND_PRESETS
+        ],
+    }
+
+
+# Registered before /api/anonymous-stories/{story_id}: FastAPI/Starlette
+# matches routes in registration order, so a literal-segment route like
+# this one must come first or a request to /api/anonymous-stories/backgrounds
+# gets swallowed by {story_id}="backgrounds" and 500s trying to look up a
+# story with that as its id (see production incident: postgrest rejects
+# "backgrounds" as an invalid uuid).
 @app.get("/api/anonymous-stories/{story_id}", responses={401: {"description": "Unauthorized"}, 404: {"description": "Not Found"}})
 async def get_anonymous_story_endpoint(story_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
     row = await supabase_get_anonymous_story(story_id, user_id)
@@ -8560,16 +8576,6 @@ def _resolve_anonymous_story_platforms(platforms: Optional[List[str]]) -> List[s
     if not result:
         raise HTTPException(status_code=400, detail="platforms must include at least one of: facebook, linkedin")
     return result
-
-
-@app.get("/api/anonymous-stories/backgrounds", responses={401: {"description": "Unauthorized"}})
-async def list_anonymous_story_backgrounds(user_id: Annotated[str, Depends(get_user_id_header)]):
-    return {
-        "items": [
-            {"id": preset["id"], "name": preset["name"], "colors": preset["colors"], "text_color": preset["text_color"]}
-            for preset in anonymous_stories.BACKGROUND_PRESETS
-        ],
-    }
 
 
 async def _render_and_upload_story_background(user_id: str, story_id: str, text: str, background_id: Optional[str]) -> str:
