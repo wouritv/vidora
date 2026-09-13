@@ -9605,7 +9605,7 @@ async def _debit_scheduled_publish_credits(user_id: str, task_payload: Dict[str,
     )
 
 
-async def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str, Any]) -> "PublishRequest":
+def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str, Any]) -> "PublishRequest":
     """Build the PublishRequest for a due scheduled publish job. Pulled out
     of _execute_scheduled_publish_job to keep its cognitive complexity down:
     a story publish (text only -- Facebook's native colored background,
@@ -9649,7 +9649,7 @@ async def _execute_scheduled_publish_job(job_row: Dict[str, Any]) -> None:
         if not account:
             raise HTTPException(status_code=404, detail=f"No connected {platform} account found")
 
-        publish_payload = await _build_scheduled_publish_payload(user_id, task_payload)
+        publish_payload = _build_scheduled_publish_payload(user_id, task_payload)
 
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or platform_result.get("video_id") or "n/a")
