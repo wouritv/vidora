@@ -2350,3 +2350,27 @@ def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requireme
     assert published_payloads[0].image_url == "https://example.com/bg.png"
     assert published_payloads[0].description == "Le texte complet de l'histoire."
     assert ("job-1", "done", {"external_id": "111_222", "post_url": "https://www.facebook.com/111_222", "error_message": None}) in status_calls
+
+
+def test_anonymous_stories_backgrounds_route_registered_before_story_id_route(monkeypatch):
+    # Regression: FastAPI/Starlette matches routes in registration order.
+    # GET /api/anonymous-stories/{story_id} used to be registered before
+    # GET /api/anonymous-stories/backgrounds, so a request to
+    # .../backgrounds matched story_id="backgrounds" and 500'd trying to
+    # look that up as a story id (postgrest rejected "backgrounds" as an
+    # invalid uuid). Pin the correct registration order, and that the
+    # endpoint actually answers via a real TestClient request.
+    app = _import_app_with_stubs(monkeypatch)
+
+    paths = [getattr(r, "path", None) for r in app.app.routes]
+    backgrounds_index = paths.index("/api/anonymous-stories/backgrounds")
+    story_id_index = paths.index("/api/anonymous-stories/{story_id}")
+    assert backgrounds_index < story_id_index
+
+    client = TestClient(app.app)
+    response = client.get("/api/anonymous-stories/backgrounds", headers=_auth_headers("user-1"))
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) > 0
+    assert all("id" in item and "colors" in item for item in items)
