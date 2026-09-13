@@ -2374,3 +2374,51 @@ def test_anonymous_stories_backgrounds_route_registered_before_story_id_route(mo
     items = response.json()["items"]
     assert len(items) > 0
     assert all("id" in item and "colors" in item for item in items)
+
+
+def test_publish_to_facebook_photo_uploads_bytes_via_multipart(monkeypatch):
+    # Regression: passing `url` and letting Facebook fetch the image
+    # server-side reliably failed in production ("Missing or invalid image
+    # file", code 324/2069019) even for a valid, correctly content-typed
+    # PNG background. Uploading the bytes ourselves via multipart removes
+    # Facebook's own server-side fetch step from the equation entirely --
+    # the same approach publish_to_linkedin_image already uses.
+    app = _import_app_with_stubs(monkeypatch)
+
+    async def fake_download_to_file(url, dest_path, timeout=180.0):
+        with open(dest_path, "wb") as f:
+            f.write(b"fake-png-bytes")
+
+    monkeypatch.setattr(app, "_download_to_file", fake_download_to_file)
+
+    captured = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, data=None, files=None):
+            captured["url"] = url
+            captured["data"] = data
+            captured["files"] = files
+            request = app.httpx.Request("POST", url)
+            return app.httpx.Response(200, json={"id": "123_456"}, request=request)
+
+    monkeypatch.setattr(app.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = asyncio.run(app.publish_to_facebook_photo(
+        access_token="token-1", target_id="page-1", image_url="https://example.com/bg.png", message="hello",
+    ))
+
+    assert result == {"id": "123_456"}
+    assert captured["url"] == "https://graph.facebook.com/v19.0/page-1/photos"
+    assert "url" not in captured["data"]
+    assert captured["data"] == {"caption": "hello", "access_token": "token-1"}
+    assert captured["files"]["source"][1] == b"fake-png-bytes"
+    assert captured["files"]["source"][2] == "image/png"

@@ -10782,13 +10782,31 @@ async def publish_to_facebook_photo(access_token: str, target_id: str, image_url
     if not access_token:
         raise HTTPException(status_code=401, detail="Facebook page access token expired or missing")
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            f"https://graph.facebook.com/v19.0/{target_id}/photos",
-            data={"url": image_url, "caption": message, "access_token": access_token},
-        )
-    await _raise_for_status_or_502(response, "Facebook")
-    return response.json()
+    # Upload the image bytes directly (multipart `source`) instead of
+    # passing `url` and letting Facebook fetch it server-side: in
+    # production, Facebook's crawler consistently failed to fetch our S3
+    # presigned URL ("Missing or invalid image file", code 324/2069019)
+    # even though the object is a valid, correctly content-typed PNG.
+    # Uploading the bytes ourselves removes that whole class of failure --
+    # the same approach publish_to_linkedin_image already uses for LinkedIn.
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    temp_path = os.path.join(UPLOAD_DIR, f"fb_photo_{uuid.uuid4().hex}.png")
+    await _download_to_file(image_url, temp_path)
+
+    try:
+        async with aiofiles.open(temp_path, "rb") as file_handle:
+            image_bytes = await file_handle.read()
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"https://graph.facebook.com/v19.0/{target_id}/photos",
+                data={"caption": message, "access_token": access_token},
+                files={"source": ("background.png", image_bytes, "image/png")},
+            )
+        await _raise_for_status_or_502(response, "Facebook")
+        return response.json()
+    finally:
+        _cleanup_temp_file(temp_path)
 
 
 async def publish_to_facebook_page(page_id: str, page_access_token: str, message: str):
