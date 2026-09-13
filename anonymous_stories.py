@@ -413,6 +413,12 @@ BACKGROUND_PRESETS: List[Dict[str, Any]] = [
     {"id": "berry", "name": "Berry", "colors": ["#c31432", "#240b36"], "text_color": "#ffffff"},
     {"id": "slate", "name": "Slate", "colors": ["#485563", "#29323c"], "text_color": "#ffffff"},
     {"id": "peach", "name": "Peach", "colors": ["#ffecd2", "#fcb69f"], "text_color": "#3a2a1a"},
+    # Solid single-color fills (a one-item `colors` list renders flat, see
+    # _render_gradient_background) alongside the gradients above.
+    {"id": "solid_black", "name": "Black", "colors": ["#000000"], "text_color": "#ffffff"},
+    {"id": "solid_white", "name": "White", "colors": ["#ffffff"], "text_color": "#1a1a1a"},
+    {"id": "solid_blue", "name": "Blue", "colors": ["#1d4ed8"], "text_color": "#ffffff"},
+    {"id": "solid_red", "name": "Red", "colors": ["#dc2626"], "text_color": "#ffffff"},
 ]
 
 
@@ -500,25 +506,37 @@ def _fit_story_text_to_canvas(excerpt: str, width: int, max_text_width: int, max
     return font, font_size, lines, line_heights, line_spacing, total_height
 
 
+# Generous cap so a pathologically long story can't grow the canvas
+# without bound -- ordinary stories (even several paragraphs) fit well
+# under this once the font has shrunk to its readable floor.
+_STORY_BACKGROUND_MAX_HEIGHT = 3600
+
+
 def render_story_background_image(text: str, preset: Dict[str, Any], size: tuple = (1080, 1080)) -> bytes:
-    """Render `text` centered over a preset colored/gradient background,
-    returning PNG bytes. Shrinks the font until the wrapped text fits the
-    canvas so long stories still render legibly."""
-    width, height = size
+    """Render the complete `text` centered over a preset colored/gradient
+    (or solid, when the preset has a single color) background, returning
+    PNG bytes. The story is never truncated: the font shrinks first (see
+    _fit_story_text_to_canvas), and if it still doesn't fit the default
+    height even at the smallest readable size, the canvas grows taller to
+    fit the full text instead of cutting it off -- the rendered image is
+    the entire publication, not an excerpt of it."""
+    width, base_height = size
     padding = int(width * 0.1)
     max_text_width = width - (2 * padding)
-    max_text_height = height - (2 * padding)
 
     excerpt = (text or "").strip()
-    if len(excerpt) > 600:
-        excerpt = excerpt[:597].rstrip() + "..."
 
-    img = _render_gradient_background(size, preset.get("colors") or ["#0f2027"])
-    draw = ImageDraw.Draw(img)
-
+    # Text is measured against a throwaway canvas first since the real
+    # background can't be sized until we know how tall the text needs.
+    measure_draw = ImageDraw.Draw(Image.new("RGB", (width, base_height)))
     font, font_size, lines, line_heights, line_spacing, total_height = _fit_story_text_to_canvas(
-        excerpt, width, max_text_width, max_text_height, draw,
+        excerpt, width, max_text_width, base_height - (2 * padding), measure_draw,
     )
+
+    height = min(max(base_height, total_height + (2 * padding)), _STORY_BACKGROUND_MAX_HEIGHT)
+
+    img = _render_gradient_background((width, height), preset.get("colors") or ["#0f2027"])
+    draw = ImageDraw.Draw(img)
 
     text_color = preset.get("text_color") or "#ffffff"
     current_y = max((height - total_height) // 2, padding // 2)

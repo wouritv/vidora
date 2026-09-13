@@ -11190,6 +11190,22 @@ async def _publish_video_then_text_fallback(has_video: bool, video_publisher, te
         return result
 
 
+def _short_caption_for_story(text_value: str, max_len: int = 150) -> str:
+    """A brief teaser for the platform's own caption/commentary field when
+    publishing an anonymous-story background image. The complete story
+    already lives on the image itself (see
+    anonymous_stories.render_story_background_image, which never
+    truncates it), so repeating the full text again underneath looked
+    broken -- the same wall of text twice, once cut off on the image, once
+    in full below it. This never returns the full text, only a short
+    teaser (LinkedIn's Posts API commentary field can't be blank)."""
+    text = (text_value or "").strip()
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len].rsplit(" ", 1)[0].rstrip(".,;: ")
+    return f"{truncated}…"
+
+
 async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
     _require_platform_user_id(account, "LinkedIn")
     owner_urn = f"urn:li:person:{account.get('platform_user_id')}"
@@ -11206,7 +11222,8 @@ async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_v
 
     if not content.video_url and image_url:
         return await publish_to_linkedin_image(
-            access_token=token, owner_urn=owner_urn, image_url=image_url, description=text_value,
+            access_token=token, owner_urn=owner_urn, image_url=image_url,
+            description=_short_caption_for_story(text_value),
         )
 
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
@@ -11235,7 +11252,7 @@ async def _publish_facebook(account: Dict[str, Any], token: str, content, text_v
     if not content.video_url and image_url:
         return await publish_to_facebook_photo(
             access_token=token, target_id=str(account.get("platform_user_id") or ""),
-            image_url=image_url, message=text_value,
+            image_url=image_url, message=_short_caption_for_story(text_value),
         )
 
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
