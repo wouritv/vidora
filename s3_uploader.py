@@ -1,3 +1,4 @@
+import mimetypes
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -35,9 +36,17 @@ def upload_file_to_s3(file_path, bucket_name, s3_key):
         return False
 
     try:
-        # Extra arguments for public read if needed, but the user didn't specify.
-        # Given the bucket name, it might be for a web app.
-        s3_client.upload_file(file_path, bucket_name, s3_key)
+        # Without an explicit ContentType, S3 serves the object as
+        # binary/octet-stream regardless of its extension -- boto3's
+        # upload_file() does not guess it. That's mostly invisible for
+        # things opened directly (browsers/players sniff the bytes), but
+        # Meta's Graph API fetches an image `url` server-side and validates
+        # it strictly: a photo/image post with the wrong Content-Type comes
+        # back as "Missing or invalid image file" (error code 324) even
+        # though the bytes are a perfectly valid image.
+        content_type, _ = mimetypes.guess_type(s3_key)
+        extra_args = {"ContentType": content_type} if content_type else None
+        s3_client.upload_file(file_path, bucket_name, s3_key, ExtraArgs=extra_args)
         return True
     except ClientError:
         return False
