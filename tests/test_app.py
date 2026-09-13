@@ -2177,3 +2177,176 @@ def test_persist_captioned_reel_rejects_non_video_content_type(monkeypatch):
     assert "Invalid rendered video content type" in str(exc.value.detail)
 
 
+
+
+def test_resolve_anonymous_story_platforms_filters_to_facebook_and_linkedin(monkeypatch):
+    # Anonymous stories may only be published to Facebook/LinkedIn (the
+    # user's explicit ask), unlike reels/captions' full platform list --
+    # this pins that tiktok/instagram/youtube are silently dropped rather
+    # than rejected outright, and that duplicates are deduped.
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app._resolve_anonymous_story_platforms(["facebook", "linkedin"]) == ["facebook", "linkedin"]
+    assert app._resolve_anonymous_story_platforms(["LinkedIn", "tiktok", "linkedin"]) == ["linkedin"]
+
+    with pytest.raises(app.HTTPException):
+        app._resolve_anonymous_story_platforms(["instagram", "youtube"])
+
+
+def test_resolve_anonymous_story_platforms_rejects_when_none_selected(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    with pytest.raises(app.HTTPException) as exc:
+        app._resolve_anonymous_story_platforms([])
+
+    assert exc.value.status_code == 400
+
+
+def test_publish_request_supports_image_url(monkeypatch):
+    # Reels/captions only ever publish a video; anonymous stories publish
+    # a rendered background image instead, so PublishRequest needs a field
+    # for it (consumed by _publish_facebook/_publish_linkedin's image
+    # branch and by _publish_anonymous_story_now).
+    app = _import_app_with_stubs(monkeypatch)
+
+    payload = app.PublishRequest(user_id="u1", text="hello", image_url="https://example.com/bg.png")
+    assert payload.image_url == "https://example.com/bg.png"
+
+    default_payload = app.PublishRequest(user_id="u1", text="hello")
+    assert default_payload.image_url is None
+
+
+def test_publish_facebook_uses_photo_branch_when_only_image_url_set(monkeypatch):
+    # A story publish has no video, only a rendered background image --
+    # _publish_facebook must route that straight to the photo endpoint
+    # instead of the video-then-text-fallback path used by reels/captions.
+    app = _import_app_with_stubs(monkeypatch)
+
+    calls = []
+
+    async def fake_publish_to_facebook_photo(**kwargs):
+        calls.append(kwargs)
+        return {"id": "111_222"}
+
+    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+
+    account = {"platform_user_id": "page-1"}
+    content = app.PublishRequest(user_id="u1", text="hello", image_url="https://example.com/bg.png")
+
+    result = asyncio.run(app._publish_facebook(account, "token-1", content, "hello"))
+
+    assert result == {"id": "111_222"}
+    assert calls == [{
+        "access_token": "token-1",
+        "target_id": "page-1",
+        "image_url": "https://example.com/bg.png",
+        "message": "hello",
+    }]
+
+
+def test_publish_linkedin_uses_image_branch_when_only_image_url_set(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    calls = []
+
+    async def fake_publish_to_linkedin_image(**kwargs):
+        calls.append(kwargs)
+        return {"id": "urn:li:share:999"}
+
+    monkeypatch.setattr(app, "publish_to_linkedin_image", fake_publish_to_linkedin_image)
+
+    account = {"platform_user_id": "person-1"}
+    content = app.PublishRequest(user_id="u1", text="hello", image_url="https://example.com/bg.png")
+
+    result = asyncio.run(app._publish_linkedin(account, "token-1", content, "hello"))
+
+    assert result == {"id": "urn:li:share:999"}
+    assert calls == [{
+        "access_token": "token-1",
+        "owner_urn": "urn:li:person:person-1",
+        "image_url": "https://example.com/bg.png",
+        "description": "hello",
+    }]
+
+
+def test_publish_facebook_still_falls_back_to_video_when_video_url_set(monkeypatch):
+    # Guard against the image branch swallowing the existing reel/caption
+    # behavior: when a video_url is present, the video-then-text fallback
+    # must still run (photo branch is only for image-only, no-video posts).
+    app = _import_app_with_stubs(monkeypatch)
+
+    photo_calls = []
+    video_calls = []
+
+    async def fake_publish_to_facebook_photo(**kwargs):
+        photo_calls.append(kwargs)
+        return {"id": "should-not-be-called"}
+
+    async def fake_publish_to_facebook_video(**kwargs):
+        video_calls.append(kwargs)
+        return {"id": "987654321"}
+
+    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+    monkeypatch.setattr(app, "publish_to_facebook_video", fake_publish_to_facebook_video)
+
+    account = {"platform_user_id": "page-1"}
+    content = app.PublishRequest(
+        user_id="u1", text="hello", video_url="https://example.com/v.mp4", image_url="https://example.com/bg.png",
+    )
+
+    result = asyncio.run(app._publish_facebook(account, "token-1", content, "hello"))
+
+    assert result == {"id": "987654321"}
+    assert photo_calls == []
+    assert len(video_calls) == 1
+
+
+def test_execute_scheduled_publish_job_anonymous_story_skips_media_url_requirement(monkeypatch):
+    # Reel/caption scheduled jobs require a media_url (video); an anonymous
+    # story scheduled job carries text + a rendered background image_url
+    # instead, so _execute_scheduled_publish_job must not reject it for
+    # lacking media_url.
+    app = _import_app_with_stubs(monkeypatch)
+
+    job_row = {
+        "id": "job-1",
+        "user_id": "user-1",
+        "platform": "facebook",
+        "payload": {
+            "source_type": "anonymous_story",
+            "source_id": "story-1",
+            "title": "Une histoire",
+            "description": "Le texte complet de l'histoire.",
+            "image_url": "https://example.com/bg.png",
+        },
+    }
+
+    status_calls = []
+
+    async def fake_update_publish_job_status(job_id, status, **kwargs):
+        status_calls.append((job_id, status, kwargs))
+
+    async def fake_get_social_account(user_id, platform):
+        return {"id": "acct-1", "platform_user_id": "page-1"}
+
+    published_payloads = []
+
+    async def fake_publish_post(account, content):
+        published_payloads.append(content)
+        return {"id": "111_222"}
+
+    async def fake_debit_scheduled_publish_credits(user_id, task_payload, job_id):
+        return None
+
+    monkeypatch.setattr(app, "_update_publish_job_status", fake_update_publish_job_status)
+    monkeypatch.setattr(app, "_get_social_account", fake_get_social_account)
+    monkeypatch.setattr(app, "publish_post", fake_publish_post)
+    monkeypatch.setattr(app, "_debit_scheduled_publish_credits", fake_debit_scheduled_publish_credits)
+
+    asyncio.run(app._execute_scheduled_publish_job(job_row))
+
+    assert len(published_payloads) == 1
+    assert published_payloads[0].video_url is None
+    assert published_payloads[0].image_url == "https://example.com/bg.png"
+    assert published_payloads[0].description == "Le texte complet de l'histoire."
+    assert ("job-1", "done", {"external_id": "111_222", "post_url": "https://www.facebook.com/111_222", "error_message": None}) in status_calls

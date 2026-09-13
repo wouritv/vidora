@@ -271,3 +271,51 @@ def test_download_youtube_source_delegates_to_shared_youtube_download(monkeypatc
     # sanitize_filename replaces spaces with underscores for the on-disk
     # name; the placeholder title shown in the UI should read naturally.
     assert result["title"] == "My Video Title"
+
+
+# ---------------------------------------------------------------------------
+# Publish backgrounds (get_background_preset / render_story_background_image)
+# ---------------------------------------------------------------------------
+
+def test_get_background_preset_returns_matching_preset():
+    preset = stories.get_background_preset("sunset")
+    assert preset["id"] == "sunset"
+
+
+def test_get_background_preset_falls_back_to_first_preset_when_unknown():
+    assert stories.get_background_preset("does-not-exist") == stories.BACKGROUND_PRESETS[0]
+    assert stories.get_background_preset(None) == stories.BACKGROUND_PRESETS[0]
+    assert stories.get_background_preset("") == stories.BACKGROUND_PRESETS[0]
+
+
+def test_background_presets_are_well_formed():
+    seen_ids = set()
+    for preset in stories.BACKGROUND_PRESETS:
+        assert preset["id"] not in seen_ids
+        seen_ids.add(preset["id"])
+        assert preset["name"]
+        assert isinstance(preset["colors"], list) and preset["colors"]
+        assert preset["text_color"].startswith("#")
+
+
+def test_render_story_background_image_produces_a_valid_png():
+    from PIL import Image
+    import io
+
+    preset = stories.get_background_preset("midnight")
+    data = stories.render_story_background_image("Une courte histoire anonyme.", preset, size=(200, 200))
+
+    assert isinstance(data, bytes)
+    img = Image.open(io.BytesIO(data))
+    assert img.format == "PNG"
+    assert img.size == (200, 200)
+
+
+def test_render_story_background_image_handles_long_text_without_error():
+    preset = stories.get_background_preset("forest")
+    long_text = "Ceci est une phrase repetee pour tester le retour a la ligne. " * 40
+
+    data = stories.render_story_background_image(long_text, preset, size=(300, 300))
+
+    assert isinstance(data, bytes)
+    assert len(data) > 0

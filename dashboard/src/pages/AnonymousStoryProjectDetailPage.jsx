@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, ArrowLeft, Check, Copy, Loader2, RefreshCw, Save } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, Copy, Loader2, RefreshCw, Save, Share2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { getApiUrl } from "../config";
 import { getAuthHeaders } from "../lib/apiAuth";
 import { useAuth } from "../state/AuthContext";
 import { useTranslation } from "../state/LanguageContext";
 import { buildFullText, errorMessageForCode } from "../lib/anonymousStories";
+import AnonymousStoryPublishModal from "../components/AnonymousStoryPublishModal";
 
 // Same "project detail" role as ReelProjectDetailPage / CaptionProjectDetailPage:
 // resolves the single anonymous story generated for this project, then
@@ -31,6 +32,15 @@ export default function AnonymousStoryProjectDetailPage() {
     const [introduction, setIntroduction] = useState("");
     const [story, setStory] = useState("");
     const [questions, setQuestions] = useState([""]);
+
+    const [backgrounds, setBackgrounds] = useState([]);
+    const [publishModalOpen, setPublishModalOpen] = useState(false);
+    const [publishPlatforms, setPublishPlatforms] = useState({ facebook: false, linkedin: false });
+    const [publishBackgroundId, setPublishBackgroundId] = useState("");
+    const [publishScheduling, setPublishScheduling] = useState(false);
+    const [publishScheduleDate, setPublishScheduleDate] = useState("");
+    const [publishing, setPublishing] = useState(false);
+    const [publishResult, setPublishResult] = useState(null);
 
     const applyStory = (data) => {
         const content = data.edited_content && Object.keys(data.edited_content).length ? data.edited_content : data.generated_content || {};
@@ -72,6 +82,24 @@ export default function AnonymousStoryProjectDetailPage() {
         loadStory();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [projectId, user?.id]);
+
+    useEffect(() => {
+        if (!user?.id) return;
+        (async () => {
+            try {
+                const response = await fetch(getApiUrl("/api/anonymous-stories/backgrounds"), {
+                    headers: getAuthHeaders(user.id),
+                });
+                if (!response.ok) return;
+                const data = await response.json();
+                const items = Array.isArray(data.items) ? data.items : [];
+                setBackgrounds(items);
+                if (items.length) setPublishBackgroundId((prev) => prev || items[0].id);
+            } catch {
+                // Best-effort: the publish modal simply shows no background swatches.
+            }
+        })();
+    }, [user?.id]);
 
     const fullText = buildFullText(hook, introduction, story, questions);
 
@@ -143,6 +171,70 @@ export default function AnonymousStoryProjectDetailPage() {
 
     const updateQuestion = (index, value) => {
         setQuestions((prev) => prev.map((q, i) => (i === index ? value : q)));
+    };
+
+    const handleOpenPublish = () => {
+        setPublishPlatforms({ facebook: false, linkedin: false });
+        setPublishScheduling(false);
+        setPublishScheduleDate("");
+        setPublishResult(null);
+        setPublishModalOpen(true);
+    };
+
+    const submitPublish = async () => {
+        if (!user?.id || !storyId) return;
+
+        const selectedPlatforms = Object.keys(publishPlatforms).filter((key) => publishPlatforms[key]);
+        if (selectedPlatforms.length === 0) {
+            setPublishResult({ success: false, msg: t("anonymousStories.publishSelectPlatform", "Selectionnez au moins une plateforme.") });
+            return;
+        }
+        if (publishScheduling && !publishScheduleDate) {
+            setPublishResult({ success: false, msg: t("anonymousStories.publishSelectDateTime", "Selectionnez une date et une heure.") });
+            return;
+        }
+
+        setPublishing(true);
+        setPublishResult(null);
+        try {
+            const payload = {
+                platforms: selectedPlatforms,
+                background_id: publishBackgroundId || undefined,
+            };
+            if (publishScheduling && publishScheduleDate) {
+                payload.scheduled_date = new Date(publishScheduleDate).toISOString();
+                payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            }
+
+            const response = await fetch(getApiUrl(`/api/anonymous-stories/${storyId}/publish`), {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...getAuthHeaders(user.id) },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                setPublishResult({
+                    success: false,
+                    msg: errorMessageForCode(t, data?.detail, data?.detail || t("anonymousStories.genericError", "Une erreur est survenue.")),
+                });
+                return;
+            }
+
+            setPublishResult({
+                success: true,
+                msg: publishScheduling
+                    ? t("anonymousStories.publishScheduledSuccess", "Publication programmee avec succes.")
+                    : t("anonymousStories.publishSuccess", "Publication envoyee avec succes."),
+            });
+            setTimeout(() => {
+                setPublishResult(null);
+                setPublishModalOpen(false);
+            }, 1500);
+        } catch (err) {
+            setPublishResult({ success: false, msg: err.message || t("anonymousStories.genericError", "Une erreur est survenue.") });
+        } finally {
+            setPublishing(false);
+        }
     };
 
     if (loading) {
@@ -270,6 +362,15 @@ export default function AnonymousStoryProjectDetailPage() {
                         </button>
                         <button
                             type="button"
+                            onClick={handleOpenPublish}
+                            disabled={!fullText.trim()}
+                            className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm transition hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-50"
+                        >
+                            <Share2 size={14} />
+                            {t("anonymousStories.publishButton", "Publier")}
+                        </button>
+                        <button
+                            type="button"
                             onClick={handleRegenerate}
                             disabled={regenerating}
                             className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-zinc-200 shadow-sm transition hover:bg-slate-200 dark:hover:bg-white/10 disabled:opacity-50"
@@ -280,6 +381,23 @@ export default function AnonymousStoryProjectDetailPage() {
                     </div>
                 </aside>
             </div>
+
+            <AnonymousStoryPublishModal
+                isOpen={publishModalOpen}
+                onClose={() => setPublishModalOpen(false)}
+                backgrounds={backgrounds}
+                backgroundId={publishBackgroundId}
+                onBackgroundChange={setPublishBackgroundId}
+                isScheduling={publishScheduling}
+                onSchedulingChange={setPublishScheduling}
+                scheduleDate={publishScheduleDate}
+                onScheduleDateChange={setPublishScheduleDate}
+                platforms={publishPlatforms}
+                onPlatformChange={(platform, checked) => setPublishPlatforms((prev) => ({ ...prev, [platform]: checked }))}
+                isSubmitting={publishing}
+                result={publishResult}
+                onSubmit={submitPublish}
+            />
         </div>
     );
 }
