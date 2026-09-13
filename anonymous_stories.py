@@ -400,25 +400,60 @@ _STORY_BACKGROUND_FONT_PATH = os.path.join("fonts", "NotoSerif-Bold.ttf")
 # (still fully supported by both Facebook's and LinkedIn's text-post path).
 NO_BACKGROUND_ID = "none"
 
+# Meta's native "text post with colored background" feature (the
+# text_format_preset_id field on POST /{page-id}/feed) has no public Graph
+# API reference -- these numeric ids are Meta's own internal object ids
+# for each of its background templates, sourced from community
+# reverse-engineering (e.g. https://gist.github.com/moraxh/1eeb76b651f504450ab2fa03a8040f72)
+# since there is no official, documented catalog. Meta can retire or
+# change these without notice; if Facebook stops honoring one, update (or
+# remove) it here -- app.py's publish logic never needs to change, it just
+# skips straight to the rendered-image fallback for any preset without a
+# meta_preset_id (see get_facebook_text_format_preset_id).
+_FACEBOOK_META_PRESET_IDS = {
+    "solid_black": "1881421442117417",   # Black
+    "royal": "106018623298955",          # Purple
+    "solid_red": "1903718606535395",     # Red
+    "sunset": "200521337465306",         # Fire (orange/red pattern)
+    "ocean": "1679248482160767",         # Blue with white gradient
+    "solid_blue": "143093446467972",     # Blue sky pattern
+    "forest": "931584293685988",         # Blue/green/aqua pattern
+    "berry": "249307305544279",          # Purple to red gradient
+}
+
+# Facebook's own colored-background render silently drops the background
+# past this length (confirmed ~130 chars in Facebook's composer); the
+# Graph API's behavior for exceeding it isn't documented, so this is
+# checked before ever attempting the native call rather than relied on to
+# fail cleanly server-side.
+FACEBOOK_TEXT_FORMAT_MAX_CHARS = 130
+
+def _preset(preset_id: str, name: str, colors: List[str], text_color: str) -> Dict[str, Any]:
+    return {
+        "id": preset_id, "name": name, "colors": colors, "text_color": text_color,
+        "meta_preset_id": _FACEBOOK_META_PRESET_IDS.get(preset_id),
+    }
+
+
 BACKGROUND_PRESETS: List[Dict[str, Any]] = [
-    {"id": "midnight", "name": "Midnight Blue", "colors": ["#0f2027", "#203a43", "#2c5364"], "text_color": "#ffffff"},
-    {"id": "sunset", "name": "Sunset", "colors": ["#ff512f", "#dd2476"], "text_color": "#ffffff"},
-    {"id": "forest", "name": "Forest", "colors": ["#134e5e", "#71b280"], "text_color": "#ffffff"},
-    {"id": "royal", "name": "Royal Purple", "colors": ["#41295a", "#2f0743"], "text_color": "#ffffff"},
-    {"id": "charcoal", "name": "Charcoal", "colors": ["#232526", "#414345"], "text_color": "#ffffff"},
-    {"id": "ivory", "name": "Ivory", "colors": ["#f5f5f0", "#e0e0d8"], "text_color": "#1a1a1a"},
-    {"id": "ocean", "name": "Ocean", "colors": ["#00c6ff", "#0072ff"], "text_color": "#ffffff"},
-    {"id": "rose_gold", "name": "Rose Gold", "colors": ["#f6d365", "#fda085"], "text_color": "#3a2a1a"},
-    {"id": "emerald", "name": "Emerald", "colors": ["#11998e", "#38ef7d"], "text_color": "#ffffff"},
-    {"id": "berry", "name": "Berry", "colors": ["#c31432", "#240b36"], "text_color": "#ffffff"},
-    {"id": "slate", "name": "Slate", "colors": ["#485563", "#29323c"], "text_color": "#ffffff"},
-    {"id": "peach", "name": "Peach", "colors": ["#ffecd2", "#fcb69f"], "text_color": "#3a2a1a"},
+    _preset("midnight", "Midnight Blue", ["#0f2027", "#203a43", "#2c5364"], "#ffffff"),
+    _preset("sunset", "Sunset", ["#ff512f", "#dd2476"], "#ffffff"),
+    _preset("forest", "Forest", ["#134e5e", "#71b280"], "#ffffff"),
+    _preset("royal", "Royal Purple", ["#41295a", "#2f0743"], "#ffffff"),
+    _preset("charcoal", "Charcoal", ["#232526", "#414345"], "#ffffff"),
+    _preset("ivory", "Ivory", ["#f5f5f0", "#e0e0d8"], "#1a1a1a"),
+    _preset("ocean", "Ocean", ["#00c6ff", "#0072ff"], "#ffffff"),
+    _preset("rose_gold", "Rose Gold", ["#f6d365", "#fda085"], "#3a2a1a"),
+    _preset("emerald", "Emerald", ["#11998e", "#38ef7d"], "#ffffff"),
+    _preset("berry", "Berry", ["#c31432", "#240b36"], "#ffffff"),
+    _preset("slate", "Slate", ["#485563", "#29323c"], "#ffffff"),
+    _preset("peach", "Peach", ["#ffecd2", "#fcb69f"], "#3a2a1a"),
     # Solid single-color fills (a one-item `colors` list renders flat, see
     # _render_gradient_background) alongside the gradients above.
-    {"id": "solid_black", "name": "Black", "colors": ["#000000"], "text_color": "#ffffff"},
-    {"id": "solid_white", "name": "White", "colors": ["#ffffff"], "text_color": "#1a1a1a"},
-    {"id": "solid_blue", "name": "Blue", "colors": ["#1d4ed8"], "text_color": "#ffffff"},
-    {"id": "solid_red", "name": "Red", "colors": ["#dc2626"], "text_color": "#ffffff"},
+    _preset("solid_black", "Black", ["#000000"], "#ffffff"),
+    _preset("solid_white", "White", ["#ffffff"], "#1a1a1a"),
+    _preset("solid_blue", "Blue", ["#1d4ed8"], "#ffffff"),
+    _preset("solid_red", "Red", ["#dc2626"], "#ffffff"),
 ]
 
 
@@ -430,6 +465,29 @@ def get_background_preset(background_id: Optional[str]) -> Dict[str, Any]:
             if preset["id"] == background_id:
                 return preset
     return BACKGROUND_PRESETS[0]
+
+
+def get_facebook_text_format_preset_id(background_id: Optional[str]) -> Optional[str]:
+    """Meta's text_format_preset_id for `background_id`, or None when it
+    has no native mapping (NO_BACKGROUND_ID included) or isn't a known
+    preset -- callers must treat None as "use the rendered-image fallback
+    instead", never as an error. Adding or remapping a preset here is the
+    only change needed to change what publishes natively; it never touches
+    the publish/fallback logic itself."""
+    if not background_id or background_id == NO_BACKGROUND_ID:
+        return None
+    for preset in BACKGROUND_PRESETS:
+        if preset["id"] == background_id:
+            return preset.get("meta_preset_id")
+    return None
+
+
+def facebook_text_fits_native_background(text: str) -> bool:
+    """Whether `text` is short enough for Facebook's native colored
+    background to actually render (see FACEBOOK_TEXT_FORMAT_MAX_CHARS) --
+    checked before ever attempting the native call, since the Graph API's
+    behavior for exceeding this isn't documented."""
+    return len((text or "").strip()) <= FACEBOOK_TEXT_FORMAT_MAX_CHARS
 
 
 def _hex_to_rgb(value: str) -> tuple:

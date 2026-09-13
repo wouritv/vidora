@@ -312,6 +312,39 @@ def test_no_background_id_is_not_a_real_preset():
     assert stories.NO_BACKGROUND_ID not in preset_ids
 
 
+def test_get_facebook_text_format_preset_id_returns_none_for_unmapped_or_missing():
+    assert stories.get_facebook_text_format_preset_id(None) is None
+    assert stories.get_facebook_text_format_preset_id("") is None
+    assert stories.get_facebook_text_format_preset_id(stories.NO_BACKGROUND_ID) is None
+    assert stories.get_facebook_text_format_preset_id("does-not-exist") is None
+
+
+def test_get_facebook_text_format_preset_id_returns_mapped_meta_id():
+    preset_id = stories.get_facebook_text_format_preset_id("solid_black")
+    assert preset_id == "1881421442117417"
+
+
+def test_every_preset_meta_preset_id_field_is_none_or_a_digit_string():
+    # Architecture requirement: adding/removing a Facebook mapping is a
+    # one-line edit to _FACEBOOK_META_PRESET_IDS, never a change to publish
+    # logic -- so every preset must at least carry the field (possibly
+    # None), and any mapped value must look like a real Meta object id.
+    for preset in stories.BACKGROUND_PRESETS:
+        assert "meta_preset_id" in preset
+        meta_id = preset["meta_preset_id"]
+        assert meta_id is None or (isinstance(meta_id, str) and meta_id.isdigit())
+
+
+def test_facebook_text_fits_native_background_respects_the_char_limit():
+    short_text = "x" * stories.FACEBOOK_TEXT_FORMAT_MAX_CHARS
+    long_text = "x" * (stories.FACEBOOK_TEXT_FORMAT_MAX_CHARS + 1)
+
+    assert stories.facebook_text_fits_native_background(short_text) is True
+    assert stories.facebook_text_fits_native_background(long_text) is False
+    assert stories.facebook_text_fits_native_background("") is True
+    assert stories.facebook_text_fits_native_background("   ") is True
+
+
 def test_render_story_background_image_produces_a_valid_png():
     from PIL import Image
     import io

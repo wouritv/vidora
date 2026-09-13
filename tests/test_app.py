@@ -2244,6 +2244,168 @@ def test_publish_facebook_uses_photo_branch_when_only_image_url_set(monkeypatch)
     }]
 
 
+def test_publish_facebook_uses_native_background_when_preset_and_short_text(monkeypatch):
+    # Spec: "Facebook — Publication de posts texte avec arriere-plan" --
+    # a short story with a mapped preset must publish as Meta's native
+    # colored-background text (text_format_preset_id), never as an image.
+    app = _import_app_with_stubs(monkeypatch)
+
+    native_calls = []
+    photo_calls = []
+
+    async def fake_publish_to_facebook_text_with_background(**kwargs):
+        native_calls.append(kwargs)
+        return {"id": "111_222"}
+
+    async def fake_publish_to_facebook_photo(**kwargs):
+        photo_calls.append(kwargs)
+        return {"id": "should-not-be-called"}
+
+    monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
+    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+
+    account = {"platform_user_id": "page-1"}
+    content = app.PublishRequest(
+        user_id="u1", text="Une courte histoire.", image_url="https://example.com/bg.png",
+        facebook_text_format_preset_id="1881421442117417",
+    )
+
+    result = asyncio.run(app._publish_facebook(account, "token-1", content, "Une courte histoire."))
+
+    assert result == {"id": "111_222"}
+    assert photo_calls == []
+    assert native_calls == [{
+        "access_token": "token-1", "page_id": "page-1",
+        "message": "Une courte histoire.", "meta_preset_id": "1881421442117417",
+    }]
+
+
+def test_publish_facebook_skips_native_when_text_too_long(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    native_calls = []
+
+    async def fake_publish_to_facebook_text_with_background(**kwargs):
+        native_calls.append(kwargs)
+        return {"id": "should-not-be-called"}
+
+    async def fake_publish_to_facebook_photo(**kwargs):
+        return {"id": "111_222"}
+
+    monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
+    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+
+    account = {"platform_user_id": "page-1"}
+    long_text = "Une histoire bien trop longue pour tenir dans le format natif. " * 5
+    content = app.PublishRequest(
+        user_id="u1", text=long_text, image_url="https://example.com/bg.png",
+        facebook_text_format_preset_id="1881421442117417",
+    )
+
+    result = asyncio.run(app._publish_facebook(account, "token-1", content, long_text))
+
+    assert result == {"id": "111_222"}
+    assert native_calls == []
+
+
+def test_publish_facebook_falls_back_to_image_when_meta_rejects_native(monkeypatch):
+    # Requirement 4: "Verifier au prealable ou gerer proprement le cas ou
+    # Meta refuse le text_format_preset_id" + "prevoir un fallback vers une
+    # publication image generee par Vireel".
+    app = _import_app_with_stubs(monkeypatch)
+
+    async def fake_publish_to_facebook_text_with_background(**kwargs):
+        raise app.HTTPException(status_code=502, detail="Facebook API error (400): unsupported preset")
+
+    photo_calls = []
+
+    async def fake_publish_to_facebook_photo(**kwargs):
+        photo_calls.append(kwargs)
+        return {"id": "111_222"}
+
+    monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
+    monkeypatch.setattr(app, "publish_to_facebook_photo", fake_publish_to_facebook_photo)
+
+    account = {"platform_user_id": "page-1"}
+    content = app.PublishRequest(
+        user_id="u1", text="Une courte histoire.", image_url="https://example.com/bg.png",
+        facebook_text_format_preset_id="1881421442117417",
+    )
+
+    result = asyncio.run(app._publish_facebook(account, "token-1", content, "Une courte histoire."))
+
+    assert result["id"] == "111_222"
+    assert result["native_background_failed"] is True
+    assert "unsupported preset" in result["native_background_error"]
+    assert len(photo_calls) == 1
+
+
+def test_publish_facebook_native_failure_without_fallback_image_reraises(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    async def fake_publish_to_facebook_text_with_background(**kwargs):
+        raise app.HTTPException(status_code=502, detail="boom")
+
+    monkeypatch.setattr(app, "publish_to_facebook_text_with_background", fake_publish_to_facebook_text_with_background)
+
+    account = {"platform_user_id": "page-1"}
+    content = app.PublishRequest(
+        user_id="u1", text="Une courte histoire.", image_url=None,
+        facebook_text_format_preset_id="1881421442117417",
+    )
+
+    with pytest.raises(app.HTTPException):
+        asyncio.run(app._publish_facebook(account, "token-1", content, "Une courte histoire."))
+
+
+def test_facebook_text_with_background_never_combines_media(monkeypatch):
+    # Requirement 3: "Une publication avec arriere-plan ne doit pas etre
+    # combinee avec une image ou une video."
+    app = _import_app_with_stubs(monkeypatch)
+
+    captured = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, data=None):
+            captured["url"] = url
+            captured["data"] = data
+            request = app.httpx.Request("POST", url)
+            return app.httpx.Response(200, json={"id": "111_222"}, request=request)
+
+    monkeypatch.setattr(app.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = asyncio.run(app.publish_to_facebook_text_with_background(
+        access_token="token-1", page_id="page-1", message="Une courte histoire.",
+        meta_preset_id="1881421442117417",
+    ))
+
+    assert result == {"id": "111_222"}
+    assert captured["url"] == "https://graph.facebook.com/v19.0/page-1/feed"
+    assert set(captured["data"].keys()) == {"message", "text_format_preset_id", "access_token"}
+    assert captured["data"]["text_format_preset_id"] == "1881421442117417"
+
+
+def test_get_facebook_text_format_preset_id_maps_known_presets(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app.anonymous_stories.get_facebook_text_format_preset_id("solid_black") == "1881421442117417"
+    assert app.anonymous_stories.get_facebook_text_format_preset_id(app.anonymous_stories.NO_BACKGROUND_ID) is None
+    assert app.anonymous_stories.get_facebook_text_format_preset_id(None) is None
+    # A preset with no Facebook mapping (e.g. a pastel color with no close
+    # native equivalent) must resolve to None -- callers treat that as
+    # "use the image fallback", never as an error.
+    assert app.anonymous_stories.get_facebook_text_format_preset_id("peach") is None
+
+
 def test_publish_linkedin_uses_image_branch_when_only_image_url_set(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
 
@@ -2570,8 +2732,8 @@ def test_dispatch_anonymous_story_publish_immediate_calls_publish_now_per_platfo
 
     calls = []
 
-    async def fake_publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, image_url):
-        calls.append((platform_name, image_url))
+    async def fake_publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, image_url, background_id=None):
+        calls.append((platform_name, image_url, background_id))
         return {"success": platform_name == "facebook"}
 
     monkeypatch.setattr(app, "_publish_anonymous_story_now", fake_publish_anonymous_story_now)
@@ -2581,7 +2743,10 @@ def test_dispatch_anonymous_story_publish_immediate_calls_publish_now_per_platfo
         ["facebook", "linkedin"], 5, None, "UTC", False, "https://example.com/bg.png",
     ))
 
-    assert calls == [("facebook", "https://example.com/bg.png"), ("linkedin", "https://example.com/bg.png")]
+    assert calls == [
+        ("facebook", "https://example.com/bg.png", "sunset"),
+        ("linkedin", "https://example.com/bg.png", "sunset"),
+    ]
     assert results == {"facebook": {"success": True}, "linkedin": {"success": False}}
 
 

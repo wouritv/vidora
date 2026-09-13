@@ -8639,6 +8639,7 @@ async def _resolve_story_publish_image(user_id: str, story_id: str, text: str, b
 
 async def _publish_anonymous_story_now(
     user_id: str, platform_name: str, publish_priority: int, text_value: str, image_url: Optional[str],
+    background_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     publish_job_id = await _insert_publish_job(
         user_id=user_id,
@@ -8660,6 +8661,7 @@ async def _publish_anonymous_story_now(
             text=text_value,
             caption=text_value,
             image_url=image_url,
+            facebook_text_format_preset_id=anonymous_stories.get_facebook_text_format_preset_id(background_id),
         )
         platform_result = await publish_post(account, publish_payload)
         external_id = str(platform_result.get("publish_id") or platform_result.get("id") or "n/a")
@@ -8711,7 +8713,7 @@ async def _dispatch_anonymous_story_publish(
             continue
 
         results[platform_name] = await _publish_anonymous_story_now(
-            user_id, platform_name, publish_priority, text_value, image_url,
+            user_id, platform_name, publish_priority, text_value, image_url, background_id,
         )
     return results
 
@@ -9672,12 +9674,14 @@ async def _build_scheduled_publish_payload(user_id: str, task_payload: Dict[str,
     title = str(task_payload.get("title") or "Vireel")
 
     if str(task_payload.get("source_type") or "") == "anonymous_story":
+        background_id = task_payload.get("background_id")
         image_url = await _resolve_story_publish_image(
-            user_id, str(task_payload.get("source_id") or ""), description, task_payload.get("background_id"),
+            user_id, str(task_payload.get("source_id") or ""), description, background_id,
         )
         return PublishRequest(
             user_id=user_id, title=title, description=description, text=description,
             caption=description, image_url=image_url,
+            facebook_text_format_preset_id=anonymous_stories.get_facebook_text_format_preset_id(background_id),
         )
 
     media_url = str(task_payload.get("media_url") or "").strip()
@@ -10493,6 +10497,7 @@ class PublishRequest(BaseModel):
     video_url: Optional[str] = None
     video_file: Optional[str] = None
     image_url: Optional[str] = None
+    facebook_text_format_preset_id: Optional[str] = None
     privacy_level: Optional[str] = "PUBLIC_TO_EVERYONE"
 
 
@@ -10845,6 +10850,29 @@ async def publish_to_facebook_video(access_token: str, target_id: str, video_url
         )
     await _raise_for_status_or_502(response, "Facebook")
     return {"id": response.json().get("id")}
+
+
+async def publish_to_facebook_text_with_background(
+    access_token: str, page_id: str, message: str, meta_preset_id: str,
+) -> Dict[str, Any]:
+    """Facebook's native "text post with colored background"
+    (text_format_preset_id on POST /{page-id}/feed) -- no third-party
+    service involved. Must never be combined with a photo/video/link in
+    the same call: Facebook silently drops the background style the
+    moment any media is attached, so this only ever sends message +
+    text_format_preset_id."""
+    if not page_id:
+        raise HTTPException(status_code=400, detail="Connected Facebook target id is missing")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Facebook page access token expired or missing")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"https://graph.facebook.com/v19.0/{page_id}/feed",
+            data={"message": message, "text_format_preset_id": meta_preset_id, "access_token": access_token},
+        )
+    await _raise_for_status_or_502(response, "Facebook")
+    return response.json()
 
 
 async def publish_to_facebook_photo(access_token: str, target_id: str, image_url: str, message: str):
@@ -11242,13 +11270,46 @@ async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_v
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
 
 
+async def _publish_facebook_styled_text(
+    token: str, target_id: str, text_value: str, image_url: Optional[str], meta_preset_id: Optional[str],
+) -> Dict[str, Any]:
+    """Publish a background-styled post to Facebook: try Meta's native
+    text_format_preset_id first (real colored-background text, no image
+    at all -- see publish_to_facebook_text_with_background), falling back
+    to our own rendered background image when native isn't eligible (text
+    too long for Facebook's own render) or Meta rejects it outright.
+    Pulled out of _publish_facebook to keep its cognitive complexity down."""
+    if meta_preset_id and anonymous_stories.facebook_text_fits_native_background(text_value):
+        try:
+            return await publish_to_facebook_text_with_background(
+                access_token=token, page_id=target_id, message=text_value, meta_preset_id=meta_preset_id,
+            )
+        except Exception as exc:
+            logger.warning("Facebook native text-with-background failed, falling back to image: %s", exc, exc_info=True)
+            if not image_url:
+                raise
+            result = await publish_to_facebook_photo(
+                access_token=token, target_id=target_id, image_url=image_url,
+                message=_short_caption_for_story(text_value),
+            )
+            result["native_background_failed"] = True
+            result["native_background_error"] = str(exc)
+            return result
+
+    return await publish_to_facebook_photo(
+        access_token=token, target_id=target_id, image_url=image_url, message=_short_caption_for_story(text_value),
+    )
+
+
 async def _publish_facebook(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
     _require_platform_user_id(account, "Facebook")
     image_url = getattr(content, "image_url", None)
+    meta_preset_id = getattr(content, "facebook_text_format_preset_id", None)
+    target_id = str(account.get("platform_user_id") or "")
 
     async def video_publisher():
         return await publish_to_facebook_video(
-            access_token=token, target_id=str(account.get("platform_user_id") or ""),
+            access_token=token, target_id=target_id,
             video_url=content.video_url, message=text_value,
             title=content.title or "Vireel", description=content.description or text_value,
         )
@@ -11256,17 +11317,14 @@ async def _publish_facebook(account: Dict[str, Any], token: str, content, text_v
     async def text_publisher():
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"https://graph.facebook.com/{account.get('platform_user_id')}/feed",
+                f"https://graph.facebook.com/{target_id}/feed",
                 data={"message": text_value, "access_token": token},
             )
         await _raise_for_status_or_502(response, "Facebook")
         return response.json()
 
-    if not content.video_url and image_url:
-        return await publish_to_facebook_photo(
-            access_token=token, target_id=str(account.get("platform_user_id") or ""),
-            image_url=image_url, message=_short_caption_for_story(text_value),
-        )
+    if not content.video_url and (image_url or meta_preset_id):
+        return await _publish_facebook_styled_text(token, target_id, text_value, image_url, meta_preset_id)
 
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
 
