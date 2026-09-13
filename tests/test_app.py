@@ -2671,3 +2671,50 @@ def test_publish_linkedin_image_description_is_a_short_teaser_not_full_text(monk
 
     assert captured["description"] != long_text
     assert len(captured["description"]) < len(long_text)
+
+
+def test_validate_caption_source_constraints_defaults_to_caption_limits(monkeypatch):
+    # max_duration_minutes/max_storage_gb are bound to
+    # CAPTION_MAX_DURATION_MINUTES/CAPTION_MAX_STORAGE_GB at function
+    # definition time (an ordinary Python default-argument, resolved once
+    # at import), so this asserts against the live values rather than
+    # monkeypatching the module constant after the fact.
+    app = _import_app_with_stubs(monkeypatch)
+
+    over_limit_seconds = (app.CAPTION_MAX_DURATION_MINUTES + 1) * 60
+
+    with pytest.raises(app.HTTPException) as exc:
+        app._validate_caption_source_constraints(
+            duration_seconds=over_limit_seconds, size_bytes=0.0, source_label="fichier",
+        )
+    assert f"{app.CAPTION_MAX_DURATION_MINUTES:.2f} min" in str(exc.value.detail)
+
+
+def test_validate_caption_source_constraints_accepts_an_override(monkeypatch):
+    # Regression: anonymous stories reuse this same function for their
+    # duration/size checks, but their own limit must be independent of
+    # CAPTION_MAX_DURATION_MINUTES (a deployment tightening the caption
+    # limit to 30min, meant for actual caption jobs, was silently also
+    # capping how long a story's source video could be at 30min).
+    app = _import_app_with_stubs(monkeypatch)
+
+    monkeypatch.setattr(app, "CAPTION_MAX_DURATION_MINUTES", 30.0)
+
+    # 31 minutes would violate the caption default, but not a 180min override.
+    app._validate_caption_source_constraints(
+        duration_seconds=31 * 60, size_bytes=0.0, source_label="fichier",
+        max_duration_minutes=180.0,
+    )
+
+    with pytest.raises(app.HTTPException) as exc:
+        app._validate_caption_source_constraints(
+            duration_seconds=181 * 60, size_bytes=0.0, source_label="fichier",
+            max_duration_minutes=180.0,
+        )
+    assert "180.00 min" in str(exc.value.detail)
+
+
+def test_anonymous_story_max_duration_defaults_to_180_minutes(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app.ANONYMOUS_STORY_MAX_DURATION_MINUTES == 180.0
