@@ -278,8 +278,8 @@ def test_download_youtube_source_delegates_to_shared_youtube_download(monkeypatc
 # ---------------------------------------------------------------------------
 
 def test_get_background_preset_returns_matching_preset():
-    preset = stories.get_background_preset("sunset")
-    assert preset["id"] == "sunset"
+    preset = stories.get_background_preset("1881421442117417")
+    assert preset["id"] == "1881421442117417"
 
 
 def test_get_background_preset_falls_back_to_first_preset_when_unknown():
@@ -320,35 +320,26 @@ def test_get_facebook_text_format_preset_id_returns_none_for_unmapped_or_missing
 
 
 def test_get_facebook_text_format_preset_id_returns_mapped_meta_id():
-    preset_id = stories.get_facebook_text_format_preset_id("solid_black")
+    # Every preset in the catalog IS one of Meta's own official presets now
+    # (the 77-preset reference), so `id` doubles as the exact
+    # text_format_preset_id -- this is an identity lookup, not a mapping.
+    preset_id = stories.get_facebook_text_format_preset_id("1881421442117417")
     assert preset_id == "1881421442117417"
 
 
-def test_classic_preset_uses_the_confirmed_working_meta_id():
-    # Captured from a real Publer payload that successfully published a
-    # long text post with a colored background to a live Facebook Page --
-    # unlike the other reverse-engineered ids, this one is confirmed
-    # working, so it's the default (first) preset in the list.
-    assert stories.get_facebook_text_format_preset_id("classic") == "618093735238824"
-    assert stories.BACKGROUND_PRESETS[0]["id"] == "classic"
-
-
-def test_every_preset_meta_preset_id_field_is_none_or_a_digit_string():
-    # Architecture requirement: adding/removing a Facebook mapping is a
-    # one-line edit to _FACEBOOK_META_PRESET_IDS, never a change to publish
-    # logic -- so every preset must at least carry the field (possibly
-    # None), and any mapped value must look like a real Meta object id.
+def test_every_preset_id_is_a_real_facebook_preset_id_string():
+    # The catalog is now transcribed directly from Facebook's own official
+    # 77-preset reference documentation, so every entry's id IS a real
+    # text_format_preset_id -- there is no more "unmapped" preset case.
     for preset in stories.BACKGROUND_PRESETS:
-        assert "meta_preset_id" in preset
-        meta_id = preset["meta_preset_id"]
-        assert meta_id is None or (isinstance(meta_id, str) and meta_id.isdigit())
+        assert preset["id"].isdigit()
 
 
 def test_render_story_background_image_produces_a_valid_png():
     from PIL import Image
     import io
 
-    preset = stories.get_background_preset("midnight")
+    preset = stories.get_background_preset("319468561816672")
     data = stories.render_story_background_image("Une courte histoire anonyme.", preset, size=(200, 200))
 
     assert isinstance(data, bytes)
@@ -358,7 +349,7 @@ def test_render_story_background_image_produces_a_valid_png():
 
 
 def test_render_story_background_image_handles_long_text_without_error():
-    preset = stories.get_background_preset("forest")
+    preset = stories.get_background_preset("1032899107855087")
     long_text = "Ceci est une phrase repetee pour tester le retour a la ligne. " * 40
 
     data = stories.render_story_background_image(long_text, preset, size=(300, 300))
@@ -375,7 +366,7 @@ def test_render_story_background_image_never_truncates_the_story():
     from PIL import Image
     import io
 
-    preset = stories.get_background_preset("midnight")
+    preset = stories.get_background_preset("319468561816672")
     long_text = (
         "Ceci est une phrase de test qui va se repeter plusieurs fois pour simuler une "
         "histoire tres longue avec de nombreux paragraphes et details divers sur le vecu "
@@ -394,7 +385,7 @@ def test_render_story_background_image_supports_a_solid_color():
     from PIL import Image
     import io
 
-    preset = stories.get_background_preset("solid_black")
+    preset = stories.get_background_preset("1881421442117417")
     data = stories.render_story_background_image("Texte court.", preset, size=(200, 200))
     img = Image.open(io.BytesIO(data)).convert("RGB")
 

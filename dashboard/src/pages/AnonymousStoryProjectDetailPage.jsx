@@ -5,7 +5,7 @@ import { getApiUrl } from "../config";
 import { getAuthHeaders } from "../lib/apiAuth";
 import { useAuth } from "../state/AuthContext";
 import { useTranslation } from "../state/LanguageContext";
-import { buildFullText, errorMessageForCode } from "../lib/anonymousStories";
+import { buildFullText, errorMessageForCode, describePlatformPublishError } from "../lib/anonymousStories";
 import AnonymousStoryPublishModal from "../components/AnonymousStoryPublishModal";
 
 // Same "project detail" role as ReelProjectDetailPage / CaptionProjectDetailPage:
@@ -216,6 +216,27 @@ export default function AnonymousStoryProjectDetailPage() {
                 setPublishResult({
                     success: false,
                     msg: errorMessageForCode(t, data?.detail, data?.detail || t("anonymousStories.genericError", "Une erreur est survenue.")),
+                });
+                return;
+            }
+
+            // The endpoint returns 200 even when some (or all) platforms
+            // failed to publish -- data.success/data.results carry the real
+            // per-platform outcome, so a failure must never be reported as
+            // success just because the HTTP request itself succeeded.
+            if (!data?.success) {
+                const failedPlatforms = Object.entries(data?.results || {}).filter(([, result]) => !result?.success);
+                const platformNames = failedPlatforms.map(([platform]) => platform).join(", ");
+                const firstError = failedPlatforms.length ? describePlatformPublishError(t, failedPlatforms[0][1]?.error) : "";
+                setPublishResult({
+                    success: false,
+                    msg: failedPlatforms.length
+                        ? t(
+                              "anonymousStories.publishPartialFailure",
+                              "Echec de la publication sur : {{platforms}}. {{error}}",
+                              { platforms: platformNames, error: firstError }
+                          )
+                        : t("anonymousStories.genericError", "Une erreur est survenue."),
                 });
                 return;
             }

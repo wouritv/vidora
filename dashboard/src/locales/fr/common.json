@@ -699,6 +699,8 @@
     "publishSelectDateTime": "Selectionnez une date et une heure.",
     "publishSuccess": "Publication envoyee avec succes.",
     "publishScheduledSuccess": "Publication programmee avec succes.",
+    "publishPartialFailure": "Echec de la publication sur : {{platforms}}. {{error}}",
+    "errorFacebookTextBackgroundTooLong": "Facebook a refuse cette publication avec arriere-plan car le texte est trop long.",
     "errorInvalidYoutubeUrl": "Le lien YouTube n'est pas valide ou ne peut pas etre traite.",
     "errorDownloadFailed": "La video n'a pas pu etre recuperee.",
     "errorTranscriptionFailed": "La video n'a pas pu etre transcrite.",

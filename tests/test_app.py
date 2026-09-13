@@ -2342,13 +2342,15 @@ def test_facebook_text_with_background_never_combines_media(monkeypatch):
 def test_get_facebook_text_format_preset_id_maps_known_presets(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
 
-    assert app.anonymous_stories.get_facebook_text_format_preset_id("solid_black") == "1881421442117417"
+    # Every preset in the catalog IS one of Meta's own official presets (the
+    # 77-preset reference), so this is an identity lookup, not a mapping.
+    assert app.anonymous_stories.get_facebook_text_format_preset_id("1881421442117417") == "1881421442117417"
     assert app.anonymous_stories.get_facebook_text_format_preset_id(app.anonymous_stories.NO_BACKGROUND_ID) is None
     assert app.anonymous_stories.get_facebook_text_format_preset_id(None) is None
-    # A preset with no Facebook mapping (e.g. a pastel color with no close
-    # native equivalent) must resolve to None -- callers treat that as
-    # "publish as plain text", never as "use an image instead".
-    assert app.anonymous_stories.get_facebook_text_format_preset_id("peach") is None
+    # An id that doesn't match any catalog entry must resolve to None --
+    # callers treat that as "publish as plain text", never as "use an image
+    # instead".
+    assert app.anonymous_stories.get_facebook_text_format_preset_id("does-not-exist") is None
 
 
 def test_publish_linkedin_uses_image_branch_when_only_image_url_set(monkeypatch):
