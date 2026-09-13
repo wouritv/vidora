@@ -113,7 +113,7 @@ export default function DashboardLayout() {
                     <nav className="flex-1 px-4 py-4 space-y-2 overflow-y-auto custom-scrollbar">
                         {sidebarItems.map((item) => {
                             const ItemIcon = item.icon;
-                            if (item.key === "reels" || item.key === "captions") {
+                            /*if (item.key === "reels" || item.key === "captions") {
                                 return (
                                     <div key={item.key} className="rounded-xl border border-slate-200 dark:border-white/5 bg-white/0 p-2">
                                         <div className="flex items-center gap-3 px-1 py-2 text-slate-700 dark:text-zinc-200">
@@ -137,7 +137,7 @@ export default function DashboardLayout() {
                                         </NavLink>
                                     </div>
                                 );
-                            }
+                            }*/
 
                             return (
                                 <NavLink
