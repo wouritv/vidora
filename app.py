@@ -8564,7 +8564,15 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
 # account has connected among tiktok/instagram/youtube/facebook/linkedin.
 _ANONYMOUS_STORY_PUBLISH_PLATFORMS = {"facebook", "linkedin"}
 
-_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS = 14 * 24 * 3600  # long enough for a scheduled post to still resolve the image days later
+
+# AWS SigV4 presigned URLs have a hard protocol maximum of 7 days
+# (604800s) for X-Amz-Expires -- S3 rejects the request outright with 400
+# Bad Request if it's exceeded, regardless of how soon the URL is actually
+# used. This was set to 14 days, which made every story background image
+# unusable from the moment it was generated (both Facebook's own fetch and
+# our own _download_to_file hit the same 400). 604800 is the most headroom
+# SigV4 allows for a scheduled post to still resolve the image days later.
+_STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS = 7 * 24 * 3600
 
 
 def _resolve_anonymous_story_platforms(platforms: Optional[List[str]]) -> List[str]:

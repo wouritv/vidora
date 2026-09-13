@@ -2422,3 +2422,17 @@ def test_publish_to_facebook_photo_uploads_bytes_via_multipart(monkeypatch):
     assert captured["data"] == {"caption": "hello", "access_token": "token-1"}
     assert captured["files"]["source"][1] == b"fake-png-bytes"
     assert captured["files"]["source"][2] == "image/png"
+
+
+def test_story_background_presign_expiration_within_sigv4_limit(monkeypatch):
+    # Regression: this constant was 14 days (1209600s), but AWS SigV4
+    # presigned URLs have a hard protocol maximum of 7 days (604800s) for
+    # X-Amz-Expires -- S3 rejects the request with 400 Bad Request the
+    # moment that's exceeded, regardless of how soon the URL is actually
+    # used. That made every anonymous-story background image unusable from
+    # the instant it was generated (both Facebook's own fetch of it, and
+    # our own _download_to_file re-fetching it for the multipart upload,
+    # failed with the identical 400).
+    app = _import_app_with_stubs(monkeypatch)
+
+    assert app._STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS <= 604800
