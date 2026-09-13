@@ -421,6 +421,14 @@ def _preset(preset_id: str, name: str, colors: List[str], text_color: str) -> Di
     return {"id": preset_id, "name": name, "colors": colors, "text_color": text_color}
 
 
+# Facebook's reference documentation reuses these display names across
+# several distinct presets (different ids/colors) -- named once here instead
+# of repeating the literal at each call site (SonarQube S1192).
+_NAME_LIGHT_PURPLE = "Light Purple"
+_NAME_LIGHT_GREEN = "Light Green"
+_NAME_LIGHT_BLUE = "Light Blue"
+
+
 BACKGROUND_PRESETS: List[Dict[str, Any]] = [
     # --- Featured (14) ---
     _preset("303063890126415", "Yellow, Orange & Pink Gradient", ["#FBC02D", "#EC407A"], "#FFFFFF"),
@@ -438,28 +446,28 @@ BACKGROUND_PRESETS: List[Dict[str, Any]] = [
     _preset("1289741387813798", "Solid Dark Red", ["#B71C1C"], "#FFFFFF"),
     _preset("1365883126823705", "Solid Blue", ["#1E88E5"], "#FFFFFF"),
     # --- Decorative (22) ---
-    _preset("1007203310607963", "Light Purple", ["#B39DDB", "#9575CD"], "#4944A8"),
-    _preset("6524876100975152", "Light Purple", ["#C5B3E6", "#A48CDB"], "#FFFFFF"),
+    _preset("1007203310607963", _NAME_LIGHT_PURPLE, ["#B39DDB", "#9575CD"], "#4944A8"),
+    _preset("6524876100975152", _NAME_LIGHT_PURPLE, ["#C5B3E6", "#A48CDB"], "#FFFFFF"),
     _preset("352226107216239", "Beige", ["#D7CCC8", "#BCAAA4"], "#635C56"),
     _preset("1718609505251057", "Light Rose", ["#F8BBD0", "#F48FB1"], "#FFFFFF"),
     _preset("710893630898745", "Dark Sandy Hills", ["#8D6E52", "#5D4A36"], "#FFFFFF"),
     _preset("698363068460805", "Grey", ["#BDBDBD", "#9E9E9E"], "#595959"),
     _preset("676677941094852", "Pink", ["#F06292", "#EC407A"], "#000000"),
     _preset("243340214990392", "Red", ["#EF5350", "#E53935"], "#FFE8F0"),
-    _preset("650785203544528", "Light Green", ["#A5D6A7", "#81C784"], "#086210"),
+    _preset("650785203544528", _NAME_LIGHT_GREEN, ["#A5D6A7", "#81C784"], "#086210"),
     _preset("231438476584844", "White", ["#FAFAFA", "#F0F0F0"], "#525252"),
-    _preset("1655172555010455", "Light Purple", ["#9575CD", "#7E57C2"], "#534EBF"),
-    _preset("1953054055059680", "Light Blue", ["#4FC3F7", "#29B6F6"], "#009478"),
+    _preset("1655172555010455", _NAME_LIGHT_PURPLE, ["#9575CD", "#7E57C2"], "#534EBF"),
+    _preset("1953054055059680", _NAME_LIGHT_BLUE, ["#4FC3F7", "#29B6F6"], "#009478"),
     _preset("1369831517263092", "Yellow", ["#FFF176", "#FFEE58"], "#705C04"),
     _preset("820220726468391", "Red", ["#E57373", "#EF5350"], "#FFFFFF"),
-    _preset("992723408700211", "Light Purple", ["#D1C4E9", "#B39DDB"], "#000000"),
+    _preset("992723408700211", _NAME_LIGHT_PURPLE, ["#D1C4E9", "#B39DDB"], "#000000"),
     _preset("328761036360061", "Light Purple Sparkle", ["#B39DDB", "#7970FB"], "#7970FB"),
     _preset("861250769045725", "Blurry Red Heart", ["#8B4444", "#5C3232"], "#422828"),
     _preset("847821360169458", "Orange Confetti", ["#FFB74D", "#FF9800"], "#4B3686"),
     _preset("233245916398282", "Abstract Beige Heart", ["#D7B99B", "#B08968"], "#802A2A"),
     _preset("732044718735090", "Magenta", ["#D81B60", "#AD1457"], "#FFFFFF"),
     _preset("1690448544763812", "Pink & Purple Wave", ["#EC407A", "#7E57C2"], "#44489E"),
-    _preset("1723026288124782", "Light Blue", ["#64B5F6", "#42A5F5"], "#274C82"),
+    _preset("1723026288124782", _NAME_LIGHT_BLUE, ["#64B5F6", "#42A5F5"], "#274C82"),
     # --- Gradient (8) ---
     _preset("1531491134287540", "Pink & Orange Gradient", ["#EC407A", "#FB8C00"], "#6C2666"),
     _preset("299890096121791", "Pink", ["#F06292", "#EC407A"], "#3C3887"),
@@ -485,23 +493,23 @@ BACKGROUND_PRESETS: List[Dict[str, Any]] = [
     _preset("2046306532386635", "Light Yellow", ["#FFF9C4", "#FFF59D"], "#9D8000"),
     _preset("184083004658498", "Yellow", ["#FDD835", "#FBC02D"], "#887000"),
     _preset("696971568609418", "Dark Yellow", ["#F9A825", "#F57F17"], "#625008"),
-    _preset("861160898741935", "Light Green", ["#AED581", "#9CCC65"], "#678F16"),
-    _preset("784913000073648", "Light Green", ["#C5E1A5", "#AED581"], "#5A7C16"),
+    _preset("861160898741935", _NAME_LIGHT_GREEN, ["#AED581", "#9CCC65"], "#678F16"),
+    _preset("784913000073648", _NAME_LIGHT_GREEN, ["#C5E1A5", "#AED581"], "#5A7C16"),
     _preset("680142694061655", "Olive Green", ["#808000", "#6B8E23"], "#D1FF71"),
-    _preset("1142122703434463", "Light Green", ["#81C784", "#66BB6A"], "#299633"),
+    _preset("1142122703434463", _NAME_LIGHT_GREEN, ["#81C784", "#66BB6A"], "#299633"),
     _preset("1032899107855087", "Green", ["#43A047", "#2E7D32"], "#206C25"),
     _preset("345064321202371", "Green", ["#66BB6A", "#4CAF50"], "#90E78A"),
-    _preset("137309512798730", "Light Blue", ["#4FC3F7", "#29B6F6"], "#009478"),
+    _preset("137309512798730", _NAME_LIGHT_BLUE, ["#4FC3F7", "#29B6F6"], "#009478"),
     _preset("685611216963500", "Teal", ["#00897B", "#00695C"], "#006A56"),
     _preset("991525518807930", "Green", ["#66BB6A", "#388E3C"], "#8FE2CA"),
-    _preset("1342634519948064", "Light Blue", ["#4FC3F7", "#039BE5"], "#0078B5"),
-    _preset("2032408867140667", "Light Blue", ["#81D4FA", "#4FC3F7"], "#074C72"),
+    _preset("1342634519948064", _NAME_LIGHT_BLUE, ["#4FC3F7", "#039BE5"], "#0078B5"),
+    _preset("2032408867140667", _NAME_LIGHT_BLUE, ["#81D4FA", "#4FC3F7"], "#074C72"),
     _preset("3543708749174422", "Steel Blue", ["#4682B4", "#2E5A88"], "#42BDFF"),
-    _preset("1798961300535344", "Light Purple", ["#9575CD", "#7E57C2"], "#6760E4"),
+    _preset("1798961300535344", _NAME_LIGHT_PURPLE, ["#9575CD", "#7E57C2"], "#6760E4"),
     _preset("646971224215411", "Purple", ["#7E57C2", "#5E35B1"], "#F2ECFF"),
     _preset("1502418263945319", "Dark Purple", ["#4A148C", "#311B92"], "#B7A7FF"),
     _preset("309187638478389", "Pink", ["#D81B60", "#AD1457"], "#B93EB0"),
-    _preset("284033164441257", "Light Purple", ["#9575CD", "#7E57C2"], "#60245B"),
+    _preset("284033164441257", _NAME_LIGHT_PURPLE, ["#9575CD", "#7E57C2"], "#60245B"),
     _preset("352064377250020", "Solid Dark Purple", ["#4A148C"], "#FCE3FA"),
 ]
 
