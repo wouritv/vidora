@@ -8667,6 +8667,42 @@ async def _publish_anonymous_story_now(
         }
 
 
+def _resolve_anonymous_story_schedule(payload: "AnonymousStoryPublishRequest"):
+    """Resolve and validate the requested schedule, returning
+    (scheduled_for, is_scheduled). Pulled out of
+    publish_anonymous_story_endpoint to keep its cognitive complexity
+    down."""
+    scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
+    if payload.scheduled_date and not scheduled_for:
+        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
+    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
+    return scheduled_for, is_scheduled
+
+
+async def _dispatch_anonymous_story_publish(
+    user_id: str, story_id: str, story_title: str, text_value: str, background_id: str,
+    selected_platforms: List[str], publish_priority: int, scheduled_for, timezone: Optional[str],
+    is_scheduled: bool, image_url: Optional[str],
+) -> Dict[str, Any]:
+    """Publish (or schedule) the story across every selected platform.
+    Pulled out of publish_anonymous_story_endpoint to keep its cognitive
+    complexity down."""
+    results: Dict[str, Any] = {}
+    for platform_name in selected_platforms:
+        if is_scheduled:
+            results[platform_name] = await _schedule_share_publish_job(
+                user_id, platform_name, "anonymous_story", story_id, publish_priority,
+                scheduled_for, timezone, story_title, text_value, "",
+                background_id=background_id,
+            )
+            continue
+
+        results[platform_name] = await _publish_anonymous_story_now(
+            user_id, platform_name, publish_priority, text_value, image_url,
+        )
+    return results
+
+
 @app.post("/api/anonymous-stories/{story_id}/publish", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 502: {"description": "Bad Gateway"}, 503: {"description": "Service Unavailable"}})
 async def publish_anonymous_story_endpoint(
     story_id: str, payload: AnonymousStoryPublishRequest, user_id: Annotated[str, Depends(get_user_id_header)],
@@ -8686,11 +8722,7 @@ async def publish_anonymous_story_endpoint(
 
     selected_platforms = _resolve_anonymous_story_platforms(payload.platforms)
     publish_priority = await _resolve_user_job_priority(user_id)
-    scheduled_for = _resolve_scheduled_datetime(payload.scheduled_date, payload.timezone)
-    if payload.scheduled_date and not scheduled_for:
-        raise HTTPException(status_code=400, detail=_INVALID_SCHEDULED_DATE)
-    is_scheduled = bool(scheduled_for and scheduled_for > _utcnow())
-
+    scheduled_for, is_scheduled = _resolve_anonymous_story_schedule(payload)
     background_id = payload.background_id or anonymous_stories.BACKGROUND_PRESETS[0]["id"]
 
     # For an immediate publish, render once and reuse it for every selected
@@ -8702,21 +8734,11 @@ async def publish_anonymous_story_endpoint(
     if not is_scheduled:
         image_url = await _resolve_story_publish_image(user_id, story_id, text_value, background_id)
 
-    results: Dict[str, Any] = {}
-    overall_success = True
-    for platform_name in selected_platforms:
-        if is_scheduled:
-            results[platform_name] = await _schedule_share_publish_job(
-                user_id, platform_name, "anonymous_story", story_id, publish_priority,
-                scheduled_for, payload.timezone, str(row.get("title") or "Vireel"), text_value, "",
-                background_id=background_id,
-            )
-            continue
-
-        result = await _publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, image_url)
-        results[platform_name] = result
-        if not result["success"]:
-            overall_success = False
+    results = await _dispatch_anonymous_story_publish(
+        user_id, story_id, str(row.get("title") or "Vireel"), text_value, background_id,
+        selected_platforms, publish_priority, scheduled_for, payload.timezone, is_scheduled, image_url,
+    )
+    overall_success = all(result.get("success") for result in results.values())
 
     if not is_scheduled:
         await _debit_publish_credits_after_share(user_id, story_id, results)

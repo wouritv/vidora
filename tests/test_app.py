@@ -2532,3 +2532,78 @@ def test_story_background_presign_expiration_within_sigv4_limit(monkeypatch):
     app = _import_app_with_stubs(monkeypatch)
 
     assert app._STORY_BACKGROUND_PRESIGN_EXPIRATION_SECONDS <= 604800
+
+
+def test_resolve_anonymous_story_schedule_rejects_invalid_date(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    payload = app.AnonymousStoryPublishRequest(platforms=["facebook"], scheduled_date="not-a-date")
+    with pytest.raises(app.HTTPException) as exc:
+        app._resolve_anonymous_story_schedule(payload)
+    assert exc.value.status_code == 400
+
+
+def test_resolve_anonymous_story_schedule_detects_future_date_as_scheduled(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    future = (app._utcnow() + app.timedelta(days=1)).isoformat()
+    payload = app.AnonymousStoryPublishRequest(platforms=["facebook"], scheduled_date=future)
+
+    scheduled_for, is_scheduled = app._resolve_anonymous_story_schedule(payload)
+
+    assert scheduled_for is not None
+    assert is_scheduled is True
+
+
+def test_resolve_anonymous_story_schedule_no_date_is_immediate(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    payload = app.AnonymousStoryPublishRequest(platforms=["facebook"])
+    scheduled_for, is_scheduled = app._resolve_anonymous_story_schedule(payload)
+
+    assert scheduled_for is None
+    assert is_scheduled is False
+
+
+def test_dispatch_anonymous_story_publish_immediate_calls_publish_now_per_platform(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    calls = []
+
+    async def fake_publish_anonymous_story_now(user_id, platform_name, publish_priority, text_value, image_url):
+        calls.append((platform_name, image_url))
+        return {"success": platform_name == "facebook"}
+
+    monkeypatch.setattr(app, "_publish_anonymous_story_now", fake_publish_anonymous_story_now)
+
+    results = asyncio.run(app._dispatch_anonymous_story_publish(
+        "user-1", "story-1", "Une histoire", "texte", "sunset",
+        ["facebook", "linkedin"], 5, None, "UTC", False, "https://example.com/bg.png",
+    ))
+
+    assert calls == [("facebook", "https://example.com/bg.png"), ("linkedin", "https://example.com/bg.png")]
+    assert results == {"facebook": {"success": True}, "linkedin": {"success": False}}
+
+
+def test_dispatch_anonymous_story_publish_scheduled_schedules_each_platform(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    calls = []
+
+    async def fake_schedule_share_publish_job(
+        user_id, platform_name, source_type, source_id, publish_priority,
+        scheduled_for, timezone, final_title, final_description, media_url, background_id=None,
+    ):
+        calls.append((platform_name, source_type, source_id, final_title, background_id))
+        return {"success": True, "scheduled": True}
+
+    monkeypatch.setattr(app, "_schedule_share_publish_job", fake_schedule_share_publish_job)
+
+    scheduled_for = app._utcnow() + app.timedelta(days=1)
+    results = asyncio.run(app._dispatch_anonymous_story_publish(
+        "user-1", "story-1", "Une histoire", "texte", "sunset",
+        ["facebook"], 5, scheduled_for, "UTC", True, None,
+    ))
+
+    assert calls == [("facebook", "anonymous_story", "story-1", "Une histoire", "sunset")]
+    assert results == {"facebook": {"success": True, "scheduled": True}}
