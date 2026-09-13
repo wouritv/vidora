@@ -409,6 +409,7 @@ export default function AnonymousStoryProjectDetailPage() {
                 backgrounds={backgrounds}
                 backgroundId={publishBackgroundId}
                 onBackgroundChange={setPublishBackgroundId}
+                previewText={fullText}
                 isScheduling={publishScheduling}
                 onSchedulingChange={setPublishScheduling}
                 scheduleDate={publishScheduleDate}

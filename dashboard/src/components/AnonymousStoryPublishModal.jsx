@@ -11,12 +11,32 @@ const PUBLISH_PLATFORMS = ['facebook', 'linkedin'];
 const PLATFORM_ICONS = { facebook: Facebook, linkedin: Linkedin };
 const PLATFORM_LABELS = { facebook: 'Facebook', linkedin: 'LinkedIn' };
 
+// Facebook's own text-background posts show only the first ~130 characters
+// inline behind a "See more" expander (confirmed against a live Publer
+// test -- see app.py's publish_to_facebook_text_with_background); mirroring
+// that here keeps the preview honest about what a long story will actually
+// look like once published, instead of implying the full text is visible.
+const PREVIEW_TEXT_LIMIT = 130;
+
+function buildPreviewSnippet(text, seeMoreLabel) {
+    const trimmed = (text || '').trim();
+    if (trimmed.length <= PREVIEW_TEXT_LIMIT) return trimmed;
+    return `${trimmed.slice(0, PREVIEW_TEXT_LIMIT).trimEnd()}… ${seeMoreLabel}`;
+}
+
+function backgroundGradient(preset) {
+    const colors = preset?.colors && preset.colors.length ? preset.colors : ['#0f2027'];
+    const gradientColors = colors.length > 1 ? colors : [colors[0], colors[0]];
+    return `linear-gradient(135deg, ${gradientColors.join(', ')})`;
+}
+
 export default function AnonymousStoryPublishModal({
     isOpen,
     onClose,
     backgrounds,
     backgroundId,
     onBackgroundChange,
+    previewText,
     isScheduling,
     onSchedulingChange,
     scheduleDate,
@@ -30,6 +50,10 @@ export default function AnonymousStoryPublishModal({
     const { t } = useTranslation();
 
     if (!isOpen) return null;
+
+    const selectedPreset = (backgrounds || []).find((preset) => preset.id === backgroundId);
+    const hasBackground = Boolean(selectedPreset) && selectedPreset.id !== NO_BACKGROUND_ID;
+    const previewSnippet = buildPreviewSnippet(previewText, t("anonymousStories.publishPreviewSeeMore", "Voir plus"));
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
@@ -75,7 +99,11 @@ export default function AnonymousStoryPublishModal({
                         <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-2">
                             {t("anonymousStories.publishBackgroundLabel", "Arriere-plan de la publication")}
                         </label>
-                        <div className="grid grid-cols-3 gap-2">
+                        {/* Small, fixed-size (60x60) swatches so the full 77-preset
+                            catalog fits many per row -- a bounded, internally
+                            scrolling grid keeps the whole modal from growing
+                            instead of scrolling here. */}
+                        <div className="flex flex-wrap gap-2 max-h-[220px] overflow-y-auto pr-1 custom-scrollbar">
                             {(backgrounds || []).map((preset) => {
                                 const isSelected = backgroundId === preset.id;
                                 const isNoBackground = preset.id === NO_BACKGROUND_ID;
@@ -87,33 +115,51 @@ export default function AnonymousStoryPublishModal({
                                             type="button"
                                             onClick={() => onBackgroundChange(preset.id)}
                                             title={t("anonymousStories.publishBackgroundNone", "No background (text only)")}
-                                            className={`relative h-14 rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition ${isSelected ? 'border-primary text-primary' : 'border-slate-300 dark:border-white/20 text-slate-500 dark:text-zinc-400'}`}
+                                            className={`relative w-[60px] h-[60px] shrink-0 rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-0.5 text-[9px] font-medium transition ${isSelected ? 'border-primary text-primary' : 'border-slate-300 dark:border-white/20 text-slate-500 dark:text-zinc-400'}`}
                                         >
-                                            <Ban size={16} />
+                                            <Ban size={14} />
                                             {t("anonymousStories.publishBackgroundNoneShort", "None")}
                                         </button>
                                     );
                                 }
 
-                                const colors = preset.colors && preset.colors.length ? preset.colors : ['#0f2027'];
-                                const gradientColors = colors.length > 1 ? colors : [colors[0], colors[0]];
                                 return (
                                     <button
                                         key={preset.id}
                                         type="button"
                                         onClick={() => onBackgroundChange(preset.id)}
                                         title={preset.name}
-                                        className={`relative h-14 rounded-lg border-2 transition ${isSelected ? 'border-primary' : 'border-transparent'}`}
-                                        style={{ background: `linear-gradient(135deg, ${gradientColors.join(', ')})` }}
+                                        className={`relative w-[60px] h-[60px] shrink-0 rounded-lg border-2 transition ${isSelected ? 'border-primary' : 'border-transparent'}`}
+                                        style={{ background: backgroundGradient(preset) }}
                                     >
                                         {isSelected ? (
                                             <span className="absolute inset-0 flex items-center justify-center">
-                                                <Check size={18} className="text-white drop-shadow" />
+                                                <Check size={16} className="text-white drop-shadow" />
                                             </span>
                                         ) : null}
                                     </button>
                                 );
                             })}
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-2">
+                            {t("anonymousStories.publishPreviewLabel", "Apercu de la publication")}
+                        </label>
+                        <div
+                            className={`min-h-[140px] rounded-xl p-4 flex items-center justify-center text-center border border-slate-200 dark:border-white/5 ${hasBackground ? '' : 'bg-slate-100 dark:bg-white/5'}`}
+                            style={
+                                hasBackground
+                                    ? { background: backgroundGradient(selectedPreset), color: selectedPreset.text_color || '#FFFFFF' }
+                                    : undefined
+                            }
+                        >
+                            <p
+                                className={`text-sm font-semibold whitespace-pre-wrap break-words ${hasBackground ? '' : 'text-slate-800 dark:text-white'}`}
+                            >
+                                {previewSnippet || t("anonymousStories.publishPreviewEmpty", "Le texte de l'histoire apparaitra ici.")}
+                            </p>
                         </div>
                     </div>
 
