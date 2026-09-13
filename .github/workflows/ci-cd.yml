@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environnement cible"
+        required: false
+        default: "staging"
 
 env:
   # Le connecteur Docker interne de Nexus (port 8082) n'a jamais été
