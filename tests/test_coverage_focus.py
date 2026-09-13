@@ -107,7 +107,10 @@ def _import_app_with_stubs(monkeypatch):
         "get_latest_job_record_by_project", "get_transcription_by_job_clip",
         "upsert_transcription", "update_transcription_translations_cache",
         "insert_style_edit_version", "list_style_edit_versions",
-        "delete_style_edit_versions"]:
+        "delete_style_edit_versions", "insert_anonymous_story",
+        "list_anonymous_stories", "get_anonymous_story",
+        "get_anonymous_story_by_job", "update_anonymous_story",
+        "soft_delete_anonymous_story", "get_anonymous_stories_by_project"]:
         setattr(supabase_request_mod, func_name, MagicMock(return_value=None) if "get" not in func_name else AsyncMock(return_value=None))
 
     supabase_request_mod.is_supabase_configured = MagicMock(return_value=False)
