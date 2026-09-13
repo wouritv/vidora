@@ -10875,39 +10875,6 @@ async def publish_to_facebook_text_with_background(
     return response.json()
 
 
-async def publish_to_facebook_photo(access_token: str, target_id: str, image_url: str, message: str):
-    if not target_id:
-        raise HTTPException(status_code=400, detail="Connected Facebook target id is missing")
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Facebook page access token expired or missing")
-
-    # Upload the image bytes directly (multipart `source`) instead of
-    # passing `url` and letting Facebook fetch it server-side: in
-    # production, Facebook's crawler consistently failed to fetch our S3
-    # presigned URL ("Missing or invalid image file", code 324/2069019)
-    # even though the object is a valid, correctly content-typed PNG.
-    # Uploading the bytes ourselves removes that whole class of failure --
-    # the same approach publish_to_linkedin_image already uses for LinkedIn.
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    temp_path = os.path.join(UPLOAD_DIR, f"fb_photo_{uuid.uuid4().hex}.png")
-    await _download_to_file(image_url, temp_path)
-
-    try:
-        async with aiofiles.open(temp_path, "rb") as file_handle:
-            image_bytes = await file_handle.read()
-
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"https://graph.facebook.com/v19.0/{target_id}/photos",
-                data={"caption": message, "access_token": access_token},
-                files={"source": ("background.png", image_bytes, "image/png")},
-            )
-        await _raise_for_status_or_502(response, "Facebook")
-        return response.json()
-    finally:
-        _cleanup_temp_file(temp_path)
-
-
 async def publish_to_facebook_page(page_id: str, page_access_token: str, message: str):
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
@@ -11232,14 +11199,16 @@ async def _publish_video_then_text_fallback(has_video: bool, video_publisher, te
 
 
 def _short_caption_for_story(text_value: str, max_len: int = 150) -> str:
-    """A brief teaser for the platform's own caption/commentary field when
-    publishing an anonymous-story background image. The complete story
-    already lives on the image itself (see
-    anonymous_stories.render_story_background_image, which never
-    truncates it), so repeating the full text again underneath looked
-    broken -- the same wall of text twice, once cut off on the image, once
-    in full below it. This never returns the full text, only a short
-    teaser (LinkedIn's Posts API commentary field can't be blank)."""
+    """A brief teaser for LinkedIn's commentary field when publishing an
+    anonymous-story background image (LinkedIn has no native
+    colored-background text post, so it always needs a rendered image --
+    see publish_to_linkedin_image). The complete story already lives on
+    the image itself (see anonymous_stories.render_story_background_image,
+    which never truncates it), so repeating the full text again as the
+    post's commentary looked broken -- the same wall of text twice, once
+    cut off on the image, once in full underneath. This never returns the
+    full text, only a short teaser (LinkedIn's Posts API commentary field
+    can't be blank)."""
     text = (text_value or "").strip()
     if len(text) <= max_len:
         return text
@@ -11270,40 +11239,8 @@ async def _publish_linkedin(account: Dict[str, Any], token: str, content, text_v
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
 
 
-async def _publish_facebook_styled_text(
-    token: str, target_id: str, text_value: str, image_url: Optional[str], meta_preset_id: Optional[str],
-) -> Dict[str, Any]:
-    """Publish a background-styled post to Facebook: try Meta's native
-    text_format_preset_id first (real colored-background text, no image
-    at all -- see publish_to_facebook_text_with_background), falling back
-    to our own rendered background image when native isn't eligible (text
-    too long for Facebook's own render) or Meta rejects it outright.
-    Pulled out of _publish_facebook to keep its cognitive complexity down."""
-    if meta_preset_id and anonymous_stories.facebook_text_fits_native_background(text_value):
-        try:
-            return await publish_to_facebook_text_with_background(
-                access_token=token, page_id=target_id, message=text_value, meta_preset_id=meta_preset_id,
-            )
-        except Exception as exc:
-            logger.warning("Facebook native text-with-background failed, falling back to image: %s", exc, exc_info=True)
-            if not image_url:
-                raise
-            result = await publish_to_facebook_photo(
-                access_token=token, target_id=target_id, image_url=image_url,
-                message=_short_caption_for_story(text_value),
-            )
-            result["native_background_failed"] = True
-            result["native_background_error"] = str(exc)
-            return result
-
-    return await publish_to_facebook_photo(
-        access_token=token, target_id=target_id, image_url=image_url, message=_short_caption_for_story(text_value),
-    )
-
-
 async def _publish_facebook(account: Dict[str, Any], token: str, content, text_value: str) -> Dict[str, Any]:
     _require_platform_user_id(account, "Facebook")
-    image_url = getattr(content, "image_url", None)
     meta_preset_id = getattr(content, "facebook_text_format_preset_id", None)
     target_id = str(account.get("platform_user_id") or "")
 
@@ -11323,8 +11260,18 @@ async def _publish_facebook(account: Dict[str, Any], token: str, content, text_v
         await _raise_for_status_or_502(response, "Facebook")
         return response.json()
 
-    if not content.video_url and (image_url or meta_preset_id):
-        return await _publish_facebook_styled_text(token, target_id, text_value, image_url, meta_preset_id)
+    if not content.video_url and meta_preset_id:
+        # Always native when the chosen background maps to one of Meta's
+        # own text_format_preset_id values, regardless of text length --
+        # confirmed against Publer (which uses this same mechanism):
+        # Facebook truncates the post to ~130 chars inline with a "See
+        # more" expander and keeps the colored background behind it, for
+        # text of any length. Never falls back to an image: the
+        # publication must stay text, per spec -- if Meta rejects the
+        # call outright, that failure is surfaced to the user as-is.
+        return await publish_to_facebook_text_with_background(
+            access_token=token, page_id=target_id, message=text_value, meta_preset_id=meta_preset_id,
+        )
 
     return await _publish_video_then_text_fallback(bool(content.video_url), video_publisher, text_publisher)
 

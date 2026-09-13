@@ -384,13 +384,14 @@ def download_youtube_source(url: str, output_dir: str) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Publish backgrounds -- Meta/LinkedIn's public APIs have no native "colored
-# background text post" feature for third-party apps, so the visual effect
-# the user asked for ("proposer une liste" of backgrounds, for Facebook and
-# LinkedIn alike) is produced by rendering the story text onto a preset
-# colored/gradient image ourselves, then publishing that image like any
-# other photo post (see app.py's publish_to_facebook_photo /
-# publish_to_linkedin_image).
+# Publish backgrounds. Facebook has a native "colored background text
+# post" mechanism (text_format_preset_id, see get_facebook_text_format_
+# preset_id and app.py's publish_to_facebook_text_with_background) that a
+# mapped preset always uses -- the publication stays real text there,
+# never an image. LinkedIn has no such native feature for third-party
+# apps, so its visual effect is produced by rendering the story text onto
+# a preset colored/gradient image ourselves and publishing that image
+# (see app.py's publish_to_linkedin_image).
 # ---------------------------------------------------------------------------
 
 _STORY_BACKGROUND_FONT_PATH = os.path.join("fonts", "NotoSerif-Bold.ttf")
@@ -407,9 +408,12 @@ NO_BACKGROUND_ID = "none"
 # reverse-engineering (e.g. https://gist.github.com/moraxh/1eeb76b651f504450ab2fa03a8040f72)
 # since there is no official, documented catalog. Meta can retire or
 # change these without notice; if Facebook stops honoring one, update (or
-# remove) it here -- app.py's publish logic never needs to change, it just
-# skips straight to the rendered-image fallback for any preset without a
-# meta_preset_id (see get_facebook_text_format_preset_id).
+# remove) it here -- app.py's publish logic never needs to change. A
+# preset with no mapping here simply publishes as plain text on Facebook
+# (never as an image -- the publication must always stay text, confirmed
+# against Publer, which uses this same mechanism and truncates long text
+# behind Facebook's own "See more" expander rather than ever posting an
+# image for this format).
 _FACEBOOK_META_PRESET_IDS = {
     "solid_black": "1881421442117417",   # Black
     "royal": "106018623298955",          # Purple
@@ -420,13 +424,6 @@ _FACEBOOK_META_PRESET_IDS = {
     "forest": "931584293685988",         # Blue/green/aqua pattern
     "berry": "249307305544279",          # Purple to red gradient
 }
-
-# Facebook's own colored-background render silently drops the background
-# past this length (confirmed ~130 chars in Facebook's composer); the
-# Graph API's behavior for exceeding it isn't documented, so this is
-# checked before ever attempting the native call rather than relied on to
-# fail cleanly server-side.
-FACEBOOK_TEXT_FORMAT_MAX_CHARS = 130
 
 def _preset(preset_id: str, name: str, colors: List[str], text_color: str) -> Dict[str, Any]:
     return {
@@ -470,24 +467,16 @@ def get_background_preset(background_id: Optional[str]) -> Dict[str, Any]:
 def get_facebook_text_format_preset_id(background_id: Optional[str]) -> Optional[str]:
     """Meta's text_format_preset_id for `background_id`, or None when it
     has no native mapping (NO_BACKGROUND_ID included) or isn't a known
-    preset -- callers must treat None as "use the rendered-image fallback
-    instead", never as an error. Adding or remapping a preset here is the
-    only change needed to change what publishes natively; it never touches
-    the publish/fallback logic itself."""
+    preset -- callers must treat None as "publish as plain text, never as
+    an image" (per spec: the publication must stay text in every case).
+    Adding or remapping a preset here is the only change needed to change
+    what publishes natively; it never touches the publish logic itself."""
     if not background_id or background_id == NO_BACKGROUND_ID:
         return None
     for preset in BACKGROUND_PRESETS:
         if preset["id"] == background_id:
             return preset.get("meta_preset_id")
     return None
-
-
-def facebook_text_fits_native_background(text: str) -> bool:
-    """Whether `text` is short enough for Facebook's native colored
-    background to actually render (see FACEBOOK_TEXT_FORMAT_MAX_CHARS) --
-    checked before ever attempting the native call, since the Graph API's
-    behavior for exceeding this isn't documented."""
-    return len((text or "").strip()) <= FACEBOOK_TEXT_FORMAT_MAX_CHARS
 
 
 def _hex_to_rgb(value: str) -> tuple:
