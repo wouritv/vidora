@@ -225,6 +225,12 @@ CAPTION_MAX_STORAGE_GB = float(os.environ.get("CAPTION_MAX_STORAGE", str(REEL_MA
 # Feature flag (spec section 17): lets ops disable the whole feature without
 # a deploy while the pipeline is validated, or roll it out progressively.
 ANONYMOUS_STORIES_ENABLED = os.environ.get("ANONYMOUS_STORIES_ENABLED", "true").lower() in ("1", "true", "yes")
+# Independent of CAPTION_MAX_DURATION_MINUTES: anonymous stories reuse
+# _validate_caption_source_constraints for its duration/size checks, but a
+# testimonial video is a different kind of source than a caption job's --
+# tightening CAPTION_MAX_DURATION for captions (e.g. down to 30min) must
+# not also cap how long a story's source video can be.
+ANONYMOUS_STORY_MAX_DURATION_MINUTES = float(os.environ.get("ANONYMOUS_STORY_MAX_DURATION", "180"))
 STORY_JOB_MAX_ATTEMPTS = 1  # no dedicated retry worker for this queue -- see _run_anonymous_story_job
 VIREEL_VIDEO_FORMAT = os.environ.get("VIREEL_VIDEO_FORMAT", "mp4,mov,avi")
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
@@ -3195,16 +3201,20 @@ def _validate_reel_source_constraints(duration_seconds: float, size_bytes: float
         )
 
 
-def _validate_caption_source_constraints(duration_seconds: float, size_bytes: float, source_label: str) -> None:
-    max_duration_seconds = max(0.0, CAPTION_MAX_DURATION_MINUTES) * 60.0
-    max_size_bytes = max(0.0, CAPTION_MAX_STORAGE_GB) * (1024 ** 3)
+def _validate_caption_source_constraints(
+    duration_seconds: float, size_bytes: float, source_label: str,
+    max_duration_minutes: float = CAPTION_MAX_DURATION_MINUTES,
+    max_storage_gb: float = CAPTION_MAX_STORAGE_GB,
+) -> None:
+    max_duration_seconds = max(0.0, max_duration_minutes) * 60.0
+    max_size_bytes = max(0.0, max_storage_gb) * (1024 ** 3)
 
     if max_size_bytes > 0 and size_bytes > max_size_bytes:
         raise HTTPException(
             status_code=413,
             detail=(
                 f"Source {source_label} trop volumineuse: {_bytes_to_gb(size_bytes):.2f} Go. "
-                f"Maximum autorise: {CAPTION_MAX_STORAGE_GB:.2f} Go."
+                f"Maximum autorise: {max_storage_gb:.2f} Go."
             ),
         )
 
@@ -3213,7 +3223,7 @@ def _validate_caption_source_constraints(duration_seconds: float, size_bytes: fl
             status_code=400,
             detail=(
                 f"Source {source_label} trop longue: {duration_seconds / 60.0:.2f} min. "
-                f"Maximum autorise: {CAPTION_MAX_DURATION_MINUTES:.2f} min."
+                f"Maximum autorise: {max_duration_minutes:.2f} min."
             ),
         )
 
@@ -8129,7 +8139,10 @@ async def create_anonymous_story(
     story_title = source["story_title"]
 
     local_duration = _probe_local_video_duration_seconds(input_path)
-    _validate_caption_source_constraints(duration_seconds=local_duration, size_bytes=float(size_bytes), source_label="fichier")
+    _validate_caption_source_constraints(
+        duration_seconds=local_duration, size_bytes=float(size_bytes), source_label="fichier",
+        max_duration_minutes=ANONYMOUS_STORY_MAX_DURATION_MINUTES,
+    )
 
     story_required_credits = _estimate_caption_required_credits(duration_seconds=local_duration, size_bytes=float(size_bytes))
     await _reserve_story_credits_or_cleanup(user_id, story_required_credits, input_path, output_dir)
