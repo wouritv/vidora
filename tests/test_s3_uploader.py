@@ -60,6 +60,41 @@ def test_upload_file_to_s3_returns_true_on_success(monkeypatch):
     assert s3_uploader.upload_file_to_s3("/tmp/a.mp4", "bucket", "key") is True
 
 
+def test_upload_file_to_s3_sets_content_type_from_s3_key_extension(monkeypatch):
+    # Regression: boto3's upload_file() does not guess ContentType on its
+    # own -- without it, S3 serves the object as binary/octet-stream no
+    # matter its extension. That's invisible for anything opened directly
+    # (players/browsers sniff the bytes), but Meta's Graph API fetches an
+    # image `url` server-side and validates it strictly: a photo/image post
+    # whose S3 object has the wrong Content-Type comes back as "Missing or
+    # invalid image file" (error code 324) even though the bytes are a
+    # perfectly valid PNG (see the anonymous-story background publish flow).
+    calls = []
+    monkeypatch.setattr(
+        s3_uploader,
+        "get_s3_client",
+        lambda: SimpleNamespace(upload_file=lambda *a, **k: calls.append((a, k))),
+    )
+
+    assert s3_uploader.upload_file_to_s3("/tmp/bg.png", "bucket", "stories/u1/s1/background.png") is True
+    args, kwargs = calls[0]
+    assert args == ("/tmp/bg.png", "bucket", "stories/u1/s1/background.png")
+    assert kwargs["ExtraArgs"] == {"ContentType": "image/png"}
+
+
+def test_upload_file_to_s3_omits_content_type_when_extension_unknown(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        s3_uploader,
+        "get_s3_client",
+        lambda: SimpleNamespace(upload_file=lambda *a, **k: calls.append((a, k))),
+    )
+
+    assert s3_uploader.upload_file_to_s3("/tmp/a.mp4", "bucket", "key") is True
+    _, kwargs = calls[0]
+    assert kwargs["ExtraArgs"] is None
+
+
 def test_upload_file_to_s3_returns_false_for_invalid_inputs(monkeypatch):
     monkeypatch.setattr(s3_uploader, "get_s3_client", lambda: object())
     assert s3_uploader.upload_file_to_s3("", "bucket", "key") is False
