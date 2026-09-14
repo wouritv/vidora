@@ -328,7 +328,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             value={hook}
                             onChange={(e) => setHook(e.target.value)}
                             rows={2}
-                            className="input-field w-full resize-y"
+                            className="input-field w-full resize-y dark:text-white"
                         />
                     </div>
 
@@ -340,7 +340,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             value={introduction}
                             onChange={(e) => setIntroduction(e.target.value)}
                             rows={3}
-                            className="input-field w-full resize-y"
+                            className="input-field w-full resize-y dark:text-white"
                         />
                     </div>
 
@@ -352,7 +352,7 @@ export default function AnonymousStoryProjectDetailPage() {
                             value={story}
                             onChange={(e) => setStory(e.target.value)}
                             rows={12}
-                            className="input-field w-full resize-y"
+                            className="input-field w-full resize-y dark:text-white"
                         />
                     </div>
 
@@ -367,7 +367,7 @@ export default function AnonymousStoryProjectDetailPage() {
                                     key={index}
                                     value={question}
                                     onChange={(e) => updateQuestion(index, e.target.value)}
-                                    className="input-field w-full"
+                                    className="input-field w-full dark:text-white"
                                 />
                             ))}
                         </div>
