@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from typing import Dict, Optional, List, Any, Annotated
+from typing import Dict, Optional, List, Any, Annotated, Tuple
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote, urlencode
 from urllib.request import Request as UrlRequest, urlopen, HTTPRedirectHandler, build_opener
@@ -8109,6 +8109,24 @@ async def _resolve_anonymous_story_source(
     }
 
 
+async def _resolve_anonymous_story_page_context(
+    request: Request, page_name: Optional[str], target_language: Optional[str],
+) -> Tuple[str, str]:
+    """page_name/target_language (see anonymous_stories.build_story_prompt)
+    arrive as Form fields for a multipart upload, or as JSON body fields
+    for a URL submission -- mirrors _resolve_process_endpoint_url_and_ack's
+    same content-type branching, kept as its own small helper since these
+    two fields only exist for this endpoint. request.json() is cached by
+    Starlette after _resolve_process_endpoint_url_and_ack's own read, so
+    calling it again here re-parses nothing."""
+    content_type = request.headers.get("content-type", "")
+    if _CONTENT_TYPE_JSON in content_type:
+        body = await request.json()
+        page_name = body.get("page_name")
+        target_language = body.get("target_language")
+    return str(page_name or "").strip()[:200], str(target_language or "").strip()[:100]
+
+
 @app.post("/api/anonymous-stories", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 403: {"description": "Forbidden"}, 404: {"description": "Not Found"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
 async def create_anonymous_story(
     request: Request,
@@ -8116,12 +8134,15 @@ async def create_anonymous_story(
     file: Annotated[Optional[UploadFile], File()] = None,
     url: Annotated[Optional[str], Form()] = None,
     acknowledged: Annotated[Optional[str], Form()] = None,
+    page_name: Annotated[Optional[str], Form()] = None,
+    target_language: Annotated[Optional[str], Form()] = None,
 ):
     if not ANONYMOUS_STORIES_ENABLED:
         raise HTTPException(status_code=404, detail=_ANONYMOUS_STORIES_DISABLED)
 
     url, ack_flag = await _resolve_process_endpoint_url_and_ack(request, url, acknowledged)
     _validate_process_endpoint_inputs(url, file, ack_flag)
+    page_name, target_language = await _resolve_anonymous_story_page_context(request, page_name, target_language)
 
     await _enforce_job_concurrency_limit(user_id)
     await _assert_user_has_storage_headroom(user_id)
@@ -8169,6 +8190,8 @@ async def create_anonymous_story(
             "status": anonymous_stories.AnonymousStoryStatus.QUEUED,
             "stage": anonymous_stories.AnonymousStoryStage.UPLOAD,
             "job_id": story_job_id,
+            "page_name": page_name,
+            "target_language": target_language,
         })
 
     await reel_job_manager.create_job(
@@ -8200,6 +8223,8 @@ async def create_anonymous_story(
         local_duration=local_duration,
         size_bytes=float(size_bytes),
         story_required_credits=story_required_credits,
+        page_name=page_name,
+        target_language=target_language,
     ))
 
     return {
@@ -8229,13 +8254,13 @@ async def _mark_anonymous_story_job_failed(
 async def _run_anonymous_story_job(
     job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], source_s3_key: Optional[str],
     input_path: str, output_dir: str, local_duration: float, size_bytes: float,
-    story_required_credits: float,
+    story_required_credits: float, page_name: str = "", target_language: str = "",
 ) -> None:
     try:
         await reel_job_manager.start_job(job_id)
         await _run_anonymous_story_pipeline_stages(
             job_id, user_id, story_id, project_id, source_s3_key, input_path,
-            local_duration, size_bytes, story_required_credits,
+            local_duration, size_bytes, story_required_credits, page_name, target_language,
         )
     except anonymous_stories.StoryValidationError as exc:
         await reel_job_manager.fail_job(job_id, str(exc), error_code=exc.code)
@@ -8254,6 +8279,7 @@ async def _run_anonymous_story_job(
 async def _run_anonymous_story_pipeline_stages(
     job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], source_s3_key: Optional[str],
     input_path: str, local_duration: float, size_bytes: float, story_required_credits: float,
+    page_name: str = "", target_language: str = "",
 ) -> None:
     if story_id and is_supabase_configured():
         await supabase_update_anonymous_story(story_id, user_id, {
@@ -8290,7 +8316,10 @@ async def _run_anonymous_story_pipeline_stages(
         await supabase_update_anonymous_story(story_id, user_id, {"stage": anonymous_stories.AnonymousStoryStage.GENERATION})
     await reel_job_manager.update_progress(job_id, 55, "generation")
 
-    story_content = await anonymous_stories.generate_story_from_transcript(transcript_text)
+    story_content = await anonymous_stories.generate_story_from_transcript(
+        transcript_text, page_name=page_name, source_language=str(transcript.get("language") or ""),
+        target_language=target_language,
+    )
     usage = story_content.pop("usage", {})
 
     await _finalize_anonymous_story_job(
@@ -8535,7 +8564,12 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
     })
 
     try:
-        story_content = await anonymous_stories.generate_story_from_transcript(transcript_text)
+        story_content = await anonymous_stories.generate_story_from_transcript(
+            transcript_text,
+            page_name=str(row.get("page_name") or ""),
+            source_language=str((transcript_row or {}).get("transcript_language") or ""),
+            target_language=str(row.get("target_language") or ""),
+        )
     except anonymous_stories.StoryValidationError as exc:
         await reel_job_manager.refund_reservation(job_id, user_id, regen_credits, operation_type=anonymous_stories.CREDIT_OPERATION_TYPE)
         await supabase_update_anonymous_story(story_id, user_id, {

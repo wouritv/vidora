@@ -92,6 +92,13 @@ export default function AnonymousStoryCreatePage() {
     const [projectJobLoading, setProjectJobLoading] = useState(false);
     const pollFailureCountRef = useRef(0);
 
+    // Fed to the story-generation prompt (anonymous_stories.STORY_SYSTEM_
+    // PROMPT's PAGE_NAME/TARGET_LANGUAGE) -- both optional, so the model
+    // falls back to its own defaults (a generic "this page", and the
+    // transcript's own detected language) when left blank.
+    const [pageName, setPageName] = useState("");
+    const [targetLanguage, setTargetLanguage] = useState("");
+
     const hasCredits = Number(credits || 0) > 0;
 
     // Resume an in-progress (or just-failed) project opened back from the
@@ -211,11 +218,16 @@ export default function AnonymousStoryCreatePage() {
             let body;
             if (data.type === "url") {
                 headers["Content-Type"] = "application/json";
-                body = JSON.stringify({ url: data.payload, acknowledged: !!data.acknowledged });
+                body = JSON.stringify({
+                    url: data.payload, acknowledged: !!data.acknowledged,
+                    page_name: pageName, target_language: targetLanguage,
+                });
             } else {
                 body = new FormData();
                 body.append("file", data.payload);
                 body.append("acknowledged", data.acknowledged ? "true" : "false");
+                body.append("page_name", pageName);
+                body.append("target_language", targetLanguage);
             }
 
             const response = await fetch(getApiUrl("/api/anonymous-stories"), {
@@ -282,6 +294,38 @@ export default function AnonymousStoryCreatePage() {
                             {t("common.insufficientCreditsStart", "Credits insuffisants pour initier cette operation.")}
                         </div>
                     ) : null}
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-2">
+                            <label className="block text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-zinc-500">
+                                {t("anonymousStories.pageNameLabel", "Nom de la page")}
+                            </label>
+                            <input
+                                type="text"
+                                value={pageName}
+                                onChange={(e) => setPageName(e.target.value)}
+                                placeholder={t("anonymousStories.pageNamePlaceholder", "ex: Confessions Anonymes")}
+                                className="input-field w-full dark:text-white"
+                            />
+                            <p className="text-xs text-slate-500 dark:text-zinc-400">
+                                {t("anonymousStories.pageNameHint", "La communaute a qui l'histoire s'adresse (optionnel).")}
+                            </p>
+                        </div>
+                        <div className="space-y-2">
+                            <label className="block text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-zinc-500">
+                                {t("anonymousStories.targetLanguageLabel", "Langue de l'histoire")}
+                            </label>
+                            <select
+                                value={targetLanguage}
+                                onChange={(e) => setTargetLanguage(e.target.value)}
+                                className="input-field w-full dark:text-white"
+                            >
+                                <option value="">{t("anonymousStories.targetLanguageAuto", "Meme langue que la video")}</option>
+                                <option value="fr">{t("anonymousStories.targetLanguageFrench", "Francais")}</option>
+                                <option value="en">{t("anonymousStories.targetLanguageEnglish", "Anglais")}</option>
+                            </select>
+                        </div>
+                    </div>
 
                     <MediaInput
                         onProcess={handleProcess}

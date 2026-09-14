@@ -2202,6 +2202,49 @@ def test_resolve_anonymous_story_platforms_rejects_when_none_selected(monkeypatc
     assert exc.value.status_code == 400
 
 
+def test_resolve_anonymous_story_page_context_reads_form_fields(monkeypatch):
+    # A multipart upload (file submission) carries page_name/target_language
+    # as ordinary Form fields, already resolved by FastAPI before this
+    # helper runs -- it should just pass them through untouched.
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _FakeRequest:
+        headers = {"content-type": "multipart/form-data; boundary=x"}
+
+    result = asyncio.run(app._resolve_anonymous_story_page_context(_FakeRequest(), "Confessions Anonymes", "en"))
+
+    assert result == ("Confessions Anonymes", "en")
+
+
+def test_resolve_anonymous_story_page_context_reads_json_body(monkeypatch):
+    # A YouTube URL submission sends a JSON body instead (see
+    # _resolve_process_endpoint_url_and_ack's same branching) -- this
+    # helper must read page_name/target_language from there instead of the
+    # (empty) Form params FastAPI resolved.
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _FakeRequest:
+        headers = {"content-type": "application/json"}
+
+        async def json(self):
+            return {"page_name": "Confessions Anonymes", "target_language": "en"}
+
+    result = asyncio.run(app._resolve_anonymous_story_page_context(_FakeRequest(), None, None))
+
+    assert result == ("Confessions Anonymes", "en")
+
+
+def test_resolve_anonymous_story_page_context_defaults_to_empty_strings(monkeypatch):
+    app = _import_app_with_stubs(monkeypatch)
+
+    class _FakeRequest:
+        headers = {"content-type": "multipart/form-data; boundary=x"}
+
+    result = asyncio.run(app._resolve_anonymous_story_page_context(_FakeRequest(), None, None))
+
+    assert result == ("", "")
+
+
 def test_publish_request_supports_image_url(monkeypatch):
     # Generic field shared with Instagram/TikTok's own image-post branches
     # (see _publish_instagram_platform/_publish_tiktok_platform) -- neither
