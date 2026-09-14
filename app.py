@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from typing import Dict, Optional, List, Any, Annotated
+from typing import Dict, Optional, List, Any, Annotated, Tuple
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote, urlencode
 from urllib.request import Request as UrlRequest, urlopen, HTTPRedirectHandler, build_opener
@@ -8109,6 +8109,24 @@ async def _resolve_anonymous_story_source(
     }
 
 
+async def _resolve_anonymous_story_page_context(
+    request: Request, page_name: Optional[str], target_language: Optional[str],
+) -> Tuple[str, str]:
+    """page_name/target_language (see anonymous_stories.build_story_prompt)
+    arrive as Form fields for a multipart upload, or as JSON body fields
+    for a URL submission -- mirrors _resolve_process_endpoint_url_and_ack's
+    same content-type branching, kept as its own small helper since these
+    two fields only exist for this endpoint. request.json() is cached by
+    Starlette after _resolve_process_endpoint_url_and_ack's own read, so
+    calling it again here re-parses nothing."""
+    content_type = request.headers.get("content-type", "")
+    if _CONTENT_TYPE_JSON in content_type:
+        body = await request.json()
+        page_name = body.get("page_name")
+        target_language = body.get("target_language")
+    return str(page_name or "").strip()[:200], str(target_language or "").strip()[:100]
+
+
 @app.post("/api/anonymous-stories", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 403: {"description": "Forbidden"}, 404: {"description": "Not Found"}, 413: {"description": "Payload Too Large"}, 429: {"description": "Too Many Requests"}})
 async def create_anonymous_story(
     request: Request,
@@ -8116,12 +8134,15 @@ async def create_anonymous_story(
     file: Annotated[Optional[UploadFile], File()] = None,
     url: Annotated[Optional[str], Form()] = None,
     acknowledged: Annotated[Optional[str], Form()] = None,
+    page_name: Annotated[Optional[str], Form()] = None,
+    target_language: Annotated[Optional[str], Form()] = None,
 ):
     if not ANONYMOUS_STORIES_ENABLED:
         raise HTTPException(status_code=404, detail=_ANONYMOUS_STORIES_DISABLED)
 
     url, ack_flag = await _resolve_process_endpoint_url_and_ack(request, url, acknowledged)
     _validate_process_endpoint_inputs(url, file, ack_flag)
+    page_name, target_language = await _resolve_anonymous_story_page_context(request, page_name, target_language)
 
     await _enforce_job_concurrency_limit(user_id)
     await _assert_user_has_storage_headroom(user_id)
@@ -8169,6 +8190,8 @@ async def create_anonymous_story(
             "status": anonymous_stories.AnonymousStoryStatus.QUEUED,
             "stage": anonymous_stories.AnonymousStoryStage.UPLOAD,
             "job_id": story_job_id,
+            "page_name": page_name,
+            "target_language": target_language,
         })
 
     await reel_job_manager.create_job(
@@ -8200,6 +8223,8 @@ async def create_anonymous_story(
         local_duration=local_duration,
         size_bytes=float(size_bytes),
         story_required_credits=story_required_credits,
+        page_name=page_name,
+        target_language=target_language,
     ))
 
     return {
@@ -8229,13 +8254,13 @@ async def _mark_anonymous_story_job_failed(
 async def _run_anonymous_story_job(
     job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], source_s3_key: Optional[str],
     input_path: str, output_dir: str, local_duration: float, size_bytes: float,
-    story_required_credits: float,
+    story_required_credits: float, page_name: str = "", target_language: str = "",
 ) -> None:
     try:
         await reel_job_manager.start_job(job_id)
         await _run_anonymous_story_pipeline_stages(
             job_id, user_id, story_id, project_id, source_s3_key, input_path,
-            local_duration, size_bytes, story_required_credits,
+            local_duration, size_bytes, story_required_credits, page_name, target_language,
         )
     except anonymous_stories.StoryValidationError as exc:
         await reel_job_manager.fail_job(job_id, str(exc), error_code=exc.code)
@@ -8254,6 +8279,7 @@ async def _run_anonymous_story_job(
 async def _run_anonymous_story_pipeline_stages(
     job_id: str, user_id: str, story_id: Optional[str], project_id: Optional[str], source_s3_key: Optional[str],
     input_path: str, local_duration: float, size_bytes: float, story_required_credits: float,
+    page_name: str = "", target_language: str = "",
 ) -> None:
     if story_id and is_supabase_configured():
         await supabase_update_anonymous_story(story_id, user_id, {
@@ -8290,7 +8316,10 @@ async def _run_anonymous_story_pipeline_stages(
         await supabase_update_anonymous_story(story_id, user_id, {"stage": anonymous_stories.AnonymousStoryStage.GENERATION})
     await reel_job_manager.update_progress(job_id, 55, "generation")
 
-    story_content = await anonymous_stories.generate_story_from_transcript(transcript_text)
+    story_content = await anonymous_stories.generate_story_from_transcript(
+        transcript_text, page_name=page_name, source_language=str(transcript.get("language") or ""),
+        target_language=target_language,
+    )
     usage = story_content.pop("usage", {})
 
     await _finalize_anonymous_story_job(
@@ -8382,8 +8411,8 @@ async def _finalize_anonymous_story_job(
 
     # Replace the placeholder title set at creation time (source filename or
     # YouTube video title) with one that actually reflects what was
-    # generated -- see anonymous_stories.derive_fallback_title and the
-    # "# TITRE" section of STORY_SYSTEM_PROMPT.
+    # generated. STORY_SYSTEM_PROMPT doesn't ask the model for a title, so
+    # this is always anonymous_stories.derive_fallback_title's fallback.
     generated_title = str(story_content.get("title") or "").strip()
 
     if story_id and is_supabase_configured():
@@ -8506,36 +8535,45 @@ async def delete_anonymous_story_endpoint(story_id: str, user_id: Annotated[str,
     return {"deleted": True}
 
 
-@app.post("/api/anonymous-stories/{story_id}/regenerate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 429: {"description": "Too Many Requests"}})
-async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
-    if not ANONYMOUS_STORIES_ENABLED:
-        raise HTTPException(status_code=404, detail=_ANONYMOUS_STORIES_DISABLED)
-
+async def _load_anonymous_story_for_regenerate(story_id: str, user_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Fetch the story row and its cached transcript, or raise the same
+    404/400 the endpoint always has. Pulled out of
+    regenerate_anonymous_story_endpoint to keep its cognitive complexity
+    down."""
     row = await supabase_get_anonymous_story(story_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail=_STORY_NOT_FOUND)
 
     job_id = row.get("job_id") or ""
-    transcript_row = await supabase_get_transcription_by_job_clip(job_id, 0, user_id)
-    transcript_text = str((transcript_row or {}).get("transcript_text") or "").strip()
+    transcript_row = await supabase_get_transcription_by_job_clip(job_id, 0, user_id) or {}
+    transcript_text = str(transcript_row.get("transcript_text") or "").strip()
     if not transcript_text:
         raise HTTPException(status_code=400, detail="No cached transcript available for this story; recreate it from the source video instead.")
 
-    await _enforce_job_concurrency_limit(user_id)
-    regen_credits = _estimate_caption_required_credits(
-        duration_seconds=float(row.get("source_duration_seconds") or 60.0),
-        size_bytes=0.0,
-        uses_assembly=False,
-    )
-    await _reserve_job_credits(user_id, regen_credits)
+    return row, transcript_row, transcript_text
 
+
+async def _regenerate_story_content(
+    story_id: str, user_id: str, job_id: str, row: Dict[str, Any], transcript_row: Dict[str, Any],
+    transcript_text: str, regen_credits: float,
+) -> Dict[str, Any]:
+    """Run the actual regeneration, refunding the reservation and marking
+    the story failed on a validation error (re-raised as the same 400 the
+    endpoint always returned). Pulled out of
+    regenerate_anonymous_story_endpoint to keep its cognitive complexity
+    down."""
     await supabase_update_anonymous_story(story_id, user_id, {
         "status": anonymous_stories.AnonymousStoryStatus.PROCESSING,
         "stage": anonymous_stories.AnonymousStoryStage.GENERATION,
     })
 
     try:
-        story_content = await anonymous_stories.generate_story_from_transcript(transcript_text)
+        return await anonymous_stories.generate_story_from_transcript(
+            transcript_text,
+            page_name=str(row.get("page_name") or ""),
+            source_language=str(transcript_row.get("transcript_language") or ""),
+            target_language=str(row.get("target_language") or ""),
+        )
     except anonymous_stories.StoryValidationError as exc:
         await reel_job_manager.refund_reservation(job_id, user_id, regen_credits, operation_type=anonymous_stories.CREDIT_OPERATION_TYPE)
         await supabase_update_anonymous_story(story_id, user_id, {
@@ -8545,6 +8583,15 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
         })
         raise HTTPException(status_code=400, detail=exc.code) from exc
 
+
+async def _finalize_regenerated_story(
+    story_id: str, user_id: str, project_id: Optional[str], story_content: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist the regenerated content and, when it yielded a real title,
+    rename the project to match -- same title-propagation behavior as a
+    first-time generation (_settle_anonymous_story_project). Pulled out of
+    regenerate_anonymous_story_endpoint to keep its cognitive complexity
+    down."""
     story_content.pop("usage", None)
     generated_title = str(story_content.get("title") or "").strip()
     story_updates: Dict[str, Any] = {
@@ -8559,12 +8606,35 @@ async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[
         story_updates["title"] = generated_title
     updated = await supabase_update_anonymous_story(story_id, user_id, story_updates)
 
-    project_id = row.get("project_id")
     if generated_title and project_id and is_supabase_configured():
         try:
             await supabase_update_project(project_id, user_id, {"name": generated_title})
         except Exception as e:
             logger.warning(f"Failed to update project {project_id} name after regenerate: {str(e)}")
+
+    return updated
+
+
+@app.post("/api/anonymous-stories/{story_id}/regenerate", responses={400: {"description": "Bad Request"}, 401: {"description": "Unauthorized"}, 402: {"description": "Payment Required"}, 404: {"description": "Not Found"}, 429: {"description": "Too Many Requests"}})
+async def regenerate_anonymous_story_endpoint(story_id: str, user_id: Annotated[str, Depends(get_user_id_header)]):
+    if not ANONYMOUS_STORIES_ENABLED:
+        raise HTTPException(status_code=404, detail=_ANONYMOUS_STORIES_DISABLED)
+
+    row, transcript_row, transcript_text = await _load_anonymous_story_for_regenerate(story_id, user_id)
+    job_id = row.get("job_id") or ""
+
+    await _enforce_job_concurrency_limit(user_id)
+    regen_credits = _estimate_caption_required_credits(
+        duration_seconds=float(row.get("source_duration_seconds") or 60.0),
+        size_bytes=0.0,
+        uses_assembly=False,
+    )
+    await _reserve_job_credits(user_id, regen_credits)
+
+    story_content = await _regenerate_story_content(
+        story_id, user_id, job_id, row, transcript_row, transcript_text, regen_credits,
+    )
+    updated = await _finalize_regenerated_story(story_id, user_id, row.get("project_id"), story_content)
 
     await reel_job_manager.debit_credits_for_job(
         job_id=job_id, user_id=user_id, credits=regen_credits,

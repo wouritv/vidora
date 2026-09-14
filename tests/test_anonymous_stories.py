@@ -193,6 +193,43 @@ def test_find_possible_identifying_leftovers_clean_text_returns_empty():
 
 
 # ---------------------------------------------------------------------------
+# build_story_prompt (placeholder substitution)
+# ---------------------------------------------------------------------------
+
+def test_build_story_prompt_substitutes_all_placeholders():
+    prompt = stories.build_story_prompt("Confessions Anonymes", "fr", "en")
+
+    assert "{page_name}" not in prompt
+    assert "{source_language}" not in prompt
+    assert "{target_language}" not in prompt
+    assert "Confessions Anonymes" in prompt
+    assert "SOURCE_LANGUAGE:\nfr" in prompt
+    assert "TARGET_LANGUAGE:\nen" in prompt
+
+
+def test_build_story_prompt_falls_back_when_page_name_and_source_language_are_missing():
+    prompt = stories.build_story_prompt("", "", "")
+
+    assert "{page_name}" not in prompt
+    assert "{source_language}" not in prompt
+    # target_language is deliberately left blank when unset -- the prompt's
+    # own section 18 already instructs the model to fall back to
+    # SOURCE_LANGUAGE in that case, so no synthetic default is substituted.
+    assert "TARGET_LANGUAGE:\n\n" in prompt
+
+
+def test_build_story_prompt_never_uses_str_format_so_the_json_example_survives():
+    # Regression guard: this template contains a literal JSON example (the
+    # required output schema) with real `{`/`}` characters. If this were
+    # ever rewritten to use str.format(), that example would either crash
+    # (KeyError) or come out corrupted -- pin that the schema example is
+    # present verbatim.
+    prompt = stories.build_story_prompt("Some Page", "fr", "fr")
+    assert '"is_story": true,' in prompt
+    assert '"full_text": "..."' in prompt
+
+
+# ---------------------------------------------------------------------------
 # generate_story_from_transcript (network call mocked)
 # ---------------------------------------------------------------------------
 
@@ -221,6 +258,30 @@ def test_generate_story_from_transcript_validates_and_attaches_usage(monkeypatch
     assert result["story"] == "S"
     assert result["usage"]["prompt_tokens"] == 100
     assert result["usage"]["completion_tokens"] == 50
+
+
+def test_generate_story_from_transcript_forwards_page_and_language_context(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    fake_message = types.SimpleNamespace(content='{"is_story": true, "confidence": 0.8, '
+                                                   '"has_personal_experience": true, "hook": "H", '
+                                                   '"introduction": "I", "story": "S", "questions": ["Q?"]}')
+    fake_choice = types.SimpleNamespace(message=fake_message)
+    fake_response = types.SimpleNamespace(choices=[fake_choice], usage=None)
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_response
+    monkeypatch.setattr(stories, "_get_openai_client", lambda: fake_client)
+
+    asyncio.run(stories.generate_story_from_transcript(
+        "A transcript", page_name="Confessions Anonymes", source_language="fr", target_language="en",
+    ))
+
+    sent_messages = fake_client.chat.completions.create.call_args.kwargs["messages"]
+    system_content = sent_messages[0]["content"]
+    assert "Confessions Anonymes" in system_content
+    assert "SOURCE_LANGUAGE:\nfr" in system_content
+    assert "TARGET_LANGUAGE:\nen" in system_content
 
 
 def test_generate_story_from_transcript_raises_validation_error_on_bad_json(monkeypatch):

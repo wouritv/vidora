@@ -285,7 +285,7 @@ export default function AnonymousStoryProjectDetailPage() {
     return (
         <div className="flex-1 overflow-y-auto p-8 space-y-6">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                     <textarea
                         ref={titleRef}
                         value={title}
