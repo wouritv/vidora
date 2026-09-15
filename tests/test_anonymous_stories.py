@@ -1,4 +1,5 @@
 import asyncio
+import re
 import sys
 import types
 from unittest.mock import MagicMock
@@ -197,25 +198,29 @@ def test_find_possible_identifying_leftovers_clean_text_returns_empty():
 # ---------------------------------------------------------------------------
 
 def test_build_story_prompt_substitutes_all_placeholders():
-    prompt = stories.build_story_prompt("Confessions Anonymes", "fr", "en")
+    prompt = stories.build_story_prompt("Confessions Anonymes", "fr", "en", "20:45")
 
     assert "{page_name}" not in prompt
     assert "{source_language}" not in prompt
     assert "{target_language}" not in prompt
+    assert "{current_local_time}" not in prompt
     assert "Confessions Anonymes" in prompt
     assert "SOURCE_LANGUAGE:\nfr" in prompt
     assert "TARGET_LANGUAGE:\nen" in prompt
+    assert "CURRENT_LOCAL_TIME:\n20:45" in prompt
 
 
 def test_build_story_prompt_falls_back_when_page_name_and_source_language_are_missing():
-    prompt = stories.build_story_prompt("", "", "")
+    prompt = stories.build_story_prompt("", "", "", "")
 
     assert "{page_name}" not in prompt
     assert "{source_language}" not in prompt
-    # target_language is deliberately left blank when unset -- the prompt's
-    # own section 18 already instructs the model to fall back to
-    # SOURCE_LANGUAGE in that case, so no synthetic default is substituted.
+    # target_language/current_local_time are deliberately left blank when
+    # unset -- the prompt's own sections already instruct the model to fall
+    # back to SOURCE_LANGUAGE / infer a natural greeting, so no synthetic
+    # default is substituted here.
     assert "TARGET_LANGUAGE:\n\n" in prompt
+    assert "CURRENT_LOCAL_TIME:\n\n" in prompt
 
 
 def test_build_story_prompt_never_uses_str_format_so_the_json_example_survives():
@@ -224,7 +229,7 @@ def test_build_story_prompt_never_uses_str_format_so_the_json_example_survives()
     # ever rewritten to use str.format(), that example would either crash
     # (KeyError) or come out corrupted -- pin that the schema example is
     # present verbatim.
-    prompt = stories.build_story_prompt("Some Page", "fr", "fr")
+    prompt = stories.build_story_prompt("Some Page", "fr", "fr", "10:00")
     assert '"is_story": true,' in prompt
     assert '"full_text": "..."' in prompt
 
@@ -282,6 +287,11 @@ def test_generate_story_from_transcript_forwards_page_and_language_context(monke
     assert "Confessions Anonymes" in system_content
     assert "SOURCE_LANGUAGE:\nfr" in system_content
     assert "TARGET_LANGUAGE:\nen" in system_content
+    # CURRENT_LOCAL_TIME (used by the prompt to pick "Bonjour" vs "Bonsoir")
+    # is never a caller-supplied argument -- it's computed from the server
+    # clock at call time, so this only pins that some HH:MM value made it
+    # into the prompt, not a specific one.
+    assert re.search(r"CURRENT_LOCAL_TIME:\n\d{2}:\d{2}", system_content)
 
 
 def test_generate_story_from_transcript_raises_validation_error_on_bad_json(monkeypatch):
